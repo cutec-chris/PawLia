@@ -1,0 +1,9 @@
+services:
+  pawlia:
+    build: .
+    restart: unless-stopped
+    volumes:
+      # Required: your config (copy from config.sample.json and fill in)
+      - ./config.json:/app/config.json:ro
+      # Persistent session data (memory, etc.)
+      - ./session:/app/session

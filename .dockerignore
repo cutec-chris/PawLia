@@ -1,0 +1,15 @@
+.venv
+.git
+__pycache__
+*.pyc
+tests/
+session/
+config.json
+config.ollama.json
+identity.md
+soul.md
+user.md
+tools.md
+*.md
+!bootstrap.md
+!agents.md

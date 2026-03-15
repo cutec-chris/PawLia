@@ -1,0 +1,12 @@
+config.json
+config.yaml
+*.pyc
+session/*
+pytest.ini
+.pytest_last.txt
+.aider.*
+config.groq.json
+.claude/*
+config.*.json
+.claude/*
+skills/user/*

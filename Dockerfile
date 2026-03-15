@@ -1,0 +1,28 @@
+FROM python:3.13-alpine
+
+WORKDIR /app
+
+# Install system dependencies: Node.js + npm (needed by many AgentSkills)
+RUN apk add --no-cache nodejs npm
+
+# Install Python dependencies
+COPY requirements.txt requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code and built-in assets
+COPY pawlia/ pawlia/
+COPY skills/ skills/
+
+# Ensure user skills directory exists (may be empty if gitignored)
+RUN mkdir -p skills/user
+
+# Install runtime dependencies for all pre-bundled skills
+# (e.g. npm packages declared in SKILL.md under metadata.openclaw.install)
+RUN python -m pawlia.install_skill_deps
+
+# Session data lives in a volume
+VOLUME ["/app/session"]
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "pawlia", "--mode", "server"]

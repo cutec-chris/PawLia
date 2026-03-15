@@ -1,0 +1,80 @@
+{
+  "providers": {
+    "ollama": {
+      "apiKey": "ollama",
+      "apiBase": "http://localhost:11434/v1",
+      "timeout": 120
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": "qwen3:4b",
+      "think": false
+    }
+  },
+  "interfaces": {
+    "_comment": "Remove the underscore prefix from an interface key to enable it.",
+    "_webhook": {
+      "port": 8080
+    },
+    "_telegram": {
+      "token": "YOUR_TELEGRAM_BOT_TOKEN"
+    },
+    "_matrix": {
+      "homeserver": "https://matrix.org",
+      "user_id": "@yourbot:matrix.org",
+      "password": "YOUR_PASSWORD",
+      "_alt_access_token": "OR_USE_ACCESS_TOKEN_INSTEAD_OF_PASSWORD"
+    }
+  },
+  "_transcription_comment": "Voice message transcription — pick one provider and remove the underscore prefix",
+  "_transcription_groq": {
+    "provider": "groq",
+    "groq": {
+      "api_key": "YOUR_GROQ_API_KEY",
+      "model": "whisper-large-v3-turbo",
+      "_language_optional": "de"
+    }
+  },
+  "_transcription_openai": {
+    "provider": "openai",
+    "openai": {
+      "api_key": "YOUR_OPENAI_API_KEY",
+      "model": "whisper-1",
+      "_base_url_optional": "https://api.openai.com/v1"
+    }
+  },
+  "_transcription_local": {
+    "provider": "local",
+    "local": {
+      "model": "base",
+      "device": "cpu",
+      "compute_type": "int8",
+      "_language_optional": "de",
+      "_note": "Requires FFmpeg. Install faster-whisper is handled automatically."
+    }
+  },
+  "_transcription_local_server": {
+    "_note": "Local faster-whisper-server or whisper.cpp — use the openai provider with custom base_url",
+    "provider": "openai",
+    "openai": {
+      "api_key": "none",
+      "base_url": "http://localhost:8000/v1",
+      "model": "Systran/faster-whisper-base"
+    }
+  },
+  "skill-install": {
+    "_comment": "Remote skill installation via Matrix/Telegram file upload. Disabled by default.",
+    "allow_remote": false
+  },
+  "skill-config": {
+    "_comment": "Remove the underscore prefix from a skill key to enable it.",
+    "_searxng": {
+      "url": "http://localhost:8888",
+      "timeout": 10
+    },
+    "_perplexica": {
+      "url": "http://localhost:3000"
+    }
+  }
+}

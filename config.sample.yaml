@@ -1,0 +1,84 @@
+providers:
+  ollama:
+    apiKey: ollama
+    apiBase: http://localhost:11434/v1
+    timeout: 120
+
+  # groq:
+  #   apiKey: gsk_...
+  #   apiBase: https://api.groq.com/openai/v1
+
+agents:
+  defaults:
+    model: qwen3:4b
+    provider: ollama    # which provider block to use (default: first configured)
+    think: false
+    temperature: 0.7
+
+  # chat:
+  #   model: qwen3.5:latest
+  #   think: true
+  #   temperature: 0.9
+
+  # skill_runner:     # default LLM for all skills (falls back to defaults)
+  #   model: qwen3.5:latest
+  #   think: true
+  #   temperature: 0.3
+
+  # vision:           # falls back to chat if not set
+  #   model: qwen2.5vl:latest
+
+  # skills:           # per-skill overrides (fall back to skill_runner)
+  #   searxng:
+  #     model: qwen3:4b
+  #     provider: groq
+  #   browser:
+  #     model: llama3.1:8b
+  #     provider: ollama
+
+interfaces:
+  # Remove the comment to enable an interface.
+
+  # webhook:
+  #   port: 8080
+
+  # telegram:
+  #   token: YOUR_TELEGRAM_BOT_TOKEN
+
+  # matrix:
+  #   homeserver: https://matrix.org
+  #   user_id: "@yourbot:matrix.org"
+  #   password: YOUR_PASSWORD
+  #   # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
+
+# Voice message transcription — pick one provider and uncomment it.
+# transcription:
+#   provider: groq
+#   groq:
+#     api_key: YOUR_GROQ_API_KEY
+#     model: whisper-large-v3-turbo
+#     # language: de       # optional
+
+#   # provider: openai
+#   # openai:
+#   #   api_key: YOUR_OPENAI_API_KEY
+#   #   model: whisper-1
+#   #   # base_url: https://api.openai.com/v1
+
+#   # provider: local     # requires FFmpeg; faster-whisper installed automatically
+#   # local:
+#   #   model: base
+#   #   device: cpu
+#   #   compute_type: int8
+#   #   # language: de
+
+skill-install:
+  allow_remote: false   # allow skill installation via Matrix/Telegram file upload
+
+skill-config:
+  # searxng:
+  #   url: http://localhost:8888
+  #   timeout: 10
+
+  # perplexica:
+  #   url: http://localhost:3000
