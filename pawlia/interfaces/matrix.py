@@ -1,12 +1,14 @@
 """Matrix interface for PawLia using matrix-nio.
 
-Config (in config.json under "interfaces.matrix"):
-    {
-      "homeserver": "https://matrix.org",
-      "user_id": "@pawlia:matrix.org",
-      "password": "...",          # either password ...
-      "access_token": "..."       # ... or access_token
-    }
+Config (in config.yaml under "interfaces.matrix"):
+
+    matrix:
+      homeserver: https://matrix.org
+      user_id: "@yourbot:matrix.org"
+      password: YOUR_PASSWORD
+      # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
+      # stun_servers:            # for VoIP calls (optional)
+      #   - stun:stun.l.google.com:19302
 """
 
 import asyncio
@@ -15,7 +17,18 @@ import logging
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import markdown
-from nio import AsyncClient, DownloadResponse, LoginResponse, MatrixRoom, RoomMessageImage, RoomMessageText
+from nio import (
+    AsyncClient,
+    CallCandidatesEvent,
+    CallHangupEvent,
+    CallInviteEvent,
+    DownloadResponse,
+    LoginResponse,
+    MatrixRoom,
+    RoomMessageAudio,
+    RoomMessageImage,
+    RoomMessageText,
+)
 
 if TYPE_CHECKING:
     from pawlia.app import App
@@ -27,7 +40,7 @@ _md = markdown.Markdown(extensions=["fenced_code", "nl2br", "tables"])
 
 
 def _make_content(text: str) -> dict:
-    """Build a Matrix m.notice content dict with rendered markdown."""
+    """Build a Matrix m.text content dict with rendered markdown."""
     _md.reset()
     return {
         "msgtype": "m.text",
@@ -40,7 +53,7 @@ def _make_content(text: str) -> dict:
 async def start_matrix(app: "App", cfg: Dict) -> None:
     """Connect to Matrix and start handling messages.
 
-    ``cfg`` is the ``interfaces.matrix`` section of config.json.
+    ``cfg`` is the ``interfaces.matrix`` section of config.yaml.
     """
     homeserver: str = cfg["homeserver"]
     user_id: str = cfg["user_id"]
@@ -75,6 +88,10 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             agents[room_id] = app.make_agent(f"mx_{room_id}")
         return agents[room_id]
 
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     async def _download_image(mxc_url: str, mimetype: str = "image/png") -> Optional[str]:
         """Download a Matrix mxc:// image and return a base64 data-URI."""
         resp = await client.download(mxc_url)
@@ -85,41 +102,62 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         mime = resp.content_type or mimetype
         return f"data:{mime};base64,{b64}"
 
+    async def _send_text(room_id: str, text: str) -> None:
+        try:
+            await client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content=_make_content(text),
+            )
+        except Exception as e:
+            logger.error("Matrix: send_text failed for %s: %s", room_id, e)
+
     async def _handle(room: MatrixRoom, text: str, images: Optional[List[str]] = None) -> None:
         """Shared handler for text and image messages."""
         logger.info("Matrix: message in %s: %s (images=%d)", room.room_id, text[:80], len(images or []))
 
         try:
-            # Show typing indicator while processing
             await client.room_typing(room.room_id, typing_state=True)
 
             agent = get_agent(room.room_id)
 
             async def _on_interim(interim_text: str) -> None:
-                await client.room_send(
-                    room_id=room.room_id,
-                    message_type="m.room.message",
-                    content=_make_content(interim_text),
-                )
+                await _send_text(room.room_id, interim_text)
 
             agent.on_interim = _on_interim
             response = await agent.run(text, images=images or None)
 
-            # Stop typing indicator before sending the response
             await client.room_typing(room.room_id, typing_state=False)
-
-            await client.room_send(
-                room_id=room.room_id,
-                message_type="m.room.message",
-                content=_make_content(response),
-            )
+            await _send_text(room.room_id, response)
         except Exception as e:
             logger.error("Matrix: error processing message: %s", e)
-            # Best-effort: stop typing on error
             try:
                 await client.room_typing(room.room_id, typing_state=False)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Call manager (VoIP)
+    # ------------------------------------------------------------------
+
+    from pawlia.interfaces.matrix_call import CallManager
+
+    call_manager = CallManager(
+        client=client,
+        app=app,
+        cfg=cfg,
+        send_text_cb=_send_text,
+    )
+
+    if not call_manager.available():
+        logger.warning(
+            "Matrix: aiortc not installed — VoIP calls will be rejected. "
+            "Install with: pip install aiortc"
+        )
+
+    # ------------------------------------------------------------------
+    # Event handlers
+    # ------------------------------------------------------------------
 
     async def on_message(room: MatrixRoom, event: RoomMessageText) -> None:
         if event.sender == client.user_id:
@@ -142,30 +180,80 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         caption = event.body if event.body and event.body != "image" else ""
         await _handle(room, caption, images=[data_uri])
 
-    # Register scheduler callback for proactive notifications
+    async def on_audio(room: MatrixRoom, event: RoomMessageAudio) -> None:
+        """Handle voice messages: download → transcribe → agent."""
+        if event.sender == client.user_id:
+            return
+        mxc_url = event.url
+        if not mxc_url:
+            return
+
+        logger.info("Matrix: voice message in %s from %s", room.room_id, event.sender)
+
+        resp = await client.download(mxc_url)
+        if not isinstance(resp, DownloadResponse):
+            logger.warning("Matrix: failed to download audio: %s", resp)
+            return
+
+        mime = resp.content_type or "audio/ogg"
+
+        from pawlia.transcription import transcribe
+
+        text = await transcribe(resp.body, app.config, mime=mime)
+        if not text:
+            logger.warning("Matrix: transcription returned nothing for %s", event.body)
+            await _send_text(room.room_id, "*(Sprachnachricht konnte nicht transkribiert werden)*")
+            return
+
+        logger.info("Matrix: voice message transcribed: %s", text[:120])
+        # Route through normal handler (prefixed so agent knows it was voice)
+        await _handle(room, f"[Sprachnachricht]: {text}")
+
+    async def on_call_invite(room: MatrixRoom, event: CallInviteEvent) -> None:
+        if event.sender == client.user_id:
+            return
+        logger.info("Matrix: call invite in %s from %s", room.room_id, event.sender)
+        await call_manager.on_invite(room, event)
+
+    async def on_call_candidates(room: MatrixRoom, event: CallCandidatesEvent) -> None:
+        if event.sender == client.user_id:
+            return
+        await call_manager.on_candidates(room, event)
+
+    async def on_call_hangup(room: MatrixRoom, event: CallHangupEvent) -> None:
+        if event.sender == client.user_id:
+            return
+        await call_manager.on_hangup(room, event)
+
+    # ------------------------------------------------------------------
+    # Scheduler callback for proactive notifications
+    # ------------------------------------------------------------------
+
     async def _matrix_notify(session_id: str, message: str) -> None:
         # session_id for matrix agents is "mx_{room_id}"
         if not session_id.startswith("mx_"):
             return
         room_id = session_id[3:]
-        try:
-            await client.room_send(
-                room_id=room_id,
-                message_type="m.room.message",
-                content=_make_content(message),
-            )
-        except Exception as e:
-            logger.error("Matrix notify failed for %s: %s", room_id, e)
+        await _send_text(room_id, message)
 
     app.scheduler.register(_matrix_notify)
 
+    # ------------------------------------------------------------------
+    # Sync loop
+    # ------------------------------------------------------------------
+
     logger.info("Matrix: starting sync loop...")
     try:
-        # Initial sync to skip old messages (no callback yet)
+        # Initial sync to skip old messages (no callbacks yet)
         await client.sync(timeout=0, full_state=True)
-        # Now register callback and start continuous sync
+
         client.add_event_callback(on_message, RoomMessageText)
         client.add_event_callback(on_image, RoomMessageImage)
+        client.add_event_callback(on_audio, RoomMessageAudio)
+        client.add_event_callback(on_call_invite, CallInviteEvent)
+        client.add_event_callback(on_call_candidates, CallCandidatesEvent)
+        client.add_event_callback(on_call_hangup, CallHangupEvent)
+
         await client.sync_forever(timeout=30000)
     except asyncio.CancelledError:
         logger.info("Matrix: sync cancelled")

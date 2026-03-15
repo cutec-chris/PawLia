@@ -50,27 +50,47 @@ interfaces:
   #   user_id: "@yourbot:matrix.org"
   #   password: YOUR_PASSWORD
   #   # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
+  #   # stun_servers:                        # STUN for VoIP (optional)
+  #   #   - stun:stun.l.google.com:19302
 
-# Voice message transcription — pick one provider and uncomment it.
+# Speech-to-text transcription (voice messages + VoIP calls).
+# Any OpenAI-compatible /audio/transcriptions endpoint works.
 # transcription:
 #   provider: groq
 #   groq:
 #     api_key: YOUR_GROQ_API_KEY
 #     model: whisper-large-v3-turbo
-#     # language: de       # optional
+#     # base_url: https://api.groq.com/openai/v1   # set automatically; override if needed
+#     # language: de
 
+#   # Other API (OpenAI or self-hosted):
 #   # provider: openai
 #   # openai:
-#   #   api_key: YOUR_OPENAI_API_KEY
+#   #   api_key: YOUR_API_KEY
+#   #   base_url: https://api.openai.com/v1
 #   #   model: whisper-1
-#   #   # base_url: https://api.openai.com/v1
+#   #   # language: de
 
-#   # provider: local     # requires FFmpeg; faster-whisper installed automatically
+#   # Local (no API key; requires FFmpeg + faster-whisper):
+#   # provider: local
 #   # local:
-#   #   model: base
-#   #   device: cpu
+#   #   model: base        # tiny | base | small | medium | large-v3
+#   #   device: cpu        # cpu | cuda
 #   #   compute_type: int8
 #   #   # language: de
+
+# Text-to-speech for VoIP call responses — pick one provider and uncomment it.
+# tts:
+#   provider: edge
+#   edge:
+#     voice: de-DE-KatjaNeural     # any edge-tts voice; run `edge-tts --list-voices`
+#
+#   # provider: piper              # local TTS, no internet needed
+#   # piper:
+#   #   executable: piper          # path to piper binary
+#   #   model: /path/to/de_DE-thorsten-medium.onnx
+#   #   config: /path/to/de_DE-thorsten-medium.onnx.json
+#   #   sample_rate: 22050
 
 skill-install:
   allow_remote: false   # allow skill installation via Matrix/Telegram file upload

@@ -1,0 +1,12 @@
+# VoIP / telephony extras — install in addition to requirements.txt
+#
+#   pip install -r requirements.txt -r requirements-voip.txt
+
+# WebRTC stack
+aiortc>=1.9
+av>=12.0
+numpy>=1.24
+
+# TTS providers
+edge-tts>=6.1        # Microsoft Edge TTS (needs internet, no local model)
+piper-tts>=1.2       # local neural TTS (models downloaded separately)
