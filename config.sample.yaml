@@ -2,8 +2,8 @@ providers:
   ollama:
     apiKey: ollama
     apiBase: http://localhost:11434/v1
-    timeout: 120
-
+    timeout: 240
+    keepAlive: -1
   # groq:
   #   apiKey: gsk_...
   #   apiBase: https://api.groq.com/openai/v1

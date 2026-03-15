@@ -120,11 +120,16 @@ class LLMFactory:
         api_base = provider_cfg.get("apiBase", "").rstrip("/")
         api_key = provider_cfg.get("apiKey", "none")
         timeout = provider_cfg.get("timeout", 120)
+        keep_alive = provider_cfg.get("keepAlive")
 
         logger.debug(
             "Creating LLM for '%s': model=%s provider=%s base=%s temp=%s",
             agent_type, model, provider_name, api_base, temperature,
         )
+
+        model_kwargs: Dict[str, Any] = {}
+        if keep_alive is not None:
+            model_kwargs["keep_alive"] = keep_alive
 
         return ChatOpenAI(
             model=model,
@@ -132,6 +137,7 @@ class LLMFactory:
             base_url=api_base,
             api_key=api_key,
             timeout=timeout,
+            model_kwargs=model_kwargs or None,
         )
 
     # ------------------------------------------------------------------
