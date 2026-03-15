@@ -3,7 +3,7 @@ services:
     build: .
     restart: unless-stopped
     volumes:
-      # Required: your config (copy from config.sample.json and fill in)
-      - ./config.json:/app/config.json:ro
+      # Required: your config (copy from config.sample.yaml and fill in)
+      - ./config.yaml:/app/config.yaml:ro
       # Persistent session data (memory, etc.)
       - ./session:/app/session
