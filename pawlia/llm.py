@@ -129,7 +129,8 @@ class LLMFactory:
 
         model_kwargs: Dict[str, Any] = {}
         if keep_alive is not None:
-            model_kwargs["keep_alive"] = keep_alive
+            # Ollama-specific; must go via extra_body — not a standard OpenAI kwarg
+            model_kwargs["extra_body"] = {"keep_alive": keep_alive}
 
         return ChatOpenAI(
             model=model,
