@@ -299,6 +299,8 @@ class CallSession:
             await self._send_hangup_event()
 
     async def _add_candidate(self, c: Dict) -> None:
+        if not c.get("candidate"):
+            return  # end-of-candidates signal
         try:
             candidate = RTCIceCandidate(
                 sdpMid=c.get("sdpMid"),
