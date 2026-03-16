@@ -6,6 +6,7 @@ Supports two modes:
   (fallback when the model ignores tool calling)
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -53,6 +54,7 @@ class SkillRunnerAgent(BaseAgent):
         self.context = context or {}
         self.context["cwd"] = skill.skill_path
         self.command_fallback = command_fallback
+        self.on_step = None  # Optional[Callable[[str], Awaitable[None]]]
 
         # Bind real tools to the LLM
         tool_specs = tool_registry.get_specs()
@@ -192,6 +194,9 @@ class SkillRunnerAgent(BaseAgent):
         tc_id = tc.get("id", "")
 
         self.logger.debug("Tool call: %s(%s)", tc_name, json.dumps(tc_args)[:200])
+        if self.on_step:
+            step = tc_args.get("command", "") if tc_name == "bash" else tc_name
+            asyncio.ensure_future(self.on_step(step[:120]))
         result = self.tool_registry.execute(tc_name, tc_args, self.context)
         result_str = str(result)
         self.logger.debug("Tool result: %s", result_str[:200])

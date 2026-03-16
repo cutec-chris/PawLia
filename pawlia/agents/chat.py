@@ -10,8 +10,9 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
-# Callback type for interim messages (e.g. "Let me look that up...")
+# Callback types
 InterimCallback = Callable[[str], Awaitable[None]]
+SkillStartCallback = Callable[[str, str], Awaitable[None]]  # (skill_name, query)
 
 from langchain_core.messages import (
     AIMessage,
@@ -68,6 +69,8 @@ class ChatAgent(BaseAgent):
         self.memory = memory
         self.session = session
         self.on_interim = on_interim
+        self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
+        self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self._idle_task: Optional[asyncio.Task] = None
 
         # Bind skill specs as "tools" so the LLM can call them
@@ -150,7 +153,13 @@ class ChatAgent(BaseAgent):
 
             if skill:
                 self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
+                if self.on_skill_start:
+                    try:
+                        await self.on_skill_start(skill_name, query)
+                    except Exception as exc:
+                        self.logger.debug("on_skill_start error: %s", exc)
                 runner = self.skill_runner_factory(skill)
+                runner.on_step = self.on_skill_step
                 result = await runner.run(query=query)
             else:
                 self.logger.warning("Unknown skill called: %s", skill_name)

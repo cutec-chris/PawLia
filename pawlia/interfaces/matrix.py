@@ -50,6 +50,24 @@ def _make_content(text: str) -> dict:
     }
 
 
+def _make_status(skill_name: str, query: str) -> dict:
+    """Initial skill-status message."""
+    short_q = (query[:60] + "…") if len(query) > 60 else query
+    body = f"⚙️ {skill_name}: {short_q}"
+    html = f"⚙️ <b>{skill_name}</b>: {short_q}"
+    return {"msgtype": "m.text", "body": body, "format": "org.matrix.custom.html", "formatted_body": html}
+
+
+def _make_status_edit(event_id: str, skill_name: str, step: int, step_text: str) -> dict:
+    """Edit an existing status message to show current step."""
+    short = (step_text[:100] + "…") if len(step_text) > 100 else step_text
+    body = f"⚙️ {skill_name} · Schritt {step}: {short}"
+    html = f"⚙️ <b>{skill_name}</b> · Schritt {step}: <code>{short}</code>"
+    new_content = {"msgtype": "m.text", "body": body, "format": "org.matrix.custom.html", "formatted_body": html}
+    return {**new_content, "body": f"* {body}", "m.new_content": new_content,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": event_id}}
+
+
 async def start_matrix(app: "App", cfg: Dict) -> None:
     """Connect to Matrix and start handling messages.
 
@@ -121,10 +139,37 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
             agent = get_agent(room.room_id)
 
+            status_event_id: Optional[str] = None
+            step_count = 0
+            current_skill: Optional[str] = None
+
             async def _on_interim(interim_text: str) -> None:
                 await _send_text(room.room_id, interim_text)
 
+            async def _on_skill_start(skill_name: str, query: str) -> None:
+                nonlocal status_event_id, step_count, current_skill
+                current_skill = skill_name
+                step_count = 0
+                resp = await client.room_send(
+                    room_id=room.room_id,
+                    message_type="m.room.message",
+                    content=_make_status(skill_name, query),
+                )
+                status_event_id = getattr(resp, "event_id", None)
+
+            async def _on_skill_step(step_text: str) -> None:
+                nonlocal step_count
+                step_count += 1
+                if status_event_id and current_skill:
+                    await client.room_send(
+                        room_id=room.room_id,
+                        message_type="m.room.message",
+                        content=_make_status_edit(status_event_id, current_skill, step_count, step_text),
+                    )
+
             agent.on_interim = _on_interim
+            agent.on_skill_start = _on_skill_start
+            agent.on_skill_step = _on_skill_step
             response = await agent.run(text, images=images or None)
 
             await client.room_typing(room.room_id, typing_state=False)
