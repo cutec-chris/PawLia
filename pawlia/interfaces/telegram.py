@@ -85,7 +85,35 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                 # Re-send typing after interim message so it stays visible
                 await update.message.chat.send_action(ChatAction.TYPING)
 
+            status_message = None
+            step_count = 0
+            current_skill: Optional[str] = None
+
+            async def _on_skill_start(skill_name: str, query: str) -> None:
+                nonlocal status_message, step_count, current_skill
+                current_skill = skill_name
+                step_count = 0
+                short_q = (query[:60] + "…") if len(query) > 60 else query
+                status_message = await update.message.reply_text(
+                    f"⚙️ <b>{skill_name}</b>: {short_q}", parse_mode=ParseMode.HTML,
+                )
+
+            async def _on_skill_step(step_text: str) -> None:
+                nonlocal step_count
+                step_count += 1
+                if status_message and current_skill:
+                    short = (step_text[:100] + "…") if len(step_text) > 100 else step_text
+                    try:
+                        await status_message.edit_text(
+                            f"⚙️ <b>{current_skill}</b> · Schritt {step_count}: <code>{short}</code>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception:
+                        pass  # edit kann fehlschlagen wenn Text identisch ist
+
             agent.on_interim = _on_interim
+            agent.on_skill_start = _on_skill_start
+            agent.on_skill_step = _on_skill_step
             response = await agent.run(text, images=images or None)
             await update.message.reply_text(
                 _md_to_tg_html(response), parse_mode=ParseMode.HTML,
