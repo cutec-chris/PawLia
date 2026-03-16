@@ -27,7 +27,7 @@ try:
         RTCPeerConnection,
         RTCSessionDescription,
     )
-    from aiortc.exceptions import MediaStreamError  # type: ignore
+    from aiortc.mediastreams import MediaStreamError  # type: ignore
     _AIORTC_AVAILABLE = True
 except Exception as _e:
     import logging as _logging
