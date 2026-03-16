@@ -50,22 +50,38 @@ def _make_content(text: str) -> dict:
     }
 
 
+_GREY = "#888888"
+
+
+def _grey(html: str) -> str:
+    return f'<font color="{_GREY}"><small>{html}</small></font>'
+
+
+def _status_edit(event_id: str, new_body: str, new_html: str) -> dict:
+    new_content = {"msgtype": "m.text", "body": new_body,
+                   "format": "org.matrix.custom.html", "formatted_body": new_html}
+    return {**new_content, "body": f"* {new_body}", "m.new_content": new_content,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": event_id}}
+
+
 def _make_status(skill_name: str, query: str) -> dict:
-    """Initial skill-status message."""
     short_q = (query[:60] + "…") if len(query) > 60 else query
-    body = f"⚙️ {skill_name}: {short_q}"
-    html = f"⚙️ <b>{skill_name}</b>: {short_q}"
+    body = f"⚙ {skill_name}: {short_q}"
+    html = _grey(f"⚙ <b>{skill_name}</b>: {short_q}")
     return {"msgtype": "m.text", "body": body, "format": "org.matrix.custom.html", "formatted_body": html}
 
 
-def _make_status_edit(event_id: str, skill_name: str, step: int, step_text: str) -> dict:
-    """Edit an existing status message to show current step."""
+def _make_status_step(event_id: str, skill_name: str, step: int, step_text: str) -> dict:
     short = (step_text[:100] + "…") if len(step_text) > 100 else step_text
-    body = f"⚙️ {skill_name} · Schritt {step}: {short}"
-    html = f"⚙️ <b>{skill_name}</b> · Schritt {step}: <code>{short}</code>"
-    new_content = {"msgtype": "m.text", "body": body, "format": "org.matrix.custom.html", "formatted_body": html}
-    return {**new_content, "body": f"* {body}", "m.new_content": new_content,
-            "m.relates_to": {"rel_type": "m.replace", "event_id": event_id}}
+    body = f"⚙ {skill_name} [{step}]: {short}"
+    html = _grey(f"⚙ <b>{skill_name}</b> [{step}]: <code>{short}</code>")
+    return _status_edit(event_id, body, html)
+
+
+def _make_status_done(event_id: str, skill_name: str, steps: int) -> dict:
+    body = f"✓ {skill_name} ({steps} Schritte)"
+    html = _grey(f"✓ <b>{skill_name}</b> ({steps} Schritte)")
+    return _status_edit(event_id, body, html)
 
 
 async def start_matrix(app: "App", cfg: Dict) -> None:
@@ -164,12 +180,21 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     await client.room_send(
                         room_id=room.room_id,
                         message_type="m.room.message",
-                        content=_make_status_edit(status_event_id, current_skill, step_count, step_text),
+                        content=_make_status_step(status_event_id, current_skill, step_count, step_text),
+                    )
+
+            async def _on_skill_done(skill_name: str) -> None:
+                if status_event_id:
+                    await client.room_send(
+                        room_id=room.room_id,
+                        message_type="m.room.message",
+                        content=_make_status_done(status_event_id, skill_name, step_count),
                     )
 
             agent.on_interim = _on_interim
             agent.on_skill_start = _on_skill_start
             agent.on_skill_step = _on_skill_step
+            agent.on_skill_done = _on_skill_done
             response = await agent.run(text, images=images or None)
 
             await client.room_typing(room.room_id, typing_state=False)

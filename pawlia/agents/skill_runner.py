@@ -165,6 +165,8 @@ class SkillRunnerAgent(BaseAgent):
                 )
                 if should_nudge and nudge_count < 2:
                     nudge_count += 1
+                    if self.on_step:
+                        asyncio.ensure_future(self.on_step(f"↩ nudge {nudge_count}"))
                     messages.append(response)
                     messages.append(HumanMessage(
                         content="Do NOT generate code, HTML, or explanations. "

@@ -71,6 +71,7 @@ class ChatAgent(BaseAgent):
         self.on_interim = on_interim
         self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
+        self.on_skill_done: Optional[InterimCallback] = None      # (skill_name)
         self._idle_task: Optional[asyncio.Task] = None
 
         # Bind skill specs as "tools" so the LLM can call them
@@ -161,6 +162,11 @@ class ChatAgent(BaseAgent):
                 runner = self.skill_runner_factory(skill)
                 runner.on_step = self.on_skill_step
                 result = await runner.run(query=query)
+                if self.on_skill_done:
+                    try:
+                        await self.on_skill_done(skill_name)
+                    except Exception as exc:
+                        self.logger.debug("on_skill_done error: %s", exc)
             else:
                 self.logger.warning("Unknown skill called: %s", skill_name)
                 result = f"Error: Unknown skill '{skill_name}'."

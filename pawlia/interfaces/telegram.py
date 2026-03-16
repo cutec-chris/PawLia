@@ -95,7 +95,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                 step_count = 0
                 short_q = (query[:60] + "…") if len(query) > 60 else query
                 status_message = await update.message.reply_text(
-                    f"⚙️ <b>{skill_name}</b>: {short_q}", parse_mode=ParseMode.HTML,
+                    f"<i>⚙ {skill_name}: {short_q}</i>", parse_mode=ParseMode.HTML,
                 )
 
             async def _on_skill_step(step_text: str) -> None:
@@ -105,15 +105,26 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                     short = (step_text[:100] + "…") if len(step_text) > 100 else step_text
                     try:
                         await status_message.edit_text(
-                            f"⚙️ <b>{current_skill}</b> · Schritt {step_count}: <code>{short}</code>",
+                            f"<i>⚙ {current_skill} [{step_count}]: <code>{short}</code></i>",
                             parse_mode=ParseMode.HTML,
                         )
                     except Exception:
-                        pass  # edit kann fehlschlagen wenn Text identisch ist
+                        pass
+
+            async def _on_skill_done(skill_name: str) -> None:
+                if status_message:
+                    try:
+                        await status_message.edit_text(
+                            f"<i>✓ {skill_name} ({step_count} Schritte)</i>",
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception:
+                        pass
 
             agent.on_interim = _on_interim
             agent.on_skill_start = _on_skill_start
             agent.on_skill_step = _on_skill_step
+            agent.on_skill_done = _on_skill_done
             response = await agent.run(text, images=images or None)
             await update.message.reply_text(
                 _md_to_tg_html(response), parse_mode=ParseMode.HTML,
