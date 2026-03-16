@@ -127,10 +127,10 @@ class LLMFactory:
             agent_type, model, provider_name, api_base, temperature,
         )
 
-        model_kwargs: Dict[str, Any] = {}
+        extra_body: Dict[str, Any] = {}
         if keep_alive is not None:
-            # Ollama-specific; must go via extra_body — not a standard OpenAI kwarg
-            model_kwargs["extra_body"] = {"keep_alive": keep_alive}
+            # Ollama-specific keep_alive; passed via extra_body so openai SDK forwards it as-is
+            extra_body["keep_alive"] = keep_alive
 
         return ChatOpenAI(
             model=model,
@@ -138,7 +138,7 @@ class LLMFactory:
             base_url=api_base,
             api_key=api_key,
             timeout=timeout,
-            model_kwargs=model_kwargs or None,
+            **({"extra_body": extra_body} if extra_body else {}),
         )
 
     # ------------------------------------------------------------------
