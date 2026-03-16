@@ -31,7 +31,7 @@ try:
     _AIORTC_AVAILABLE = True
 except Exception as _e:
     import logging as _logging
-    _logging.getLogger("pawlia.interfaces.matrix_call").debug("aiortc unavailable: %s", _e)
+    _logging.getLogger("pawlia.interfaces.matrix_call").warning("aiortc import failed: %s", _e)
     _AIORTC_AVAILABLE = False
 
 if TYPE_CHECKING:
