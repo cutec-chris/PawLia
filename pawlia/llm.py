@@ -133,7 +133,7 @@ class LLMFactory:
             ollama_base = api_base.removesuffix("/v1") or "http://localhost:11434"
             kwargs: Dict[str, Any] = dict(model=model, temperature=temperature, base_url=ollama_base)
             if keep_alive is not None:
-                kwargs["keep_alive"] = str(keep_alive)
+                kwargs["keep_alive"] = keep_alive
             return ChatOllama(**kwargs)
 
         return ChatOpenAI(

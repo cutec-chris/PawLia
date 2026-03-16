@@ -19,9 +19,8 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
-import numpy as np
-
 try:
+    import numpy as np
     from aiortc import (  # type: ignore
         MediaStreamTrack,
         RTCIceCandidate,
@@ -30,7 +29,9 @@ try:
     )
     from aiortc.exceptions import MediaStreamError  # type: ignore
     _AIORTC_AVAILABLE = True
-except ImportError:
+except Exception as _e:
+    import logging as _logging
+    _logging.getLogger("pawlia.interfaces.matrix_call").debug("aiortc unavailable: %s", _e)
     _AIORTC_AVAILABLE = False
 
 if TYPE_CHECKING:
