@@ -1,5 +1,6 @@
 aiohttp>=3.9
 langchain-core>=0.3
+langchain-ollama>=0.3
 langchain-openai>=0.3
 markdown>=3.5
 matrix-nio>=0.25

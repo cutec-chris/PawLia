@@ -50,6 +50,7 @@ LLMs with identical resolved config (model + provider + temperature) are reused.
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
 
@@ -127,10 +128,13 @@ class LLMFactory:
             agent_type, model, provider_name, api_base, temperature,
         )
 
-        extra_body: Dict[str, Any] = {}
-        if keep_alive is not None:
-            # Ollama-specific keep_alive; passed via extra_body so openai SDK forwards it as-is
-            extra_body["keep_alive"] = keep_alive
+        if self._is_ollama(provider_name, api_base):
+            # ChatOllama supports keep_alive natively; base_url without /v1
+            ollama_base = api_base.removesuffix("/v1") or "http://localhost:11434"
+            kwargs: Dict[str, Any] = dict(model=model, temperature=temperature, base_url=ollama_base)
+            if keep_alive is not None:
+                kwargs["keep_alive"] = str(keep_alive)
+            return ChatOllama(**kwargs)
 
         return ChatOpenAI(
             model=model,
@@ -138,7 +142,6 @@ class LLMFactory:
             base_url=api_base,
             api_key=api_key,
             timeout=timeout,
-            **({"extra_body": extra_body} if extra_body else {}),
         )
 
     # ------------------------------------------------------------------
@@ -153,6 +156,9 @@ class LLMFactory:
             provider_cfg.get("apiBase", ""),
             merged.get("temperature", 0.7),
         )
+
+    def _is_ollama(self, provider_name: str, api_base: str) -> bool:
+        return "ollama" in provider_name.lower() or ":11434" in api_base
 
     def _get_provider(self, name: str) -> Dict[str, Any]:
         if name and name in self.providers:
