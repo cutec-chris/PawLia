@@ -1,0 +1,13 @@
+FROM thalia:latest
+
+# VoIP system dependencies:
+#   espeak-ng — required by piper-tts for phonemisation
+#   ffmpeg    — audio decoding/encoding for aiortc/av
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        espeak-ng \
+        ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# VoIP / telephony extras (aiortc, av, numpy, edge-tts, piper-tts)
+COPY requirements-voip.txt requirements-voip.txt
+RUN pip install --no-cache-dir -r requirements-voip.txt
