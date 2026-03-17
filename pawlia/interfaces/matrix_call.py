@@ -166,14 +166,38 @@ class CallSession:
     # Public API
     # ------------------------------------------------------------------
 
+    async def _get_ice_servers(self) -> List["RTCIceServer"]:
+        """Fetch TURN credentials from Synapse, fall back to config STUN servers."""
+        servers = []
+        try:
+            import aiohttp
+            url = f"{self._client.homeserver}/_matrix/client/v3/voip/turnServer"
+            headers = {"Authorization": f"Bearer {self._client.access_token}"}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        uris = data.get("uris", [])
+                        username = data.get("username", "")
+                        password = data.get("password", "")
+                        if uris:
+                            servers.append(RTCIceServer(urls=uris, username=username, credential=password))
+                            logger.info("call %s: using %d TURN/STUN URIs from Synapse", self.call_id[:8], len(uris))
+        except Exception as e:
+            logger.warning("call %s: could not fetch TURN servers from Synapse: %s", self.call_id[:8], e)
+
+        for stun in self._cfg.get("stun_servers", [] if servers else ["stun:stun.l.google.com:19302"]):
+            servers.append(RTCIceServer(urls=stun))
+
+        return servers
+
     async def start(self, sdp_offer: str) -> Optional[str]:
         """Accept the call. Returns SDP answer string, or None on error."""
         if not _AIORTC_AVAILABLE:
             logger.error("matrix_call: aiortc not installed — cannot accept call")
             return None
 
-        stun_urls = self._cfg.get("stun_servers", ["stun:stun.l.google.com:19302"])
-        ice_servers = [RTCIceServer(urls=u) for u in stun_urls]
+        ice_servers = await self._get_ice_servers()
         self._pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
         self._tts_track = _TTSAudioTrack()
         self._pc.addTrack(self._tts_track)
