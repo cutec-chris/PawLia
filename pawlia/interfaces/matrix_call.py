@@ -28,6 +28,7 @@ try:
         RTCSessionDescription,
     )
     from aiortc.mediastreams import MediaStreamError  # type: ignore
+    from aiortc import RTCConfiguration, RTCIceServer  # type: ignore
     _AIORTC_AVAILABLE = True
 except Exception as _e:
     import logging as _logging
@@ -143,7 +144,9 @@ class CallSession:
             logger.error("matrix_call: aiortc not installed — cannot accept call")
             return None
 
-        self._pc = RTCPeerConnection()
+        stun_urls = self._cfg.get("stun_servers", ["stun:stun.l.google.com:19302"])
+        ice_servers = [RTCIceServer(urls=u) for u in stun_urls]
+        self._pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
         self._tts_track = _TTSAudioTrack()
         self._pc.addTrack(self._tts_track)
 
