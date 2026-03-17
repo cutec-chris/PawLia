@@ -63,6 +63,14 @@ class App:
         """
         session = self.memory.load_session(user_id)
 
+        # Resolve LLMs – honour per-session model override
+        if session.model_override:
+            chat_llm = self.llm.get_with_model("chat", session.model_override)
+            vision_llm = self.llm.get_with_model("vision", session.model_override)
+        else:
+            chat_llm = self.llm.get("chat")
+            vision_llm = self.llm.get("vision")
+
         def make_runner(skill: AgentSkill) -> SkillRunnerAgent:
             skill_cfg = self.config.get("skill-config", {}).get(skill.name, {})
             return SkillRunnerAgent(
@@ -77,16 +85,19 @@ class App:
                 },
             )
 
-        return ChatAgent(
-            llm=self.llm.get("chat"),
+        agent = ChatAgent(
+            llm=chat_llm,
             skills=self.skills,
             skill_runner_factory=make_runner,
             logger=self.logger.getChild(f"chat.{user_id}"),
             memory=self.memory,
             session=session,
-            vision_llm=self.llm.get("vision"),
+            vision_llm=vision_llm,
             **kwargs,
         )
+        # Let the agent resolve per-thread model overrides at run() time
+        agent._llm_resolver = lambda model: self.llm.get_with_model("chat", model)
+        return agent
 
 
 def create_app(config_path: Optional[str] = None,

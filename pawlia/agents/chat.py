@@ -8,7 +8,7 @@ incorporates the result into its final response.
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Callback types
 InterimCallback = Callable[[str], Awaitable[None]]
@@ -75,19 +75,24 @@ class ChatAgent(BaseAgent):
         self._idle_task: Optional[asyncio.Task] = None
 
         # Bind skill specs as "tools" so the LLM can call them
-        skill_specs = [s.as_openai_spec() for s in skills.values()]
-        if skill_specs:
-            self.bound_llm = llm.bind_tools(skill_specs, tool_choice="auto")
-            self.vision_bound_llm = (vision_llm or llm).bind_tools(skill_specs, tool_choice="auto")
+        self._skill_specs = [s.as_openai_spec() for s in skills.values()]
+        if self._skill_specs:
+            self.bound_llm = llm.bind_tools(self._skill_specs, tool_choice="auto")
+            self.vision_bound_llm = (vision_llm or llm).bind_tools(self._skill_specs, tool_choice="auto")
         else:
             self.bound_llm = llm
             self.vision_bound_llm = vision_llm or llm
+
+        # Resolver for per-thread model overrides: model_name -> ChatOpenAI
+        # Set by App.make_agent after construction.
+        self._llm_resolver: Optional[Callable[[str], Any]] = None
 
     async def run(
         self,
         user_input: str,
         system_prompt: Optional[str] = None,
         images: Optional[List[str]] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
         """Process user input and return a response.
 
@@ -97,6 +102,9 @@ class ChatAgent(BaseAgent):
 
         ``images`` is an optional list of base64 data-URIs
         (e.g. ``data:image/png;base64,…``).
+
+        ``thread_id`` isolates the context window: the model only sees exchanges
+        from that thread (seeded from the last 5 main-session exchanges on first use).
         """
         if system_prompt:
             prompt = system_prompt
@@ -107,12 +115,20 @@ class ChatAgent(BaseAgent):
 
         messages: List[BaseMessage] = [SystemMessage(content=prompt)]
 
-        # Replay recent exchanges as structured message pairs so the
-        # model treats them as its own prior turns (better than flat text).
-        if self.session:
-            for user_text, bot_text in self.session.exchanges:
+        # Replay recent exchanges.  For threads, use the thread-specific window
+        # instead of the main session history.
+        if self.session and self.memory:
+            if thread_id:
+                exchanges = self.memory.get_thread_context(self.session, thread_id)
+            else:
+                exchanges = self.session.exchanges
+            for user_text, bot_text in exchanges:
                 messages.append(HumanMessage(content=user_text))
                 messages.append(AIMessage(content=bot_text))
+
+        # Resolve the LLMs to use for this call.
+        # A thread-specific model override takes priority over the session default.
+        bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
 
         # Build multimodal content when images are present
         if images:
@@ -125,7 +141,7 @@ class ChatAgent(BaseAgent):
             messages.append(HumanMessage(content=user_input))
 
         # Turn 1: LLM decides whether to call a skill or answer directly
-        active_llm = self.vision_bound_llm if images else self.bound_llm
+        active_llm = bound_llm
         response = await self._invoke(messages, llm=active_llm)
         self.logger.debug("LLM response: tool_calls=%s, content=%s",
                           bool(response.tool_calls),
@@ -133,7 +149,7 @@ class ChatAgent(BaseAgent):
 
         if not response.tool_calls:
             result = self.extract_text(response)
-            await self._persist(user_input, result, track_similarity=True)
+            await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
             return result
 
         # Send interim message if the LLM included text alongside tool calls
@@ -178,16 +194,43 @@ class ChatAgent(BaseAgent):
 
         # Turn 2: LLM formulates final answer incorporating skill results
         # Use unbound LLM (no tools) for the final response
-        final = await self._invoke(messages, llm=self.llm)
+        final = await self._invoke(messages, llm=unbound_llm)
         result = self.extract_text(final)
-        await self._persist(user_input, result, track_similarity=False)
+        await self._persist(user_input, result, track_similarity=False, thread_id=thread_id)
         return result
 
+    def _resolve_llms(
+        self, thread_id: Optional[str], *, images: bool = False
+    ) -> Tuple[Any, Any]:
+        """Return (bound_llm, unbound_llm) for this call.
+
+        Checks for a thread-specific model override first; falls back to the
+        agent's default LLMs.
+        """
+        if thread_id and self._llm_resolver and self.memory and self.session:
+            model = self.memory.get_thread_model_override(self.session, thread_id)
+            if model:
+                llm = self._llm_resolver(model)
+                bound = llm.bind_tools(self._skill_specs, tool_choice="auto") if self._skill_specs else llm
+                return bound, llm
+
+        return (self.vision_bound_llm if images else self.bound_llm), self.llm
+
     async def _persist(
-        self, user_input: str, response: str, *, track_similarity: bool = True,
+        self,
+        user_input: str,
+        response: str,
+        *,
+        track_similarity: bool = True,
+        thread_id: Optional[str] = None,
     ) -> None:
         """Save exchange to daily log and schedule summarization if needed."""
         if not (self.memory and self.session):
+            return
+
+        if thread_id:
+            # Thread exchanges go to a separate log; main session is unchanged.
+            self.memory.append_thread_exchange(self.session, thread_id, user_input, response)
             return
 
         self.memory.append_exchange(

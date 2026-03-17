@@ -18,12 +18,36 @@ A lightweight, open-source AI assistant built for small language models (e.g., Q
 ### 🔌 Multiple Interfaces
 All interfaces can run simultaneously in server mode:
 - **CLI** — interactive terminal session
-- **Telegram** — bot with voice transcription and image support
-- **Matrix** — Element-compatible bot with voice transcription and image support
+- **Telegram** — bot with voice transcription, image support, threads, and model switching
+- **Matrix** — Element-compatible bot with voice transcription, image support, threads, and model switching
 - **Webhook** — HTTP endpoint for custom integrations (`POST /chat`, `GET /notifications`)
 
 ### 👥 Multi-User Sessions
 Each user gets their own isolated session with per-user memory and conversation history. Sessions are persisted to disk as Markdown files and expire from RAM after inactivity.
+
+### 🧵 Thread Support
+Telegram threads (forum topics) and Matrix thread-replies each get their own isolated **context window** within the user's session. Everything else — memory, identity files, skills, workspace — stays shared.
+
+- The first message in a thread is seeded with the last 5 exchanges from the main conversation so the model has immediate context.
+- Thread history is logged separately (`memory/thread_<id>_<date>.md`) and does not pollute the main conversation log.
+- Model overrides (see below) can be set per-thread independently of the main context.
+
+### 🤖 Per-Context Model Switching
+Users can switch the active LLM at runtime without restarting the bot.
+
+**Telegram** — `/model` command:
+```
+/model                  # show the current model for this context
+/model qwen3:4b         # switch model (main chat or current thread)
+```
+
+**Matrix** — `!model` message prefix:
+```
+!model                  # show the current model for this context
+!model qwen3:4b         # switch model (room or current thread)
+```
+
+The switch is **context-local**: using `/model` inside a thread only affects that thread; the main chat (and other threads) keep their own model. Overrides are persisted to disk and survive restarts.
 
 ### ⏰ Scheduler
 PawLia can act proactively — a background scheduler checks every 60 seconds for:

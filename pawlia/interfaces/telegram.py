@@ -16,6 +16,7 @@ from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
+    CommandHandler,
     ContextTypes,
     MessageHandler,
     filters,
@@ -61,7 +62,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     """
     token: str = cfg["token"]
 
-    # One agent per Telegram user, track chat_ids for proactive notifications
+    # One agent per user; thread context is passed at run() time
     agents: Dict[str, object] = {}
     chat_ids: Dict[str, int] = {}
 
@@ -70,7 +71,13 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             agents[user_id] = app.make_agent(user_id)
         return agents[user_id]
 
-    async def _handle(update: Update, user_id: str, text: str, images: Optional[List[str]] = None) -> None:
+    def invalidate_agent(user_id: str) -> None:
+        """Remove cached agent so it gets recreated (e.g. after /model change)."""
+        agents.pop(user_id, None)
+
+    async def _handle(update: Update, user_id: str, text: str,
+                      thread_id: Optional[int] = None,
+                      images: Optional[List[str]] = None) -> None:
         """Shared handler for text and photo messages."""
         try:
             # Show typing indicator while processing
@@ -125,12 +132,58 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             agent.on_skill_start = _on_skill_start
             agent.on_skill_step = _on_skill_step
             agent.on_skill_done = _on_skill_done
-            response = await agent.run(text, images=images or None)
+            response = await agent.run(
+                text,
+                images=images or None,
+                thread_id=str(thread_id) if thread_id else None,
+            )
             await update.message.reply_text(
                 _md_to_tg_html(response), parse_mode=ParseMode.HTML,
             )
         except Exception as e:
             logger.error("Telegram: error processing message: %s", e)
+
+    async def on_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/model [name] — show or change the active model for this session."""
+        if not update.message:
+            return
+        user = update.message.from_user
+        if user is None:
+            return
+
+        user_id = f"tg_{user.id}"
+        thread_id: Optional[int] = update.message.message_thread_id
+        args = (context.args or [])
+
+        session = app.memory.load_session(user_id)
+        ctx_label = f"Thread {thread_id}" if thread_id else "Main"
+
+        if not args:
+            if thread_id:
+                current = app.memory.get_thread_model_override(session, str(thread_id)) or "(default)"
+            else:
+                current = session.model_override or "(default)"
+            await update.message.reply_text(
+                f"<b>Aktives Modell</b> [{ctx_label}]: <code>{current}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        new_model = args[0].strip()
+        if thread_id:
+            # Thread-specific override — does not affect the main context
+            app.memory.set_thread_model_override(session, str(thread_id), new_model)
+            logger.info("Telegram: model changed for %s thread %s -> %s", user_id, thread_id, new_model)
+        else:
+            # Session-wide override — affects the main context and recreates agent
+            app.memory.set_model_override(session, new_model)
+            invalidate_agent(user_id)  # recreate with new LLM on next message
+            logger.info("Telegram: model changed for %s -> %s", user_id, new_model)
+
+        await update.message.reply_text(
+            f"✓ Modell für <b>{ctx_label}</b> auf <code>{new_model}</code> gesetzt.",
+            parse_mode=ParseMode.HTML,
+        )
 
     async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
@@ -142,12 +195,14 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
         user_id = f"tg_{user.id}"
         chat_ids[user_id] = update.message.chat_id
+        thread_id: Optional[int] = update.message.message_thread_id
         text = update.message.text.strip()
         if not text:
             return
 
-        logger.info("Telegram: message from %s (%s): %s", user.first_name, user_id, text[:80])
-        await _handle(update, user_id, text)
+        ctx_label = f" [thread {thread_id}]" if thread_id else ""
+        logger.info("Telegram: message from %s (%s)%s: %s", user.first_name, user_id, ctx_label, text[:80])
+        await _handle(update, user_id, text, thread_id=thread_id)
 
     async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.photo:
@@ -159,6 +214,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
         user_id = f"tg_{user.id}"
         chat_ids[user_id] = update.message.chat_id
+        thread_id: Optional[int] = update.message.message_thread_id
 
         # Grab the highest-resolution photo
         photo = update.message.photo[-1]
@@ -170,9 +226,10 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         caption = (update.message.caption or "").strip()
 
         logger.info("Telegram: photo from %s (%s), caption: %s", user.first_name, user_id, caption[:80])
-        await _handle(update, user_id, caption, images=[data_uri])
+        await _handle(update, user_id, caption, thread_id=thread_id, images=[data_uri])
 
     application = Application.builder().token(token).build()
+    application.add_handler(CommandHandler("model", on_model_command))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, on_message),
     )

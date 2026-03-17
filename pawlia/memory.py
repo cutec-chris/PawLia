@@ -16,7 +16,7 @@ import re
 import shutil
 from datetime import datetime
 from difflib import SequenceMatcher
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # Summarization trigger thresholds
 MAX_EXCHANGES_BEFORE_SUMMARY = 20
@@ -42,6 +42,15 @@ class Session:
         self.recent_bot_responses: List[str] = []
         self.last_activity: datetime = datetime.now()
         self.summary: str = ""  # accumulated summary from prior rounds
+
+        # Optional model override (e.g. set via /model command)
+        self.model_override: Optional[str] = None
+
+        # Per-thread exchange lists (loaded/seeded lazily by get_thread_context)
+        self.thread_contexts: Dict[str, List[Tuple[str, str]]] = {}
+
+        # Per-thread model overrides (loaded lazily by get_thread_model_override)
+        self.thread_model_overrides: Dict[str, Optional[str]] = {}
 
 
 class MemoryManager:
@@ -113,6 +122,15 @@ class MemoryManager:
     def _summary_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "context_summary.md")
 
+    def _model_override_path(self, user_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), "model_override.txt")
+
+    def _thread_daily_path(self, user_id: str, thread_id: str, date_str: str) -> str:
+        return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_{date_str}.md")
+
+    def _thread_model_path(self, user_id: str, thread_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_model.txt")
+
     @staticmethod
     def _parse_exchanges(history: str) -> List[Tuple[str, str]]:
         """Parse flat history text into (user, assistant) pairs."""
@@ -133,7 +151,75 @@ class MemoryManager:
         session.summary = self._read(self._summary_path(user_id))
         session.exchanges = self._parse_exchanges(session.daily_history)
         session.exchange_count = len(session.exchanges)
+        override = self._read(self._model_override_path(user_id)).strip()
+        session.model_override = override or None
         return session
+
+    def set_model_override(self, session: Session, model: Optional[str]) -> None:
+        """Persist a model override for this session.  Pass None to clear."""
+        session.model_override = model
+        path = self._model_override_path(session.user_id)
+        if model:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(model)
+        elif os.path.exists(path):
+            os.remove(path)
+
+    def get_thread_context(
+        self, session: Session, thread_id: str, seed_n: int = 5
+    ) -> List[Tuple[str, str]]:
+        """Return the exchange list for a thread, loading from disk on first access.
+
+        A brand-new thread (no log yet) is seeded with the last *seed_n* exchanges
+        from the main session so the model has immediate context.  The seed is
+        kept in-memory only — it is NOT written to the thread log.
+        """
+        if thread_id not in session.thread_contexts:
+            path = self._thread_daily_path(
+                session.user_id, thread_id, session.current_date_str
+            )
+            exchanges = self._parse_exchanges(self._read(path))
+            if not exchanges and session.exchanges:
+                exchanges = list(session.exchanges[-seed_n:])
+            session.thread_contexts[thread_id] = exchanges
+        return session.thread_contexts[thread_id]
+
+    def get_thread_model_override(self, session: Session, thread_id: str) -> Optional[str]:
+        """Return the model override for a thread, loading from disk on first access."""
+        if thread_id not in session.thread_model_overrides:
+            val = self._read(self._thread_model_path(session.user_id, thread_id)).strip()
+            session.thread_model_overrides[thread_id] = val or None
+        return session.thread_model_overrides[thread_id]
+
+    def set_thread_model_override(
+        self, session: Session, thread_id: str, model: Optional[str]
+    ) -> None:
+        """Persist a model override for a specific thread.  Pass None to clear."""
+        session.thread_model_overrides[thread_id] = model
+        path = self._thread_model_path(session.user_id, thread_id)
+        if model:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(model)
+        elif os.path.exists(path):
+            os.remove(path)
+
+    def append_thread_exchange(
+        self,
+        session: Session,
+        thread_id: str,
+        user_text: str,
+        bot_text: str,
+    ) -> None:
+        """Append an exchange to a thread's log (RAM + disk)."""
+        exchanges = self.get_thread_context(session, thread_id)
+        exchanges.append((user_text, bot_text))
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"\n[{timestamp}] User: {user_text}\nAssistant: {bot_text}"
+        path = self._thread_daily_path(
+            session.user_id, thread_id, session.current_date_str
+        )
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(entry)
 
     def build_system_prompt(self, session: Session) -> str:
         """Build the system prompt from workspace identity files + memory."""
