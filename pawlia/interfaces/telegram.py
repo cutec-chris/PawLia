@@ -143,6 +143,31 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         except Exception as e:
             logger.error("Telegram: error processing message: %s", e)
 
+    async def on_private_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/private — toggle private mode for the current thread (threads only)."""
+        if not update.message:
+            return
+        user = update.message.from_user
+        if user is None:
+            return
+
+        thread_id: Optional[int] = update.message.message_thread_id
+        if not thread_id:
+            await update.message.reply_text(
+                "<i>/private funktioniert nur in Threads.</i>", parse_mode=ParseMode.HTML,
+            )
+            return
+
+        user_id = f"tg_{user.id}"
+        session = app.memory.load_session(user_id)
+        active = app.memory.toggle_private_thread(session, str(thread_id))
+        icon = "🔒" if active else "🔓"
+        state = "aktiviert" if active else "deaktiviert"
+        await update.message.reply_text(
+            f"{icon} Private Mode {state} — Nachrichten werden <b>{'nicht ' if active else ''}gespeichert</b>.",
+            parse_mode=ParseMode.HTML,
+        )
+
     async def on_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/model [name] — show or change the active model for this session."""
         if not update.message:
@@ -229,6 +254,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         await _handle(update, user_id, caption, thread_id=thread_id, images=[data_uri])
 
     application = Application.builder().token(token).build()
+    application.add_handler(CommandHandler("private", on_private_command))
     application.add_handler(CommandHandler("model", on_model_command))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, on_message),

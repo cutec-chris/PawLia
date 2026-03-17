@@ -190,7 +190,18 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         ctx = f" [thread {thread_id[:8]}…]" if thread_id else ""
         logger.info("Matrix: message in %s%s: %s (images=%d)", room.room_id, ctx, text[:80], len(images or []))
 
-        # Command: !model [name]
+        # Commands
+        if text.startswith("!private"):
+            if not thread_id:
+                await _send_text(room.room_id, "_!private funktioniert nur in Threads._")
+                return
+            session = app.memory.load_session(session_id)
+            active = app.memory.toggle_private_thread(session, thread_id)
+            icon = "🔒" if active else "🔓"
+            state = "aktiviert" if active else "deaktiviert"
+            await _send_text(room.room_id, f"{icon} Private Mode {state} — Nachrichten werden {'**nicht** ' if active else ''}gespeichert.")
+            return
+
         if text.startswith("!model"):
             await _handle_model_command(room, session_id, text[len("!model"):], thread_id)
             return
