@@ -80,6 +80,26 @@ class LLMFactory:
             self._cache[key] = self._build(agent_type, merged)
         return self._cache[key]
 
+    def get_with_model(
+        self,
+        agent_type: str,
+        model: str,
+        provider: Optional[str] = None,
+    ) -> ChatOpenAI:
+        """Return a (cached) LLM with an explicit model override.
+
+        Everything else (provider, temperature, api_base …) is taken from the
+        resolved config for *agent_type*.  Useful for per-session model switching.
+        """
+        merged = self._resolve(agent_type)
+        merged["model"] = model
+        if provider:
+            merged["provider"] = provider
+        key = self._cache_key(merged)
+        if key not in self._cache:
+            self._cache[key] = self._build(agent_type, merged)
+        return self._cache[key]
+
     # ------------------------------------------------------------------
     # Config resolution
     # ------------------------------------------------------------------

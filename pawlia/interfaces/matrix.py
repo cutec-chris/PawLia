@@ -146,9 +146,54 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         except Exception as e:
             logger.error("Matrix: send_text failed for %s: %s", room_id, e)
 
-    async def _handle(room: MatrixRoom, text: str, images: Optional[List[str]] = None) -> None:
+    def _get_thread_id(event: RoomMessageText) -> Optional[str]:
+        """Return the thread root event_id if this message is a Matrix thread reply."""
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        if relates_to.get("rel_type") == "m.thread":
+            return relates_to.get("event_id")
+        return None
+
+    async def _handle_model_command(
+        room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
+    ) -> None:
+        """Handle '!model [name]' — show or change the model for this context."""
+        session = app.memory.load_session(session_id)
+        ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
+
+        if not args.strip():
+            if thread_id:
+                current = app.memory.get_thread_model_override(session, thread_id) or "(default)"
+            else:
+                current = session.model_override or "(default)"
+            await _send_text(room.room_id, f"**Aktives Modell** [{ctx_label}]: `{current}`")
+            return
+
+        new_model = args.strip()
+        if thread_id:
+            app.memory.set_thread_model_override(session, thread_id, new_model)
+            logger.info("Matrix: model changed for %s thread %s -> %s", session_id, thread_id[:8], new_model)
+        else:
+            app.memory.set_model_override(session, new_model)
+            agents.pop(session_id, None)  # recreate with new LLM on next message
+            logger.info("Matrix: model changed for %s -> %s", session_id, new_model)
+
+        await _send_text(room.room_id, f"✓ Modell für **{ctx_label}** auf `{new_model}` gesetzt.")
+
+    async def _handle(
+        room: MatrixRoom,
+        text: str,
+        images: Optional[List[str]] = None,
+        thread_id: Optional[str] = None,
+    ) -> None:
         """Shared handler for text and image messages."""
-        logger.info("Matrix: message in %s: %s (images=%d)", room.room_id, text[:80], len(images or []))
+        session_id = f"mx_{room.room_id}"
+        ctx = f" [thread {thread_id[:8]}…]" if thread_id else ""
+        logger.info("Matrix: message in %s%s: %s (images=%d)", room.room_id, ctx, text[:80], len(images or []))
+
+        # Command: !model [name]
+        if text.startswith("!model"):
+            await _handle_model_command(room, session_id, text[len("!model"):], thread_id)
+            return
 
         try:
             await client.room_typing(room.room_id, typing_state=True)
@@ -195,7 +240,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             agent.on_skill_start = _on_skill_start
             agent.on_skill_step = _on_skill_step
             agent.on_skill_done = _on_skill_done
-            response = await agent.run(text, images=images or None)
+            response = await agent.run(text, images=images or None, thread_id=thread_id)
 
             await client.room_typing(room.room_id, typing_state=False)
             await _send_text(room.room_id, response)
@@ -235,7 +280,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         text = event.body.strip()
         if not text:
             return
-        await _handle(room, text)
+        await _handle(room, text, thread_id=_get_thread_id(event))
 
     async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
         if event.sender == client.user_id:
@@ -248,7 +293,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         if not data_uri:
             return
         caption = event.body if event.body and event.body != "image" else ""
-        await _handle(room, caption, images=[data_uri])
+        thread_id = event.source.get("content", {}).get("m.relates_to", {})
+        thread_id = thread_id.get("event_id") if thread_id.get("rel_type") == "m.thread" else None
+        await _handle(room, caption, images=[data_uri], thread_id=thread_id)
 
     async def on_audio(room: MatrixRoom, event: RoomMessageAudio) -> None:
         """Handle voice messages: download → transcribe → agent."""
@@ -276,8 +323,10 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
 
         logger.info("Matrix: voice message transcribed: %s", text[:120])
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
         # Route through normal handler (prefixed so agent knows it was voice)
-        await _handle(room, f"[Sprachnachricht]: {text}")
+        await _handle(room, f"[Sprachnachricht]: {text}", thread_id=thread_id)
 
     async def on_call_invite(room: MatrixRoom, event: CallInviteEvent) -> None:
         if event.sender == client.user_id:
