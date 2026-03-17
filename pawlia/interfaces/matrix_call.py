@@ -94,6 +94,34 @@ if _AIORTC_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_sdp_candidates(sdp: str) -> List[Dict]:
+    """Extract ICE candidates from a local SDP description.
+
+    Returns a list of dicts suitable for ``m.call.candidates``.
+    """
+    import re
+    candidates = []
+    mid = None
+    mline_index = -1
+    for line in sdp.splitlines():
+        if line.startswith("m="):
+            mline_index += 1
+            mid = None
+        elif line.startswith("a=mid:"):
+            mid = line[6:].strip()
+        elif line.startswith("a=candidate:"):
+            candidates.append({
+                "sdpMid": mid or str(mline_index),
+                "sdpMLineIndex": mline_index,
+                "candidate": line[2:],  # strip "a=" prefix → "candidate:..."
+            })
+    return candidates
+
+
+# ---------------------------------------------------------------------------
 # Per-call session
 # ---------------------------------------------------------------------------
 
@@ -163,20 +191,14 @@ class CallSession:
             if state in ("failed", "closed", "disconnected"):
                 self._done.set()
 
-        # Collect our ICE candidates as they are gathered
-        _local_candidates: List[Dict] = []
         _gathering_done = asyncio.Event()
 
-        @self._pc.on("icecandidate")
-        def on_ice_candidate(candidate):
-            if candidate is None:
+        @self._pc.on("icegatheringstatechange")
+        def on_gathering_state():
+            state = self._pc.iceGatheringState
+            logger.info("call %s: ICE gathering → %s", self.call_id[:8], state)
+            if state == "complete":
                 _gathering_done.set()
-            else:
-                _local_candidates.append({
-                    "sdpMid": candidate.sdpMid,
-                    "sdpMLineIndex": candidate.sdpMLineIndex,
-                    "candidate": candidate.candidate,
-                })
 
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=sdp_offer, type="offer")
@@ -192,22 +214,30 @@ class CallSession:
 
         # Auto-hangup watchdog
         asyncio.ensure_future(self._watchdog())
-        # Send our ICE candidates once gathering completes (trickle ICE)
-        asyncio.ensure_future(self._flush_local_candidates(_local_candidates, _gathering_done))
+        # Send our ICE candidates once gathering completes (parsed from local SDP)
+        asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
 
-    async def _flush_local_candidates(self, candidates: List[Dict], done: asyncio.Event) -> None:
-        """Wait for ICE gathering to finish, then send all candidates via m.call.candidates."""
+    async def _flush_local_candidates(self, done: asyncio.Event) -> None:
+        """Wait for ICE gathering then send candidates parsed from local SDP."""
         try:
             await asyncio.wait_for(done.wait(), timeout=10.0)
         except asyncio.TimeoutError:
-            logger.warning("call %s: ICE gathering timed out, sending %d candidates collected so far",
-                           self.call_id[:8], len(candidates))
-        if not candidates:
-            logger.warning("call %s: no local ICE candidates gathered", self.call_id[:8])
+            logger.warning("call %s: ICE gathering timed out", self.call_id[:8])
+
+        if not self._pc or not self._pc.localDescription:
             return
+
+        sdp = self._pc.localDescription.sdp
+        logger.debug("call %s: local SDP:\n%s", self.call_id[:8], sdp)
+
+        candidates = _parse_sdp_candidates(sdp)
+        logger.info("call %s: parsed %d local ICE candidates from SDP", self.call_id[:8], len(candidates))
+        if not candidates:
+            return
+
         await self._client.room_send(
             room_id=self.room_id,
             message_type="m.call.candidates",
