@@ -149,6 +149,7 @@ class CallSession:
 
         @self._pc.on("track")
         def on_track(track):
+            logger.info("call %s: track received kind=%s", self.call_id[:8], track.kind)
             if track.kind == "audio":
                 asyncio.ensure_future(self._audio_pipeline(track))
 
@@ -207,24 +208,35 @@ class CallSession:
         silence_count = 0
 
         logger.info("call %s: audio pipeline started", self.call_id[:8])
+        frames_received = 0
         try:
             while not self._done.is_set():
                 try:
                     frame = await asyncio.wait_for(track.recv(), timeout=5.0)
                 except asyncio.TimeoutError:
+                    if frames_received == 0:
+                        logger.warning("call %s: no audio frames received yet", self.call_id[:8])
                     continue
                 except MediaStreamError:
                     break
+
+                frames_received += 1
 
                 # Convert AudioFrame → float32 mono
                 arr = frame.to_ndarray()  # (channels, samples) or (samples,)
                 if arr.ndim > 1:
                     arr = arr.mean(axis=0)
                 pcm = arr.astype(np.float32)
-                if pcm.dtype == np.int16 or pcm.max() > 1.0:
+                if pcm.max() > 1.0 or pcm.min() < -1.0:
                     pcm = pcm / 32768.0
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
+                if frames_received <= 3:
+                    logger.info("call %s: frame #%d shape=%s dtype=%s rms=%.4f",
+                                self.call_id[:8], frames_received,
+                                arr.shape, arr.dtype, rms)
+                elif frames_received % 200 == 0:
+                    logger.debug("call %s: frame #%d rms=%.4f", self.call_id[:8], frames_received, rms)
 
                 if rms > self.SILENCE_THRESHOLD:
                     speech_buffer.append(pcm)
