@@ -4,22 +4,14 @@ WORKDIR /app
 
 # System dependencies:
 #   nodejs/npm  — AgentSkills
-#   espeak-ng   — required by piper-tts for phonemisation
-#   ffmpeg      — audio decoding/encoding for VoIP (aiortc/av)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs \
         npm \
-        espeak-ng \
-        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Base Python dependencies
 COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-
-# VoIP / telephony extras (aiortc, av, numpy, edge-tts, piper-tts)
-COPY requirements-voip.txt requirements-voip.txt
-RUN pip install --no-cache-dir -r requirements-voip.txt
 
 # Copy application code and built-in assets
 COPY pawlia/ pawlia/
