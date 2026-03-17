@@ -248,7 +248,7 @@ class CallSession:
             self._done.set()
             logger.info("call %s: audio pipeline ended", self.call_id[:8])
 
-    async def _process_speech(self, pcm: np.ndarray, sample_rate: int) -> None:
+    async def _process_speech(self, pcm: "np.ndarray", sample_rate: int) -> None:
         """Transcribe a speech chunk and query the agent."""
         from pawlia.transcription import transcribe_pcm
         from pawlia.tts import synthesize_pcm
