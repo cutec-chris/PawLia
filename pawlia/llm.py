@@ -1,7 +1,5 @@
 """LLM Factory - creates and caches LangChain ChatOpenAI instances from config.
 
-Supports multiple providers and per-agent / per-skill configuration.
-
 Config layout (YAML)::
 
     providers:
@@ -13,38 +11,39 @@ Config layout (YAML)::
         apiBase: https://api.groq.com/openai/v1
         apiKey: gsk_...
 
-    agents:
-      defaults:
+    models:
+      fast:
         model: qwen3:4b
         provider: ollama
-        think: false
         temperature: 0.7
-
-      chat:
+      smart:
         model: qwen3.5:latest
+        provider: ollama
+        temperature: 0.9
         think: true
-
-      skill_runner:         # default LLM for all skills
-        model: qwen3.5:latest
-
-      vision:               # falls back to chat if not set
+      vision:
         model: qwen2.5vl:latest
+        provider: ollama
 
-      skills:               # per-skill overrides (fall back to skill_runner)
-        searxng:
-          model: qwen3:4b
-          provider: groq
-        browser:
-          model: llama3.1:8b
+    agents:
+      default: smart       # fallback for any unspecified agent type
+      chat: smart
+      skill_runner: fast
+      vision: vision
+      skills:              # per-skill overrides
+        searxng: fast
+        browser: smart
 
 Fallback chains
 ---------------
-- ``get("chat")``          → agents.chat      → defaults
-- ``get("vision")``        → agents.vision    → agents.chat    → defaults
-- ``get("skill_runner")``  → agents.skill_runner               → defaults
-- ``get("skill.searxng")`` → agents.skills.searxng → agents.skill_runner → defaults
+- ``get("chat")``          → agents.chat          → agents.default
+- ``get("vision")``        → agents.vision        → agents.chat    → agents.default
+- ``get("skill_runner")``  → agents.skill_runner  → agents.default
+- ``get("skill.searxng")`` → agents.skills.searxng → agents.skill_runner → agents.default
 
-LLMs with identical resolved config (model + provider + temperature) are reused.
+``get_with_model(name)`` resolves a model by its key in ``models:``.  If the
+name is not found there it is treated as a raw model string and the default
+provider is used.
 """
 
 import logging
@@ -58,84 +57,122 @@ logger = logging.getLogger(__name__)
 
 
 class LLMFactory:
-    """Creates and caches ChatOpenAI instances for different agent / skill types."""
+    """Creates and caches LangChain LLM instances from config."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.providers: Dict[str, Dict[str, Any]] = config.get("providers", {})
-        self._cache: Dict[Tuple, ChatOpenAI] = {}
+        self.models: Dict[str, Dict[str, Any]] = config.get("models", {})
+        self.agents_cfg: Dict[str, Any] = config.get("agents", {})
+        self._cache: Dict[Tuple, Any] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def get(self, agent_type: str = "chat") -> ChatOpenAI:
-        """Return a (cached) ChatOpenAI instance for the given agent type.
-
-        Instances with identical model + provider + temperature are shared.
-        """
-        merged = self._resolve(agent_type)
-        key = self._cache_key(merged)
+    def get(self, agent_type: str = "chat") -> Any:
+        """Return a (cached) LLM for the given agent type."""
+        model_cfg = self._resolve_agent(agent_type)
+        key = self._cache_key(model_cfg)
         if key not in self._cache:
-            self._cache[key] = self._build(agent_type, merged)
+            self._cache[key] = self._build(model_cfg)
         return self._cache[key]
 
-    def get_with_model(
-        self,
-        agent_type: str,
-        model: str,
-        provider: Optional[str] = None,
-    ) -> ChatOpenAI:
-        """Return a (cached) LLM with an explicit model override.
+    def get_with_model(self, model_name: str) -> Any:
+        """Return a (cached) LLM by model name.
 
-        Everything else (provider, temperature, api_base …) is taken from the
-        resolved config for *agent_type*.  Useful for per-session model switching.
+        *model_name* is first looked up in ``models:``.  If not found it is
+        treated as a raw model identifier and the default provider is used.
         """
-        merged = self._resolve(agent_type)
-        merged["model"] = model
-        if provider:
-            merged["provider"] = provider
-        key = self._cache_key(merged)
+        if model_name in self.models:
+            model_cfg = self.models[model_name]
+        else:
+            # Raw model string — use default provider
+            default = self._resolve_agent("default")
+            model_cfg = {**default, "model": model_name}
+        key = self._cache_key(model_cfg)
         if key not in self._cache:
-            self._cache[key] = self._build(agent_type, merged)
+            self._cache[key] = self._build(model_cfg)
         return self._cache[key]
 
     # ------------------------------------------------------------------
     # Config resolution
     # ------------------------------------------------------------------
 
-    def _resolve(self, agent_type: str) -> Dict[str, Any]:
-        """Merge agent-specific config on top of defaults following fallback chain."""
-        agents_cfg = self.config.get("agents", {})
-        defaults = agents_cfg.get("defaults", {})
+    def _resolve_agent(self, agent_type: str) -> Dict[str, Any]:
+        """Resolve the model config for an agent type following fallback chains.
 
-        specific = self._specific_cfg(agent_type, agents_cfg)
-        return {**defaults, **specific}
+        Supports two config styles:
 
-    def _specific_cfg(self, agent_type: str, agents_cfg: Dict[str, Any]) -> Dict[str, Any]:
-        """Return the most-specific config block for agent_type, following fallbacks."""
-        # Per-skill lookup: "skill.searxng" → agents.skills.searxng → skill_runner
+        *New* — models defined separately, agents reference them by key::
+
+            models:
+              fast: {model: qwen3:4b, provider: ollama}
+            agents:
+              default: fast
+              chat: fast
+
+        *Legacy* — inline model config inside each agent block::
+
+            agents:
+              defaults:           # note: plural accepted too
+                model: qwen3:4b
+                provider: ollama
+              chat:
+                model: qwen3.5:latest
+        """
+        value = self._agent_value(agent_type)
+
+        if isinstance(value, dict):
+            # Legacy: inline model config
+            return value
+
+        if isinstance(value, str) and value in self.models:
+            # New: named model key
+            return self.models[value]
+
+        # Not found or unresolvable — walk up the fallback chain
+        fallback = self._fallback_agent(agent_type)
+        if fallback:
+            return self._resolve_agent(fallback)
+
+        return {"model": "llama3.1:latest", "provider": self._default_provider_name()}
+
+    def _agent_value(self, agent_type: str) -> Any:
+        """Return the raw value assigned to an agent type (string key or inline dict)."""
+        # "default" accepts both "default" (new) and "defaults" (legacy plural)
+        if agent_type == "default":
+            return (
+                self.agents_cfg.get("default")
+                or self.agents_cfg.get("defaults")
+            )
+
         if agent_type.startswith("skill."):
             skill_name = agent_type[len("skill."):]
-            skill_cfg = agents_cfg.get("skills", {}).get(skill_name)
-            if skill_cfg:
-                return skill_cfg
-            return agents_cfg.get("skill_runner", {})
+            return self.agents_cfg.get("skills", {}).get(skill_name)
 
-        # vision → chat
+        return self.agents_cfg.get(agent_type)
+
+    def _fallback_agent(self, agent_type: str) -> Optional[str]:
+        """Return the next agent type to try in the fallback chain."""
+        if agent_type.startswith("skill."):
+            return "skill_runner"
+        if agent_type == "skill_runner":
+            return "default"
         if agent_type == "vision":
-            return agents_cfg.get("vision") or agents_cfg.get("chat", {})
-
-        return agents_cfg.get(agent_type, {})
+            return "chat"
+        if agent_type == "chat":
+            return "default"
+        return None
 
     # ------------------------------------------------------------------
     # Instance construction
     # ------------------------------------------------------------------
 
-    def _build(self, agent_type: str, merged: Dict[str, Any]) -> ChatOpenAI:
-        model = merged.get("model", "llama3.1:latest")
-        temperature = merged.get("temperature", 0.7)
-        provider_name = merged.get("provider") or self._default_provider_name()
+    def _build(self, model_cfg: Dict[str, Any]) -> Any:
+        model = model_cfg.get("model", "llama3.1:latest")
+        temperature = model_cfg.get("temperature", 0.7)
+        provider_name = model_cfg.get("provider") or self._default_provider_name()
         provider_cfg = self._get_provider(provider_name)
 
         api_base = provider_cfg.get("apiBase", "").rstrip("/")
@@ -144,12 +181,11 @@ class LLMFactory:
         keep_alive = provider_cfg.get("keepAlive")
 
         logger.debug(
-            "Creating LLM for '%s': model=%s provider=%s base=%s temp=%s",
-            agent_type, model, provider_name, api_base, temperature,
+            "Creating LLM: model=%s provider=%s base=%s temp=%s",
+            model, provider_name, api_base, temperature,
         )
 
         if self._is_ollama(provider_name, api_base):
-            # ChatOllama supports keep_alive natively; base_url without /v1
             ollama_base = api_base.removesuffix("/v1") or "http://localhost:11434"
             kwargs: Dict[str, Any] = dict(model=model, temperature=temperature, base_url=ollama_base)
             if keep_alive is not None:
@@ -168,13 +204,13 @@ class LLMFactory:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _cache_key(self, merged: Dict[str, Any]) -> Tuple:
-        provider_name = merged.get("provider") or self._default_provider_name()
+    def _cache_key(self, model_cfg: Dict[str, Any]) -> Tuple:
+        provider_name = model_cfg.get("provider") or self._default_provider_name()
         provider_cfg = self._get_provider(provider_name)
         return (
-            merged.get("model", "llama3.1:latest"),
+            model_cfg.get("model", "llama3.1:latest"),
             provider_cfg.get("apiBase", ""),
-            merged.get("temperature", 0.7),
+            model_cfg.get("temperature", 0.7),
         )
 
     def _is_ollama(self, provider_name: str, api_base: str) -> bool:

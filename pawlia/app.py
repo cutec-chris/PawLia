@@ -65,8 +65,8 @@ class App:
 
         # Resolve LLMs – honour per-session model override
         if session.model_override:
-            chat_llm = self.llm.get_with_model("chat", session.model_override)
-            vision_llm = self.llm.get_with_model("vision", session.model_override)
+            chat_llm = self.llm.get_with_model(session.model_override)
+            vision_llm = chat_llm
         else:
             chat_llm = self.llm.get("chat")
             vision_llm = self.llm.get("vision")
@@ -96,7 +96,7 @@ class App:
             **kwargs,
         )
         # Let the agent resolve per-thread model overrides at run() time
-        agent._llm_resolver = lambda model: self.llm.get_with_model("chat", model)
+        agent._llm_resolver = self.llm.get_with_model
         return agent
 
 
