@@ -66,40 +66,54 @@ Each skill runs as a **sub-agent** with its own LLM session and access to tools 
 ### ⚙️ Provider-Agnostic LLM
 Any OpenAI-compatible API works as a backend — Groq, OpenRouter, Ollama, vLLM, or any local server.
 
-Every agent type can use a **different model and provider**. The lookup follows a fallback chain so you only configure what you want to override:
+Models are defined once by name and referenced from agent types and skills — no repetition of provider, temperature, or flags:
+
+```yaml
+providers:
+  ollama:
+    apiBase: http://localhost:11434/v1
+  groq:
+    apiBase: https://api.groq.com/openai/v1
+    apiKey: gsk_...
+
+models:
+  fast:
+    model: qwen3:4b
+    provider: ollama
+    temperature: 0.7
+  smart:
+    model: qwen3.5:latest
+    provider: ollama
+    temperature: 0.9
+    think: true
+  vision:
+    model: qwen2.5vl:latest
+    provider: ollama
+  groq-fast:
+    model: qwen3:4b
+    provider: groq
+    temperature: 0.3
+
+agents:
+  default: smart        # global fallback
+  skill_runner: fast
+  vision: vision
+  skills:
+    searxng: groq-fast
+```
+
+The lookup follows a fallback chain so you only configure what you want to override:
 
 | Agent type | Fallback chain |
 |------------|----------------|
-| `chat` | `agents.chat` → `defaults` |
-| `skill_runner` | `agents.skill_runner` → `defaults` |
-| `vision` | `agents.vision` → `agents.chat` → `defaults` |
-| `skill.<name>` | `agents.skills.<name>` → `agents.skill_runner` → `defaults` |
-
-Minimal example — one model for everything:
-```yaml
-agents:
-  defaults:
-    model: qwen3.5:latest
-    provider: ollama
-```
-
-With a dedicated vision model and a fast/cheap model for search:
-```yaml
-agents:
-  defaults:
-    model: qwen3.5:latest
-    provider: ollama
-
-  vision:
-    model: qwen2.5vl:latest
-
-  skills:
-    searxng:
-      model: qwen3:4b
-      provider: groq
-```
+| `chat` | `agents.chat` → `agents.default` |
+| `skill_runner` | `agents.skill_runner` → `agents.default` |
+| `vision` | `agents.vision` → `agents.chat` → `agents.default` |
+| `skill.<name>` | `agents.skills.<name>` → `agents.skill_runner` → `agents.default` |
 
 LLMs with identical configuration are reused across agent types — no redundant connections.
+
+The `/model` and `!model` runtime commands accept both model keys (e.g. `fast`) and raw model names (e.g. `llama3.1:8b`).
 
 ## Quick Start
 
@@ -141,11 +155,12 @@ See `config.sample.yaml` for all available options. Both `.yaml` and `.json` are
 
 | Key | Purpose |
 |-----|---------|
-| `providers` | LLM backend(s) and API keys |
-| `agents.defaults` | Default model, provider, temperature |
-| `agents.chat` | Override for the chat agent |
-| `agents.skill_runner` | Default LLM for all skill sub-agents |
-| `agents.vision` | LLM used when the user sends an image |
-| `agents.skills.<name>` | Per-skill LLM override |
+| `providers` | LLM backend(s) with API keys and base URLs |
+| `models` | Named model definitions (model, provider, temperature, …) |
+| `agents.default` | Global fallback model key |
+| `agents.chat` | Model key for the chat agent |
+| `agents.skill_runner` | Default model key for all skill sub-agents |
+| `agents.vision` | Model key used when the user sends an image |
+| `agents.skills.<name>` | Per-skill model key override |
 | `interfaces` | Enable Telegram / Matrix / Webhook |
 | `skill-config` | Per-skill configuration (URLs, API keys, …) |

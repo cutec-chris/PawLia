@@ -1,40 +1,44 @@
 providers:
   ollama:
-    apiKey: ollama
     apiBase: http://localhost:11434/v1
+    apiKey: ollama
     timeout: 240
     keepAlive: -1
   # groq:
-  #   apiKey: gsk_...
   #   apiBase: https://api.groq.com/openai/v1
+  #   apiKey: gsk_...
 
-agents:
-  defaults:
+# Named model definitions.  Each entry bundles a model name, provider, and
+# generation parameters.  Agent types and skills reference these by key.
+models:
+  fast:
     model: qwen3:4b
-    provider: ollama    # which provider block to use (default: first configured)
-    think: false
+    provider: ollama
     temperature: 0.7
-
-  # chat:
+  # smart:
   #   model: qwen3.5:latest
-  #   think: true
+  #   provider: ollama
   #   temperature: 0.9
-
-  # skill_runner:     # default LLM for all skills (falls back to defaults)
-  #   model: qwen3.5:latest
   #   think: true
+  # vision:
+  #   model: qwen2.5vl:latest
+  #   provider: ollama
+  # groq-fast:
+  #   model: qwen3:4b
+  #   provider: groq
   #   temperature: 0.3
 
-  # vision:           # falls back to chat if not set
-  #   model: qwen2.5vl:latest
-
-  # skills:           # per-skill overrides (fall back to skill_runner)
-  #   searxng:
-  #     model: qwen3:4b
-  #     provider: groq
-  #   browser:
-  #     model: llama3.1:8b
-  #     provider: ollama
+# Assign a model (by key) to each agent type.
+# Fallback chain: chat/vision/skill_runner → default
+#                 skill.<name> → skill_runner → default
+agents:
+  default: fast       # global fallback — must point to a key in models:
+  # chat: smart
+  # skill_runner: fast
+  # vision: vision
+  # skills:           # per-skill overrides
+  #   searxng: groq-fast
+  #   browser: smart
 
 interfaces:
   # Remove the comment to enable an interface.
