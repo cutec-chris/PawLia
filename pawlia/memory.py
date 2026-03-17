@@ -16,7 +16,7 @@ import re
 import shutil
 from datetime import datetime
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 # Summarization trigger thresholds
 MAX_EXCHANGES_BEFORE_SUMMARY = 20
@@ -51,6 +51,11 @@ class Session:
 
         # Per-thread model overrides (loaded lazily by get_thread_model_override)
         self.thread_model_overrides: Dict[str, Optional[str]] = {}
+
+        # Private mode: exchanges are kept in RAM but not written to disk.
+        # Resets on restart (intentional).
+        self.private: bool = False            # CLI / session-level
+        self.private_threads: Set[str] = set()  # per-thread
 
 
 class MemoryManager:
@@ -203,6 +208,19 @@ class MemoryManager:
         elif os.path.exists(path):
             os.remove(path)
 
+    def toggle_private_thread(self, session: Session, thread_id: str) -> bool:
+        """Toggle private mode for a thread. Returns the new state."""
+        if thread_id in session.private_threads:
+            session.private_threads.discard(thread_id)
+            return False
+        session.private_threads.add(thread_id)
+        return True
+
+    def toggle_private(self, session: Session) -> bool:
+        """Toggle session-level private mode (CLI). Returns the new state."""
+        session.private = not session.private
+        return session.private
+
     def append_thread_exchange(
         self,
         session: Session,
@@ -210,9 +228,11 @@ class MemoryManager:
         user_text: str,
         bot_text: str,
     ) -> None:
-        """Append an exchange to a thread's log (RAM + disk)."""
+        """Append an exchange to a thread's log (RAM; disk skipped if private)."""
         exchanges = self.get_thread_context(session, thread_id)
         exchanges.append((user_text, bot_text))
+        if thread_id in session.private_threads:
+            return
         timestamp = datetime.now().strftime("%H:%M:%S")
         entry = f"\n[{timestamp}] User: {user_text}\nAssistant: {bot_text}"
         path = self._thread_daily_path(
@@ -284,7 +304,6 @@ class MemoryManager:
         timestamp = datetime.now().strftime("%H:%M:%S")
         entry = f"\n[{timestamp}] User: {user_text}\nAssistant: {bot_text}"
 
-        session.daily_history += entry
         session.exchanges.append((user_text, bot_text))
         session.exchange_count += 1
         session.last_activity = datetime.now()
@@ -294,6 +313,10 @@ class MemoryManager:
             if len(session.recent_bot_responses) > SIMILARITY_WINDOW:
                 session.recent_bot_responses.pop(0)
 
+        if session.private:
+            return
+
+        session.daily_history += entry
         daily_path = self._daily_path(session.user_id, session.current_date_str)
         with open(daily_path, "a", encoding="utf-8") as f:
             f.write(entry)

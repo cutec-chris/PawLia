@@ -94,6 +94,13 @@ async def start_cli(app: "App") -> None:
         if not user_input.strip():
             continue
 
+        if user_input.strip().lower() == "/private":
+            active = app.memory.toggle_private(agent.session)
+            icon = "🔒" if active else "🔓"
+            state = "aktiviert" if active else "deaktiviert"
+            print(f"{icon} Private Mode {state} — Nachrichten werden {'nicht ' if active else ''}gespeichert.\n")
+            continue
+
         active_fut = asyncio.current_task()
         try:
             response = await agent.run(user_input)
