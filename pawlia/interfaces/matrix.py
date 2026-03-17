@@ -314,8 +314,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     logger.info("Matrix: starting sync loop...")
     try:
-        # Initial sync to skip old messages (no callbacks yet)
-        await client.sync(timeout=0, full_state=True)
+        # Initial sync to get a since-token and skip old messages (no callbacks yet)
+        await client.sync(timeout=0)
 
         client.add_event_callback(on_message, RoomMessageText)
         client.add_event_callback(on_image, RoomMessageImage)
