@@ -163,6 +163,21 @@ class CallSession:
             if state in ("failed", "closed", "disconnected"):
                 self._done.set()
 
+        # Collect our ICE candidates as they are gathered
+        _local_candidates: List[Dict] = []
+        _gathering_done = asyncio.Event()
+
+        @self._pc.on("icecandidate")
+        def on_ice_candidate(candidate):
+            if candidate is None:
+                _gathering_done.set()
+            else:
+                _local_candidates.append({
+                    "sdpMid": candidate.sdpMid,
+                    "sdpMLineIndex": candidate.sdpMLineIndex,
+                    "candidate": candidate.candidate,
+                })
+
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=sdp_offer, type="offer")
         )
@@ -177,9 +192,28 @@ class CallSession:
 
         # Auto-hangup watchdog
         asyncio.ensure_future(self._watchdog())
+        # Send our ICE candidates once gathering completes (trickle ICE)
+        asyncio.ensure_future(self._flush_local_candidates(_local_candidates, _gathering_done))
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
+
+    async def _flush_local_candidates(self, candidates: List[Dict], done: asyncio.Event) -> None:
+        """Wait for ICE gathering to finish, then send all candidates via m.call.candidates."""
+        try:
+            await asyncio.wait_for(done.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("call %s: ICE gathering timed out, sending %d candidates collected so far",
+                           self.call_id[:8], len(candidates))
+        if not candidates:
+            logger.warning("call %s: no local ICE candidates gathered", self.call_id[:8])
+            return
+        await self._client.room_send(
+            room_id=self.room_id,
+            message_type="m.call.candidates",
+            content={"call_id": self.call_id, "version": 0, "candidates": candidates},
+        )
+        logger.info("call %s: sent %d local ICE candidates", self.call_id[:8], len(candidates))
 
     async def add_candidates(self, candidates: List[Dict]) -> None:
         """Feed ICE candidates from ``m.call.candidates``."""
