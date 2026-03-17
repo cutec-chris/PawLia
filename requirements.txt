@@ -1,4 +1,5 @@
 aiohttp>=3.9
+aiodns>=3.0        # async DNS for aiohttp (avoids blocking ThreadedResolver)
 langchain-core>=0.3
 langchain-ollama>=0.3
 langchain-openai>=0.3
