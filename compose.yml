@@ -1,6 +1,8 @@
 services:
   pawlia:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.voip
     restart: unless-stopped
     volumes:
       # Required: your config (copy from config.sample.yaml and fill in)
