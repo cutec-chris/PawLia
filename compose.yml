@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile.voip
     restart: unless-stopped
+    network_mode: host
     volumes:
       # Required: your config (copy from config.sample.yaml and fill in)
       - ./config.yaml:/app/config.yaml:ro
