@@ -259,9 +259,8 @@ class CallSession:
         logger.debug("call %s: local SDP:\n%s", self.call_id[:8], sdp)
 
         candidates = _parse_sdp_candidates(sdp)
-        logger.info("call %s: parsed %d local ICE candidates from SDP: %s",
-                    self.call_id[:8], len(candidates),
-                    [c["candidate"][:60] for c in candidates])
+        for c in candidates:
+            logger.info("call %s: local candidate: %s", self.call_id[:8], c["candidate"])
         if not candidates:
             return
 
