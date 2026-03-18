@@ -373,12 +373,16 @@ class CallSession:
 
                 frames_received += 1
 
-                # Convert AudioFrame → float32 mono via PyAV reformat
-                mono_frame = frame.reformat(format='s16', layout='mono')
-                raw = np.frombuffer(bytes(mono_frame.planes[0]),
-                                    dtype=np.int16)[:mono_frame.samples]
-                pcm = raw.astype(np.float32) / 32768.0
-                n_channels = len(frame.layout.channels)
+                # Convert AudioFrame → float32 mono
+                raw_bytes = bytes(frame.planes[0])
+                n_channels = max(len(frame.layout.channels), 1)
+                n_int16 = frame.samples * n_channels
+                raw = np.frombuffer(raw_bytes, dtype=np.int16)[:n_int16]
+                if n_channels > 1:
+                    # Stereo → mono: average as float (no int16 truncation)
+                    pcm = raw.reshape(-1, n_channels).astype(np.float32).mean(axis=1) / 32768.0
+                else:
+                    pcm = raw.astype(np.float32) / 32768.0
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 5:
