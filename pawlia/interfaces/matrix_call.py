@@ -213,6 +213,11 @@ class CallSession:
             if track.kind == "audio":
                 asyncio.ensure_future(self._audio_pipeline(track))
 
+        @self._pc.on("connectionstatechange")
+        async def on_conn_state():
+            logger.info("call %s: connection state → %s",
+                        self.call_id[:8], self._pc.connectionState)
+
         @self._pc.on("iceconnectionstatechange")
         async def on_ice_state():
             state = self._pc.iceConnectionState
