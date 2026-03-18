@@ -198,6 +198,10 @@ class CallSession:
             logger.error("matrix_call: aiortc not installed — cannot accept call")
             return None
 
+        # Temporarily enable verbose aiortc logging for DTLS/SRTP debugging
+        for _name in ("aiortc", "aioice"):
+            logging.getLogger(_name).setLevel(logging.DEBUG)
+
         ice_servers = await self._get_ice_servers()
         self._pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
         self._tts_track = _TTSAudioTrack()
