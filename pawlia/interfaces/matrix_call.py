@@ -234,6 +234,7 @@ class CallSession:
             if state == "complete":
                 _gathering_done.set()
 
+        logger.info("call %s: SDP offer:\n%s", self.call_id[:8], sdp_offer)
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=sdp_offer, type="offer")
         )
@@ -245,6 +246,8 @@ class CallSession:
 
         answer = await self._pc.createAnswer()
         await self._pc.setLocalDescription(answer)
+        logger.info("call %s: SDP answer:\n%s", self.call_id[:8],
+                    self._pc.localDescription.sdp)
 
         # Auto-hangup watchdog
         asyncio.ensure_future(self._watchdog())
@@ -345,12 +348,18 @@ class CallSession:
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 5:
+                    # Check all planes for non-zero data
+                    plane_info = []
+                    for pi, plane in enumerate(frame.planes):
+                        pd = bytes(plane)
+                        nz = sum(1 for b in pd if b != 0)
+                        plane_info.append(f"plane[{pi}]={len(pd)}B/{nz}nz")
                     logger.info("call %s: frame #%d fmt=%s pts=%s ch=%d planar=%s "
-                                "pcm_len=%d rms=%.4f raw_first10=%s",
+                                "pcm_len=%d rms=%.4f %s",
                                 self.call_id[:8], frames_received,
                                 frame.format.name, frame.pts, n_channels,
                                 frame.format.is_planar,
-                                len(pcm), rms, raw[:10].tolist())
+                                len(pcm), rms, " ".join(plane_info))
                 elif frames_received % 50 == 0:
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
