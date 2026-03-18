@@ -10,3 +10,4 @@ numpy>=1.24
 # TTS providers
 edge-tts>=6.1        # Microsoft Edge TTS (needs internet, no local model)
 piper-tts>=1.2       # local neural TTS; downloads voices on first use
+pathvalidate          # required by piper-tts __main__
