@@ -321,12 +321,13 @@ class CallSession:
                 # Read raw samples directly from the plane buffer
                 # (to_ndarray() is unreliable for s16 audio in some PyAV versions)
                 raw = np.frombuffer(bytes(frame.planes[0]), dtype=np.int16)
-                if frame.format.is_planar and frame.layout.channels > 1:
+                n_channels = len(frame.layout.channels)
+                if frame.format.is_planar and n_channels > 1:
                     # Planar multi-channel: planes[0] is first channel only
                     pcm = raw.astype(np.float32) / 32768.0
-                elif frame.layout.channels > 1:
+                elif n_channels > 1:
                     # Interleaved multi-channel: take every Nth sample
-                    pcm = raw[::frame.layout.channels].astype(np.float32) / 32768.0
+                    pcm = raw[::n_channels].astype(np.float32) / 32768.0
                 else:
                     pcm = raw.astype(np.float32) / 32768.0
 
