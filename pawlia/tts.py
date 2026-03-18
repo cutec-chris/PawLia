@@ -168,28 +168,20 @@ async def _synthesize_edge(text: str, cfg: Dict) -> bytes:
 async def _synthesize_piper(text: str, cfg: Dict) -> bytes:
     """Synthesize using piper-tts locally."""
     import os
-    import sys
 
     model = cfg.get("model") or _DEFAULT_PIPER_VOICE
     model_config = cfg.get("config", "")
 
-    # Voice name (no path separator, no .onnx extension) → use Python runner
-    # which supports auto-download from HuggingFace via --download-dir.
+    # Voice name (no path separator, no .onnx) → resolve to bundled model path
     is_voice_name = os.sep not in model and "/" not in model and not model.endswith(".onnx")
     if is_voice_name:
-        os.makedirs(_PIPER_DOWNLOAD_DIR, exist_ok=True)
-        cmd = [
-            sys.executable, "-m", "piper",
-            "--model", model,
-            "--download-dir", _PIPER_DOWNLOAD_DIR,
-            "--data-dir", _PIPER_DOWNLOAD_DIR,
-            "--output_raw",
-        ]
-    else:
-        executable = cfg.get("executable", "piper")
-        cmd = [executable, "--model", model, "--output_raw"]
-        if model_config:
-            cmd += ["--config", model_config]
+        model = os.path.join(_PIPER_DOWNLOAD_DIR, f"{model}.onnx")
+        model_config = model + ".json"
+
+    executable = cfg.get("executable", "piper")
+    cmd = [executable, "--model", model, "--output_raw"]
+    if model_config and os.path.exists(model_config):
+        cmd += ["--config", model_config]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
