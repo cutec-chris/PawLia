@@ -168,31 +168,39 @@ async def _synthesize_edge(text: str, cfg: Dict) -> bytes:
 async def _synthesize_piper(text: str, cfg: Dict) -> bytes:
     """Synthesize using piper-tts locally."""
     import os
+    import sys
 
-    executable = cfg.get("executable", "piper")
     model = cfg.get("model") or _DEFAULT_PIPER_VOICE
     model_config = cfg.get("config", "")
 
-    cmd = [executable, "--model", model, "--output_raw"]
-
-    # Voice name (no path separator, no .onnx) → let piper download it
+    # Voice name (no path separator, no .onnx extension) → use Python runner
+    # which supports auto-download from HuggingFace via --download-dir.
     is_voice_name = os.sep not in model and "/" not in model and not model.endswith(".onnx")
     if is_voice_name:
         os.makedirs(_PIPER_DOWNLOAD_DIR, exist_ok=True)
-        cmd += ["--download-dir", _PIPER_DOWNLOAD_DIR,
-                "--data-dir", _PIPER_DOWNLOAD_DIR]
-    elif model_config:
-        cmd += ["--config", model_config]
+        cmd = [
+            sys.executable, "-m", "piper",
+            "--model", model,
+            "--download-dir", _PIPER_DOWNLOAD_DIR,
+            "--data-dir", _PIPER_DOWNLOAD_DIR,
+            "--output_raw",
+        ]
+    else:
+        executable = cfg.get("executable", "piper")
+        cmd = [executable, "--model", model, "--output_raw"]
+        if model_config:
+            cmd += ["--config", model_config]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate(input=text.encode("utf-8"))
+    stdout, stderr = await proc.communicate(input=text.encode("utf-8"))
 
     if proc.returncode != 0:
-        raise RuntimeError(f"piper exited with code {proc.returncode}")
+        err = stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"piper exited with code {proc.returncode}: {err}")
 
     return stdout
