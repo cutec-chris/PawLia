@@ -26,22 +26,9 @@ async def synthesize(text: str, config: Dict[str, Any]) -> Optional[bytes]:
     Returns MP3 bytes (edge) or raw PCM bytes (piper), or ``None`` if TTS
     is not configured.
     """
-    cfg = config.get("tts", {})
-    if not cfg:
-        # Default: use bundled Piper model if present (Docker image pre-installs it)
-        default_model = "/app/piper/de_DE-kerstin-low.onnx"
-        import os
-        if not os.path.exists(default_model):
-            return None
-        cfg = {
-            "provider": "piper",
-            "piper": {
-                "executable": "piper",
-                "model": default_model,
-                "config": default_model + ".json",
-                "sample_rate": 16000,
-            },
-        }
+    cfg = _effective_tts_cfg(config)
+    if cfg is None:
+        return None
 
     provider = cfg.get("provider", "piper")
     try:
@@ -69,20 +56,67 @@ async def synthesize_pcm(
     """
     import numpy as np
 
+    cfg = _effective_tts_cfg(config)
+    if cfg is None:
+        return None
+
     audio_bytes = await synthesize(text, config)
     if audio_bytes is None:
         return None
 
-    return _decode_to_pcm(audio_bytes, config, sample_rate)
+    return _decode_to_pcm(audio_bytes, cfg, sample_rate)
 
 
-def _decode_to_pcm(audio_bytes: bytes, config: Dict[str, Any], target_rate: int) -> "np.ndarray":
+_DEFAULT_PIPER_MODEL = "/app/piper/de_DE-kerstin-low.onnx"
+
+
+def _effective_tts_cfg(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the effective TTS config dict, applying built-in defaults.
+
+    Returns ``None`` when TTS is not configured and no bundled model exists.
+    """
+    import os
+
+    cfg = config.get("tts", {})
+    if cfg:
+        # Fill in default piper model path if provider is piper but model omitted
+        if cfg.get("provider") == "piper":
+            piper = cfg.get("piper", {})
+            if not piper.get("model"):
+                if not os.path.exists(_DEFAULT_PIPER_MODEL):
+                    logger.warning("tts: piper model not configured and default not found at %s",
+                                   _DEFAULT_PIPER_MODEL)
+                    return None
+                cfg = dict(cfg)
+                cfg["piper"] = {
+                    "executable": "piper",
+                    "model": _DEFAULT_PIPER_MODEL,
+                    "config": _DEFAULT_PIPER_MODEL + ".json",
+                    "sample_rate": 16000,
+                    **piper,
+                }
+        return cfg
+
+    # No tts: section at all — use bundled Piper model if present
+    if not os.path.exists(_DEFAULT_PIPER_MODEL):
+        return None
+    return {
+        "provider": "piper",
+        "piper": {
+            "executable": "piper",
+            "model": _DEFAULT_PIPER_MODEL,
+            "config": _DEFAULT_PIPER_MODEL + ".json",
+            "sample_rate": 16000,
+        },
+    }
+
+
+def _decode_to_pcm(audio_bytes: bytes, cfg: Dict[str, Any], target_rate: int) -> "np.ndarray":
     """Decode audio bytes to float32 mono PCM at *target_rate* Hz via PyAV."""
     import av  # type: ignore
     import numpy as np
 
-    cfg = config.get("tts", {})
-    provider = cfg.get("provider", "edge")
+    provider = cfg.get("provider", "piper")
 
     if provider == "piper":
         # piper returns raw s16le PCM — wrap in WAV header for av
