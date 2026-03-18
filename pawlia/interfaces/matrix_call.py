@@ -459,7 +459,10 @@ class CallSession:
 
         logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
 
-        # Show typing / speaking indicator in the room
+        # Send transcription immediately so it appears before the response
+        await self._send_text(self.room_id, f"🎙️ *{text}*")
+
+        # Show typing indicator while agent thinks
         try:
             await self._client.room_typing(self.room_id, typing_state=True)
         except Exception:
@@ -476,8 +479,7 @@ class CallSession:
             except Exception:
                 pass
 
-        # Always send text to the room as well (transcript + reply)
-        await self._send_text(self.room_id, f"🎙️ *{text}*\n\n{response}")
+        await self._send_text(self.room_id, response)
 
         # TTS: synthesise and feed to outgoing audio track
         if self._tts_track and self._app.config.get("tts"):
