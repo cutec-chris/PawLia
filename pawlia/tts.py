@@ -28,9 +28,22 @@ async def synthesize(text: str, config: Dict[str, Any]) -> Optional[bytes]:
     """
     cfg = config.get("tts", {})
     if not cfg:
-        return None
+        # Default: use bundled Piper model if present (Docker image pre-installs it)
+        default_model = "/app/piper/de_DE-kerstin-low.onnx"
+        import os
+        if not os.path.exists(default_model):
+            return None
+        cfg = {
+            "provider": "piper",
+            "piper": {
+                "executable": "piper",
+                "model": default_model,
+                "config": default_model + ".json",
+                "sample_rate": 16000,
+            },
+        }
 
-    provider = cfg.get("provider", "edge")
+    provider = cfg.get("provider", "piper")
     try:
         if provider == "edge":
             return await _synthesize_edge(text, cfg.get("edge", {}))
