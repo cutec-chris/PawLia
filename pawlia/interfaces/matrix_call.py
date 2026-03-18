@@ -327,13 +327,19 @@ class CallSession:
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 3:
-                    logger.info("call %s: frame #%d shape=%s dtype=%s rms=%.4f",
+                    logger.info("call %s: frame #%d shape=%s dtype=%s rms=%.4f min=%.4f max=%.4f",
                                 self.call_id[:8], frames_received,
-                                arr.shape, arr.dtype, rms)
-                elif frames_received % 200 == 0:
-                    logger.debug("call %s: frame #%d rms=%.4f", self.call_id[:8], frames_received, rms)
+                                arr.shape, arr.dtype, rms,
+                                float(pcm.min()), float(pcm.max()))
+                elif frames_received % 50 == 0:
+                    logger.info("call %s: frame #%d rms=%.4f buf=%d silence=%d",
+                                self.call_id[:8], frames_received, rms,
+                                len(speech_buffer), silence_count)
 
                 if rms > self.SILENCE_THRESHOLD:
+                    if not speech_buffer and silence_count == 0:
+                        logger.info("call %s: speech started (rms=%.4f)",
+                                    self.call_id[:8], rms)
                     speech_buffer.append(pcm)
                     silence_count = 0
                 elif speech_buffer:
@@ -342,13 +348,21 @@ class CallSession:
 
                     if silence_count >= silence_threshold:
                         chunk = np.concatenate(speech_buffer)
+                        duration = len(chunk) / SAMPLE_RATE
+                        logger.info("call %s: speech ended — %.1fs, %d samples",
+                                    self.call_id[:8], duration, len(chunk))
                         speech_buffer = []
                         silence_count = 0
 
                         if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
+                            logger.info("call %s: sending chunk for transcription",
+                                        self.call_id[:8])
                             asyncio.ensure_future(
                                 self._process_speech(chunk, SAMPLE_RATE)
                             )
+                        else:
+                            logger.info("call %s: chunk too short (%.1fs), skipping",
+                                        self.call_id[:8], duration)
         except Exception as e:
             logger.error("call %s: audio pipeline error: %s", self.call_id[:8], e)
         finally:
@@ -357,12 +371,16 @@ class CallSession:
 
     async def _process_speech(self, pcm: "np.ndarray", sample_rate: int) -> None:
         """Transcribe a speech chunk and query the agent."""
-        from pawlia.transcription import transcribe_pcm
-        from pawlia.tts import synthesize_pcm
+        try:
+            from pawlia.transcription import transcribe_pcm
+            from pawlia.tts import synthesize_pcm
+        except ImportError as e:
+            logger.error("call %s: missing dependency: %s", self.call_id[:8], e)
+            return
 
         text = await transcribe_pcm(pcm, sample_rate, self._app.config)
         if not text:
-            logger.debug("call %s: empty transcription", self.call_id[:8])
+            logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
             return
 
         logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
