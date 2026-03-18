@@ -97,6 +97,47 @@ if _AIORTC_AVAILABLE:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _strip_red_codec(sdp: str) -> str:
+    """Remove RED codec (and CN) from an SDP offer.
+
+    Element/Chrome may send RED-wrapped Opus (PT 63) which aiortc cannot
+    decode, causing all received audio to be silence.  By removing RED
+    from the m= line and dropping its rtpmap/fmtp lines, the caller is
+    forced to use plain Opus.
+    """
+    import re
+    lines = sdp.splitlines()
+    # Find RED payload type(s)
+    red_pts: set = set()
+    for line in lines:
+        m = re.match(r"a=rtpmap:(\d+)\s+red/", line)
+        if m:
+            red_pts.add(m.group(1))
+    if not red_pts:
+        return sdp
+
+    out = []
+    for line in lines:
+        # Drop rtpmap / fmtp / rtcp-fb lines for RED PTs
+        skip = False
+        for pt in red_pts:
+            if line.startswith(f"a=rtpmap:{pt} ") or \
+               line.startswith(f"a=fmtp:{pt} ") or \
+               line.startswith(f"a=rtcp-fb:{pt} "):
+                skip = True
+                break
+        if skip:
+            continue
+        # Remove RED PTs from the m= line
+        if line.startswith("m=audio "):
+            for pt in red_pts:
+                line = line.replace(f" {pt} ", " ").replace(f" {pt}\r", "\r").replace(f" {pt}\n", "\n")
+                if line.endswith(f" {pt}"):
+                    line = line[: -len(f" {pt}")]
+        out.append(line)
+    return "\n".join(out)
+
+
 def _parse_sdp_candidates(sdp: str) -> List[Dict]:
     """Extract ICE candidates from a local SDP description.
 
@@ -234,7 +275,10 @@ class CallSession:
             if state == "complete":
                 _gathering_done.set()
 
-        logger.info("call %s: SDP offer:\n%s", self.call_id[:8], sdp_offer)
+        # Strip RED codec from offer — Element may send RED-wrapped Opus
+        # (PT 63) which aiortc silently drops, causing silence.
+        sdp_offer = _strip_red_codec(sdp_offer)
+        logger.info("call %s: SDP offer (cleaned):\n%s", self.call_id[:8], sdp_offer)
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=sdp_offer, type="offer")
         )
@@ -329,39 +373,23 @@ class CallSession:
 
                 frames_received += 1
 
-                # Convert AudioFrame → float32 mono
-                # Read raw samples directly from the plane buffer
-                # (to_ndarray() is unreliable for s16 audio in some PyAV versions)
-                raw_bytes = bytes(frame.planes[0])
-                n_channels = max(len(frame.layout.channels), 1)
-                if frame.format.is_planar:
-                    # Planar: each plane has frame.samples values
-                    n_values = frame.samples
-                else:
-                    # Packed/interleaved: one plane has all channels
-                    n_values = frame.samples * n_channels
-                raw = np.frombuffer(raw_bytes, dtype=np.int16)[:n_values]
-                if n_channels > 1 and not frame.format.is_planar:
-                    # Packed multi-channel → mono: average channels
-                    raw = raw.reshape(-1, n_channels).mean(axis=1).astype(np.int16)
+                # Convert AudioFrame → float32 mono via PyAV reformat
+                mono_frame = frame.reformat(format='s16', layout='mono')
+                raw = np.frombuffer(bytes(mono_frame.planes[0]),
+                                    dtype=np.int16)[:mono_frame.samples]
                 pcm = raw.astype(np.float32) / 32768.0
+                n_channels = len(frame.layout.channels)
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 5:
-                    raw_all = np.frombuffer(raw_bytes, dtype=np.uint8)
-                    data_end = n_values * 2  # bytes we actually read
-                    data_nz = int(np.count_nonzero(raw_all[:data_end]))
-                    pad_nz = int(np.count_nonzero(raw_all[data_end:]))
-                    # Find first non-zero byte offset
-                    nz_idx = np.nonzero(raw_all)[0]
-                    first_nz = int(nz_idx[0]) if len(nz_idx) > 0 else -1
+                    nz_count = int(np.count_nonzero(raw))
                     logger.info("call %s: frame #%d fmt=%s pts=%s ch=%d "
-                                "buf=%dB data_bytes=%d data_nz=%d pad_nz=%d "
-                                "first_nz_at=%d pcm_len=%d rms=%.4f",
+                                "pcm_len=%d nz_samples=%d rms=%.4f "
+                                "raw_first10=%s",
                                 self.call_id[:8], frames_received,
                                 frame.format.name, frame.pts, n_channels,
-                                len(raw_bytes), data_end, data_nz, pad_nz,
-                                first_nz, len(pcm), rms)
+                                len(pcm), nz_count, rms,
+                                raw[:10].tolist())
                 elif frames_received % 50 == 0:
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
