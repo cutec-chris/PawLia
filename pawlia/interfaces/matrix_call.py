@@ -320,25 +320,28 @@ class CallSession:
                 # Convert AudioFrame → float32 mono
                 # Read raw samples directly from the plane buffer
                 # (to_ndarray() is unreliable for s16 audio in some PyAV versions)
-                raw = np.frombuffer(bytes(frame.planes[0]), dtype=np.int16)
-                n_channels = len(frame.layout.channels)
-                if frame.format.is_planar and n_channels > 1:
-                    # Planar multi-channel: planes[0] is first channel only
-                    pcm = raw.astype(np.float32) / 32768.0
-                elif n_channels > 1:
-                    # Interleaved multi-channel: take every Nth sample
-                    pcm = raw[::n_channels].astype(np.float32) / 32768.0
+                raw_bytes = bytes(frame.planes[0])
+                n_channels = max(len(frame.layout.channels), 1)
+                if frame.format.is_planar:
+                    # Planar: each plane has frame.samples values
+                    n_values = frame.samples
                 else:
-                    pcm = raw.astype(np.float32) / 32768.0
+                    # Packed/interleaved: one plane has all channels
+                    n_values = frame.samples * n_channels
+                raw = np.frombuffer(raw_bytes, dtype=np.int16)[:n_values]
+                if n_channels > 1 and not frame.format.is_planar:
+                    # Packed multi-channel → mono: average channels
+                    raw = raw.reshape(-1, n_channels).mean(axis=1).astype(np.int16)
+                pcm = raw.astype(np.float32) / 32768.0
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 5:
-                    logger.info("call %s: frame #%d fmt=%s pts=%s sr=%s samples=%s "
-                                "raw_len=%d rms=%.4f min=%.4f max=%.4f",
+                    logger.info("call %s: frame #%d fmt=%s pts=%s ch=%d planar=%s "
+                                "pcm_len=%d rms=%.4f raw_first10=%s",
                                 self.call_id[:8], frames_received,
-                                frame.format.name, frame.pts, frame.sample_rate,
-                                frame.samples, len(pcm), rms,
-                                float(pcm.min()), float(pcm.max()))
+                                frame.format.name, frame.pts, n_channels,
+                                frame.format.is_planar,
+                                len(pcm), rms, raw[:10].tolist())
                 elif frames_received % 50 == 0:
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
