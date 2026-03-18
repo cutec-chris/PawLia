@@ -326,15 +326,19 @@ class CallSession:
                     pcm = pcm / 32768.0
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
-                if frames_received <= 3:
-                    logger.info("call %s: frame #%d shape=%s dtype=%s rms=%.4f min=%.4f max=%.4f",
+                if frames_received <= 5:
+                    logger.info("call %s: frame #%d fmt=%s pts=%s sr=%s samples=%s "
+                                "shape=%s dtype=%s rms=%.4f min=%.4f max=%.4f",
                                 self.call_id[:8], frames_received,
-                                arr.shape, arr.dtype, rms,
+                                frame.format.name, frame.pts, frame.sample_rate,
+                                frame.samples, arr.shape, arr.dtype, rms,
                                 float(pcm.min()), float(pcm.max()))
                 elif frames_received % 50 == 0:
-                    logger.info("call %s: frame #%d rms=%.4f buf=%d silence=%d",
+                    import hashlib
+                    h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
+                    logger.info("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
                                 self.call_id[:8], frames_received, rms,
-                                len(speech_buffer), silence_count)
+                                len(speech_buffer), silence_count, h)
 
                 if rms > self.SILENCE_THRESHOLD:
                     if not speech_buffer and silence_count == 0:
