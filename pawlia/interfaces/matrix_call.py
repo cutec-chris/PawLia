@@ -250,8 +250,15 @@ class CallSession:
 
         @self._pc.on("track")
         def on_track(track):
-            logger.info("call %s: track received kind=%s", self.call_id[:8], track.kind)
+            logger.info("call %s: track received kind=%s id=%s readyState=%s",
+                        self.call_id[:8], track.kind,
+                        getattr(track, "id", "?"), getattr(track, "readyState", "?"))
             if track.kind == "audio":
+                # Log codec info from receivers
+                for r in self._pc.getReceivers():
+                    if r.track == track:
+                        logger.info("call %s: receiver params: %s",
+                                    self.call_id[:8], getattr(r, "_track", None))
                 asyncio.ensure_future(self._audio_pipeline(track))
 
         @self._pc.on("connectionstatechange")
@@ -297,6 +304,8 @@ class CallSession:
         asyncio.ensure_future(self._watchdog())
         # Send our ICE candidates once gathering completes (parsed from local SDP)
         asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
+        # Periodic RTP receiver stats for diagnostics
+        asyncio.ensure_future(self._log_receiver_stats())
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
@@ -478,6 +487,25 @@ class CallSession:
                     self._tts_track.enqueue_pcm_float32(tts_pcm)
             except Exception as e:
                 logger.warning("call %s: TTS failed: %s", self.call_id[:8], e)
+
+    async def _log_receiver_stats(self) -> None:
+        """Periodically log RTP receiver stats to diagnose audio delivery."""
+        await asyncio.sleep(5)  # wait for connection to establish
+        for _ in range(15):  # log for ~75s max
+            if self._done.is_set() or not self._pc:
+                break
+            try:
+                stats = await self._pc.getStats()
+                for report in stats.values():
+                    t = getattr(report, "type", "")
+                    if t in ("inbound-rtp", "transport", "candidate-pair"):
+                        logger.info("call %s: STATS [%s] %s",
+                                    self.call_id[:8], t,
+                                    {k: v for k, v in report.__dict__.items()
+                                     if not k.startswith("_")})
+            except Exception as e:
+                logger.debug("call %s: stats error: %s", self.call_id[:8], e)
+            await asyncio.sleep(5)
 
     async def _watchdog(self) -> None:
         """Auto-hangup after MAX_CALL_SECONDS."""
