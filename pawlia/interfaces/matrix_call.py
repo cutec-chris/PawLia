@@ -213,7 +213,7 @@ class CallSession:
         async def on_ice_state():
             state = self._pc.iceConnectionState
             logger.info("call %s: ICE state → %s", self.call_id[:8], state)
-            if state in ("failed", "closed", "disconnected"):
+            if state in ("failed", "closed"):
                 self._done.set()
 
         _gathering_done = asyncio.Event()
@@ -311,6 +311,8 @@ class CallSession:
                         logger.warning("call %s: no audio frames received yet", self.call_id[:8])
                     continue
                 except MediaStreamError:
+                    logger.warning("call %s: MediaStreamError after %d frames — track ended",
+                                   self.call_id[:8], frames_received)
                     break
 
                 frames_received += 1
@@ -403,20 +405,43 @@ class CallSession:
             await self.hangup()
             await self._send_hangup_event()
 
+    @staticmethod
+    def _parse_candidate_string(candidate_str: str) -> Optional[Dict]:
+        """Parse an SDP candidate attribute string into field kwargs for RTCIceCandidate."""
+        s = candidate_str
+        if s.startswith("candidate:"):
+            s = s[len("candidate:"):]
+        parts = s.split()
+        if len(parts) < 8:
+            return None
+        result: Dict = {
+            "foundation": parts[0],
+            "component": int(parts[1]),
+            "protocol": parts[2].lower(),
+            "priority": int(parts[3]),
+            "ip": parts[4],
+            "port": int(parts[5]),
+            # parts[6] == "typ"
+            "type": parts[7],
+        }
+        for i in range(8, len(parts) - 1, 2):
+            if parts[i] == "raddr":
+                result["relatedAddress"] = parts[i + 1]
+            elif parts[i] == "rport":
+                result["relatedPort"] = int(parts[i + 1])
+        return result
+
     async def _add_candidate(self, c: Dict) -> None:
         if not c.get("candidate"):
             return  # end-of-candidates signal
         try:
+            parsed = self._parse_candidate_string(c["candidate"])
+            if not parsed:
+                return
             candidate = RTCIceCandidate(
                 sdpMid=c.get("sdpMid"),
                 sdpMLineIndex=c.get("sdpMLineIndex"),
-                foundation=c.get("foundation", ""),
-                component=int(c.get("component", 1)),
-                priority=int(c.get("priority", 0)),
-                host=c.get("ip", ""),
-                type=c.get("type", "host"),
-                port=int(c.get("port", 0)),
-                protocol=c.get("protocol", "udp"),
+                **parsed,
             )
             await self._pc.addIceCandidate(candidate)
         except Exception as e:
