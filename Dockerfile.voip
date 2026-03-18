@@ -35,8 +35,7 @@ RUN apk add --no-cache \
         openssl \
         libffi \
         gcompat \
-        libstdc++ \
-        wget
+        libstdc++
 
 WORKDIR /app
 
@@ -59,6 +58,13 @@ RUN wget -q -O /tmp/piper.tar.gz \
     rm /tmp/piper.tar.gz
 
 ENV PATH="/opt/piper:$PATH"
+
+# Default voice model: German Kerstin low (~15 MB, 16 kHz)
+RUN mkdir -p /app/piper && \
+    wget -q -O /app/piper/de_DE-kerstin-low.onnx \
+        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx" && \
+    wget -q -O /app/piper/de_DE-kerstin-low.onnx.json \
+        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json"
 
 
 # Session data lives in a volume
