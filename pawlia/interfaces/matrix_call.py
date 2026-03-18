@@ -182,7 +182,8 @@ class CallSession:
                         password = data.get("password", "")
                         if uris:
                             servers.append(RTCIceServer(urls=uris, username=username, credential=password))
-                            logger.info("call %s: using %d TURN/STUN URIs from Synapse", self.call_id[:8], len(uris))
+                            logger.info("call %s: using %d TURN/STUN URIs from Synapse: %s",
+                                        self.call_id[:8], len(uris), uris)
         except Exception as e:
             logger.warning("call %s: could not fetch TURN servers from Synapse: %s", self.call_id[:8], e)
 
@@ -258,7 +259,9 @@ class CallSession:
         logger.debug("call %s: local SDP:\n%s", self.call_id[:8], sdp)
 
         candidates = _parse_sdp_candidates(sdp)
-        logger.info("call %s: parsed %d local ICE candidates from SDP", self.call_id[:8], len(candidates))
+        logger.info("call %s: parsed %d local ICE candidates from SDP: %s",
+                    self.call_id[:8], len(candidates),
+                    [c["candidate"][:60] for c in candidates])
         if not candidates:
             return
 
