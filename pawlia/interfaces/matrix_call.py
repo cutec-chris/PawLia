@@ -318,20 +318,25 @@ class CallSession:
                 frames_received += 1
 
                 # Convert AudioFrame → float32 mono
-                arr = frame.to_ndarray()  # (channels, samples) or (samples,)
-                if arr.ndim > 1:
-                    arr = arr.mean(axis=0)
-                pcm = arr.astype(np.float32)
-                if pcm.max() > 1.0 or pcm.min() < -1.0:
-                    pcm = pcm / 32768.0
+                # Read raw samples directly from the plane buffer
+                # (to_ndarray() is unreliable for s16 audio in some PyAV versions)
+                raw = np.frombuffer(bytes(frame.planes[0]), dtype=np.int16)
+                if frame.format.is_planar and frame.layout.channels > 1:
+                    # Planar multi-channel: planes[0] is first channel only
+                    pcm = raw.astype(np.float32) / 32768.0
+                elif frame.layout.channels > 1:
+                    # Interleaved multi-channel: take every Nth sample
+                    pcm = raw[::frame.layout.channels].astype(np.float32) / 32768.0
+                else:
+                    pcm = raw.astype(np.float32) / 32768.0
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 5:
                     logger.info("call %s: frame #%d fmt=%s pts=%s sr=%s samples=%s "
-                                "shape=%s dtype=%s rms=%.4f min=%.4f max=%.4f",
+                                "raw_len=%d rms=%.4f min=%.4f max=%.4f",
                                 self.call_id[:8], frames_received,
                                 frame.format.name, frame.pts, frame.sample_rate,
-                                frame.samples, arr.shape, arr.dtype, rms,
+                                frame.samples, len(pcm), rms,
                                 float(pcm.min()), float(pcm.max()))
                 elif frames_received % 50 == 0:
                     import hashlib
