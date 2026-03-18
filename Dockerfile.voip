@@ -1,39 +1,65 @@
-FROM python:3.13-slim
+# ── Stage 1: build ────────────────────────────────────────────────────────
+# Compiles Python packages that have no musllinux wheels (e.g. cryptography,
+# aiohttp) against Alpine musl so the runtime stage stays build-tool-free.
+FROM python:3.13-alpine AS builder
 
-WORKDIR /app
+RUN apk add --no-cache \
+        gcc \
+        musl-dev \
+        python3-dev \
+        openssl-dev \
+        libffi-dev
 
-# System dependencies:
-#   nodejs/npm    — AgentSkills
-#   espeak-ng     — required by piper-tts for phonemisation
-#   ffmpeg        — audio decoding/encoding for aiortc/av
-RUN apt-get update && apt-get install -y --no-install-recommends \
+COPY requirements.txt requirements-voip.txt ./
+RUN pip install --no-cache-dir --prefix=/install \
+        -r requirements.txt \
+        -r requirements-voip.txt
+
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────
+FROM python:3.13-alpine
+
+# Runtime system deps:
+#   nodejs/npm   — AgentSkills
+#   espeak-ng    — phonemisation for Piper
+#   ffmpeg       — audio codec support for aiortc/av
+#   openssl/libffi — runtime for cryptography (compiled in stage 1)
+#   gcompat      — glibc compatibility layer for Piper binary
+#   libstdc++    — C++ runtime for Piper
+RUN apk add --no-cache \
         nodejs \
         npm \
         espeak-ng \
         ffmpeg \
         wget \
-    && rm -rf /var/lib/apt/lists/*
+        openssl \
+        libffi \
+        gcompat \
+        libstdc++
 
-# Base Python dependencies
-COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR /app
 
-# VoIP / telephony extras (aiortc, av, numpy, edge-tts, piper-tts)
-COPY requirements-voip.txt requirements-voip.txt
-RUN pip install --no-cache-dir -r requirements-voip.txt
+# Copy compiled Python packages from builder
+COPY --from=builder /install /usr/local
 
-# Copy application code and built-in assets
+# Application code
 COPY pawlia/ pawlia/
 COPY skills/ skills/
-
-# Ensure user skills directory exists (may be empty if gitignored)
 RUN mkdir -p skills/user
 
-# Install runtime dependencies for all pre-bundled skills
+# Install npm packages declared in bundled skills
 RUN python -m pawlia.install_skill_deps
 
-# Download default Piper voice model (German: de_DE-kerstin-low, ~15 MB)
-# Model is baked into the image so piper works out of the box.
+# Piper TTS binary (v1.2.0 — glibc binary, runs via gcompat on Alpine)
+# Extracts to /opt/piper/piper + bundled ONNX-runtime .so files
+RUN wget -q -O /tmp/piper.tar.gz \
+        "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_x86_64.tar.gz" && \
+    tar -xzf /tmp/piper.tar.gz -C /opt/ && \
+    rm /tmp/piper.tar.gz
+
+ENV PATH="/opt/piper:$PATH"
+
+# Default voice model: German Kerstin low (~15 MB, 16 kHz)
 RUN mkdir -p /app/piper && \
     wget -q -O /app/piper/de_DE-kerstin-low.onnx \
         "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx" && \
