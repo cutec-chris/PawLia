@@ -348,18 +348,20 @@ class CallSession:
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 5:
-                    # Check all planes for non-zero data
-                    plane_info = []
-                    for pi, plane in enumerate(frame.planes):
-                        pd = bytes(plane)
-                        nz = sum(1 for b in pd if b != 0)
-                        plane_info.append(f"plane[{pi}]={len(pd)}B/{nz}nz")
-                    logger.info("call %s: frame #%d fmt=%s pts=%s ch=%d planar=%s "
-                                "pcm_len=%d rms=%.4f %s",
+                    raw_all = np.frombuffer(raw_bytes, dtype=np.uint8)
+                    data_end = n_values * 2  # bytes we actually read
+                    data_nz = int(np.count_nonzero(raw_all[:data_end]))
+                    pad_nz = int(np.count_nonzero(raw_all[data_end:]))
+                    # Find first non-zero byte offset
+                    nz_idx = np.nonzero(raw_all)[0]
+                    first_nz = int(nz_idx[0]) if len(nz_idx) > 0 else -1
+                    logger.info("call %s: frame #%d fmt=%s pts=%s ch=%d "
+                                "buf=%dB data_bytes=%d data_nz=%d pad_nz=%d "
+                                "first_nz_at=%d pcm_len=%d rms=%.4f",
                                 self.call_id[:8], frames_received,
                                 frame.format.name, frame.pts, n_channels,
-                                frame.format.is_planar,
-                                len(pcm), rms, " ".join(plane_info))
+                                len(raw_bytes), data_end, data_nz, pad_nz,
+                                first_nz, len(pcm), rms)
                 elif frames_received % 50 == 0:
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
