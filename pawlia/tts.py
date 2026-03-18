@@ -67,47 +67,27 @@ async def synthesize_pcm(
     return _decode_to_pcm(audio_bytes, cfg, sample_rate)
 
 
-_DEFAULT_PIPER_MODEL = "/app/piper/de_DE-kerstin-low.onnx"
+_DEFAULT_PIPER_VOICE = "de_DE-kerstin-low"
+_PIPER_DOWNLOAD_DIR = "/app/piper"
 
 
 def _effective_tts_cfg(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Return the effective TTS config dict, applying built-in defaults.
 
-    Returns ``None`` when TTS is not configured and no bundled model exists.
+    Returns ``None`` when TTS is not configured.
     """
-    import os
-
     cfg = config.get("tts", {})
     if cfg:
-        # Fill in default piper model path if provider is piper but model omitted
-        if cfg.get("provider") == "piper":
-            piper = cfg.get("piper", {})
-            if not piper.get("model"):
-                if not os.path.exists(_DEFAULT_PIPER_MODEL):
-                    logger.warning("tts: piper model not configured and default not found at %s",
-                                   _DEFAULT_PIPER_MODEL)
-                    return None
-                cfg = dict(cfg)
-                cfg["piper"] = {
-                    "executable": "piper",
-                    "model": _DEFAULT_PIPER_MODEL,
-                    "config": _DEFAULT_PIPER_MODEL + ".json",
-                    "sample_rate": 16000,
-                    **piper,
-                }
+        # Fill in default voice if provider is piper but model omitted
+        if cfg.get("provider") == "piper" and not cfg.get("piper", {}).get("model"):
+            cfg = dict(cfg)
+            cfg["piper"] = {"model": _DEFAULT_PIPER_VOICE, **cfg.get("piper", {})}
         return cfg
 
-    # No tts: section at all — use bundled Piper model if present
-    if not os.path.exists(_DEFAULT_PIPER_MODEL):
-        return None
+    # No tts: section — default to piper with built-in voice
     return {
         "provider": "piper",
-        "piper": {
-            "executable": "piper",
-            "model": _DEFAULT_PIPER_MODEL,
-            "config": _DEFAULT_PIPER_MODEL + ".json",
-            "sample_rate": 16000,
-        },
+        "piper": {"model": _DEFAULT_PIPER_VOICE},
     }
 
 
@@ -121,7 +101,7 @@ def _decode_to_pcm(audio_bytes: bytes, cfg: Dict[str, Any], target_rate: int) ->
     if provider == "piper":
         # piper returns raw s16le PCM — wrap in WAV header for av
         piper_cfg = cfg.get("piper", {})
-        src_rate = piper_cfg.get("sample_rate", 22050)
+        src_rate = piper_cfg.get("sample_rate", 16000)
         audio_bytes = _raw_s16_to_wav(audio_bytes, src_rate, channels=1)
 
     container = av.open(io.BytesIO(audio_bytes))
@@ -186,16 +166,22 @@ async def _synthesize_edge(text: str, cfg: Dict) -> bytes:
 
 
 async def _synthesize_piper(text: str, cfg: Dict) -> bytes:
-    """Synthesize using piper-tts locally (must be installed separately)."""
+    """Synthesize using piper-tts locally."""
+    import os
+
     executable = cfg.get("executable", "piper")
-    model = cfg.get("model", "")
+    model = cfg.get("model") or _DEFAULT_PIPER_VOICE
     model_config = cfg.get("config", "")
 
-    if not model:
-        raise RuntimeError("tts.piper.model not configured")
-
     cmd = [executable, "--model", model, "--output_raw"]
-    if model_config:
+
+    # Voice name (no path separator, no .onnx) → let piper download it
+    is_voice_name = os.sep not in model and "/" not in model and not model.endswith(".onnx")
+    if is_voice_name:
+        os.makedirs(_PIPER_DOWNLOAD_DIR, exist_ok=True)
+        cmd += ["--download-dir", _PIPER_DOWNLOAD_DIR,
+                "--data-dir", _PIPER_DOWNLOAD_DIR]
+    elif model_config:
         cmd += ["--config", model_config]
 
     proc = await asyncio.create_subprocess_exec(
