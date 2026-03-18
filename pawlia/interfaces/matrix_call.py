@@ -198,7 +198,7 @@ class CallSession:
 
         self._pc: Optional["RTCPeerConnection"] = None
         self._tts_track: Optional["_TTSAudioTrack"] = None
-        self._agent = app.make_agent(f"call_{room_id}")
+        self._agent = app.make_agent(f"mx_{room_id}")
         self._done = asyncio.Event()
         self._pending_candidates: List[Dict] = []
         self._speaking = False
