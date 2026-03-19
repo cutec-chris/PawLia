@@ -47,14 +47,11 @@ async def start_webhook(app: "App", cfg: Dict) -> None:
     port: int = cfg.get("port", 8080)
     token: str = cfg.get("token", "")
 
-    agents: dict = {}
+    from pawlia.interfaces.common import AgentCache
+
+    agent_cache = AgentCache(app)
     # Buffer for proactive notifications (polled via GET /notifications)
     pending_notifications: Dict[str, List[str]] = defaultdict(list)
-
-    def get_agent(user_id: str):
-        if user_id not in agents:
-            agents[user_id] = app.make_agent(user_id)
-        return agents[user_id]
 
     def _check_auth(request: web.Request) -> bool:
         if not token:
@@ -79,7 +76,7 @@ async def start_webhook(app: "App", cfg: Dict) -> None:
         logger.info("Webhook: message from %s: %s (images=%d)", user_id, message[:80], len(images or []))
 
         try:
-            agent = get_agent(user_id)
+            agent = agent_cache.get(user_id)
 
             async def _on_interim(text: str) -> None:
                 pending_notifications[user_id].append(text)
