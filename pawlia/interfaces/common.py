@@ -85,8 +85,6 @@ def build_status(
     model_override = session.model_override
     model_name = model_override or getattr(agent.llm, "model_name", None) or getattr(agent.llm, "model", "?")
     temperature = getattr(agent.llm, "temperature", None)
-    provider_url = str(getattr(agent.llm, "base_url", "") or "")
-
     # Context for thread or main
     if thread_id:
         exchanges = app.memory.get_thread_context(session, thread_id)
@@ -112,7 +110,6 @@ def build_status(
         "model": model_name,
         "model_override": model_override is not None,
         "temperature": temperature,
-        "provider": provider_url,
         "exchanges": len(exchanges),
         "context_chars": context_chars,
         "estimated_tokens": estimated_tokens,
@@ -132,8 +129,6 @@ def format_status(status: Dict[str, Any]) -> str:
     lines.append(f"**Model:** `{status['model']}`" + (" _(override)_" if status["model_override"] else ""))
     if status["temperature"] is not None:
         lines.append(f"**Temp:** {status['temperature']}")
-    if status["provider"]:
-        lines.append(f"**Provider:** `{status['provider']}`")
     ctx = "Thread" if status["thread_id"] else "Session"
     lines.append(f"**Context:** {status['exchanges']} exchanges, ~{status['estimated_tokens']} tokens ({ctx})")
     if status["has_summary"]:
