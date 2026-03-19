@@ -180,12 +180,18 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         session = app.memory.load_session(session_id)
         ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
 
+        async def _reply(text: str) -> None:
+            if thread_id:
+                await _send_thread_reply(room.room_id, thread_id, text)
+            else:
+                await _send_text(room.room_id, text)
+
         if not args.strip():
             if thread_id:
                 current = app.memory.get_thread_model_override(session, thread_id) or "(default)"
             else:
                 current = session.model_override or "(default)"
-            await _send_text(room.room_id, f"**Aktives Modell** [{ctx_label}]: `{current}`")
+            await _reply(f"**Aktives Modell** [{ctx_label}]: `{current}`")
             return
 
         new_model = args.strip()
@@ -197,7 +203,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             agents.pop(session_id, None)  # recreate with new LLM on next message
             logger.info("Matrix: model changed for %s -> %s", session_id, new_model)
 
-        await _send_text(room.room_id, f"✓ Modell für **{ctx_label}** auf `{new_model}` gesetzt.")
+        await _reply(f"✓ Modell für **{ctx_label}** auf `{new_model}` gesetzt.")
 
     async def _handle(
         room: MatrixRoom,
@@ -226,6 +232,12 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             await _handle_model_command(room, session_id, text[len("!model"):], thread_id)
             return
 
+        async def _send(text: str) -> None:
+            if thread_id:
+                await _send_thread_reply(room.room_id, thread_id, text)
+            else:
+                await _send_text(room.room_id, text)
+
         try:
             await client.room_typing(room.room_id, typing_state=True)
 
@@ -236,16 +248,24 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             current_skill: Optional[str] = None
 
             async def _on_interim(interim_text: str) -> None:
-                await _send_text(room.room_id, interim_text)
+                await _send(interim_text)
 
             async def _on_skill_start(skill_name: str, query: str) -> None:
                 nonlocal status_event_id, step_count, current_skill
                 current_skill = skill_name
                 step_count = 0
+                content = _make_status(skill_name, query)
+                if thread_id:
+                    content["m.relates_to"] = {
+                        "rel_type": "m.thread",
+                        "event_id": thread_id,
+                        "is_falling_back": False,
+                        "m.in_reply_to": {"event_id": thread_id},
+                    }
                 resp = await client.room_send(
                     room_id=room.room_id,
                     message_type="m.room.message",
-                    content=_make_status(skill_name, query),
+                    content=content,
                 )
                 status_event_id = getattr(resp, "event_id", None)
 
@@ -274,7 +294,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             response = await agent.run(text, images=images or None, thread_id=thread_id)
 
             await client.room_typing(room.room_id, typing_state=False)
-            await _send_text(room.room_id, response)
+            await _send(response)
         except Exception as e:
             logger.error("Matrix: error processing message: %s", e)
             try:
