@@ -85,7 +85,7 @@ def build_status(
     model_override = session.model_override
     model_name = model_override or getattr(agent.llm, "model_name", None) or getattr(agent.llm, "model", "?")
     temperature = getattr(agent.llm, "temperature", None)
-    provider_url = str(getattr(agent.llm, "openai_api_base", "") or getattr(agent.llm, "base_url", ""))
+    provider_url = str(getattr(agent.llm, "base_url", "") or "")
 
     # Context for thread or main
     if thread_id:
