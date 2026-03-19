@@ -101,6 +101,37 @@ async def start_cli(app: "App") -> None:
             print(f"{icon} Private Mode {state} — Nachrichten werden {'nicht ' if active else ''}gespeichert.\n")
             continue
 
+        if user_input.strip().lower().startswith("/thread"):
+            message = user_input.strip()[len("/thread"):].strip()
+            if not message:
+                print("Verwendung: /thread <Nachricht>\n")
+                continue
+            import time
+            thread_id = f"cli_{int(time.time())}"
+            active_fut = asyncio.current_task()
+            try:
+                response = await agent.run(message, thread_id=thread_id)
+                print(f"{_CYAN}Bot [Thread]:{_RESET} {response}\n")
+            except asyncio.CancelledError:
+                print("\n(interrupted)")
+            except Exception as e:
+                logger.error("Error: %s", e)
+                print(f"Error: {e}\n")
+            continue
+
+        if user_input.strip().lower().startswith("/model"):
+            parts = user_input.strip().split(maxsplit=1)
+            session = app.memory.load_session("cli_user")
+            if len(parts) == 1:
+                current = session.model_override or "(default)"
+                print(f"Aktives Modell: {current}\n")
+            else:
+                new_model = parts[1].strip()
+                app.memory.set_model_override(session, new_model)
+                agent = app.make_agent("cli_user", on_interim=_on_interim)
+                print(f"✓ Modell auf '{new_model}' gesetzt.\n")
+            continue
+
         active_fut = asyncio.current_task()
         try:
             response = await agent.run(user_input)
