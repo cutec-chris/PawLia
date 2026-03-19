@@ -9,4 +9,5 @@ numpy>=1.24
 
 # TTS providers
 edge-tts>=6.1        # Microsoft Edge TTS (needs internet, no local model)
-piper-tts>=1.2       # local neural TTS (models downloaded separately)
+# piper-tts: not installable on Alpine (onnxruntime/piper-phonemize have no musl wheels)
+# → piper binary is bundled in Dockerfile.voip instead
