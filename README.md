@@ -11,9 +11,9 @@
         ░▓▓█
 ```
 
-**A lightweight, open-source AI assistant built for local hardware.**
+**A lightweight, open-source AI assistant built for small language models (e.g. Qwen 3.5 9b).**
 
-PawLia runs small language models (e.g. Qwen, Llama) with persistent memory, multi-user sessions, and extensible skills — no cloud required.
+PawLia brings persistent memory, multi-user sessions, and extensible skills to (non only) local AI — no cloud API required.
 
 ## Why PawLia?
 
