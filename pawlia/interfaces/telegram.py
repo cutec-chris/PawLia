@@ -9,7 +9,6 @@ Config (in config.json under "interfaces.telegram"):
 import asyncio
 import base64
 import logging
-import re
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from telegram import Update
@@ -28,33 +27,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("pawlia.interfaces.telegram")
 
 
-def _md_to_tg_html(text: str) -> str:
-    """Convert common markdown to Telegram-compatible HTML subset.
-
-    Telegram supports: <b>, <i>, <code>, <pre>, <a href="">, <s>, <u>.
-    """
-    # Fenced code blocks: ```lang\ncode\n``` -> <pre>code</pre>
-    text = re.sub(
-        r"```(?:\w*)\n(.*?)```",
-        lambda m: f"<pre>{m.group(1).rstrip()}</pre>",
-        text,
-        flags=re.DOTALL,
-    )
-    # Inline code: `code` -> <code>code</code>
-    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
-    # Bold: **text** or __text__
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
-    # Italic: *text* or _text_
-    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
-    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", text)
-    # Strikethrough: ~~text~~
-    text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
-    # Links: [text](url)
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
-    return text
-
-
 async def start_telegram(app: "App", cfg: Dict) -> None:
     """Start the Telegram bot and poll for messages.
 
@@ -62,7 +34,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     """
     token: str = cfg["token"]
 
-    from pawlia.interfaces.common import AgentCache, handle_model_command
+    from pawlia.interfaces.common import AgentCache, build_status, format_status, md_to_tg_html, handle_model_command
 
     # One agent per user; thread context is passed at run() time
     agent_cache = AgentCache(app)
@@ -80,7 +52,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
             async def _on_interim(interim_text: str) -> None:
                 await update.message.reply_text(
-                    _md_to_tg_html(interim_text), parse_mode=ParseMode.HTML,
+                    md_to_tg_html(interim_text), parse_mode=ParseMode.HTML,
                 )
                 # Re-send typing after interim message so it stays visible
                 await update.message.chat.send_action(ChatAction.TYPING)
@@ -131,7 +103,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                 thread_id=str(thread_id) if thread_id else None,
             )
             await update.message.reply_text(
-                _md_to_tg_html(response), parse_mode=ParseMode.HTML,
+                md_to_tg_html(response), parse_mode=ParseMode.HTML,
             )
         except Exception as e:
             logger.error("Telegram: error processing message: %s", e)
@@ -182,6 +154,25 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
         logger.info("Telegram: /thread from %s (%s): %s", user.first_name, user_id, text[:80])
         await _handle(update, user_id, text, thread_id=thread_id)
+
+    async def on_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/status — show session status."""
+        if not update.message:
+            return
+        user = update.message.from_user
+        if user is None:
+            return
+
+        user_id = f"tg_{user.id}"
+        thread_id: Optional[int] = update.message.message_thread_id
+        agent = agent_cache.get(user_id)
+        status = build_status(
+            app, user_id, agent,
+            thread_id=str(thread_id) if thread_id else None,
+        )
+        await update.message.reply_text(
+            md_to_tg_html(format_status(status)), parse_mode=ParseMode.HTML,
+        )
 
     async def on_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/model [name] — show or change the active model for this session."""
@@ -264,6 +255,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     application.add_handler(CommandHandler("private", on_private_command))
     application.add_handler(CommandHandler("model", on_model_command))
     application.add_handler(CommandHandler("thread", on_thread_command))
+    application.add_handler(CommandHandler("status", on_status_command))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, on_message),
     )
@@ -277,7 +269,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         if chat_id:
             try:
                 await application.bot.send_message(
-                    chat_id=chat_id, text=_md_to_tg_html(message), parse_mode=ParseMode.HTML,
+                    chat_id=chat_id, text=md_to_tg_html(message), parse_mode=ParseMode.HTML,
                 )
             except Exception as e:
                 logger.error("Telegram notify failed for %s: %s", user_id, e)

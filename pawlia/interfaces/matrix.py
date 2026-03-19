@@ -116,7 +116,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         await client.close()
         return
 
-    from pawlia.interfaces.common import AgentCache, handle_model_command
+    from pawlia.interfaces.common import AgentCache, build_status, format_status, handle_model_command
 
     # One agent per Matrix room (shared context for everyone in the room)
     agent_cache = AgentCache(app)
@@ -209,6 +209,16 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         logger.info("Matrix: message in %s%s: %s (images=%d)", room.room_id, ctx, text[:80], len(images or []))
 
         # Commands
+        if text.strip() == "!status":
+            agent = get_agent(room.room_id)
+            status = build_status(app, session_id, agent, thread_id=thread_id)
+            text_out = format_status(status)
+            if thread_id:
+                await _send_thread_reply(room.room_id, thread_id, text_out)
+            else:
+                await _send_text(room.room_id, text_out)
+            return
+
         if text.startswith("!private"):
             if not thread_id:
                 await _send_text(room.room_id, "_!private funktioniert nur in Threads._")
