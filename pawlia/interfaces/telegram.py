@@ -168,6 +168,28 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             parse_mode=ParseMode.HTML,
         )
 
+    async def on_thread_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/thread <message> — run a message in its own isolated thread context."""
+        if not update.message:
+            return
+        user = update.message.from_user
+        if user is None:
+            return
+
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "<i>Verwendung: /thread &lt;Nachricht&gt;</i>", parse_mode=ParseMode.HTML,
+            )
+            return
+
+        user_id = f"tg_{user.id}"
+        thread_id = str(update.message.message_id)
+        text = " ".join(args)
+
+        logger.info("Telegram: /thread from %s (%s): %s", user.first_name, user_id, text[:80])
+        await _handle(update, user_id, text, thread_id=thread_id)
+
     async def on_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/model [name] — show or change the active model for this session."""
         if not update.message:
@@ -256,6 +278,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("private", on_private_command))
     application.add_handler(CommandHandler("model", on_model_command))
+    application.add_handler(CommandHandler("thread", on_thread_command))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, on_message),
     )
