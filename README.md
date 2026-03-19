@@ -19,9 +19,14 @@ PawLia runs small language models (e.g. Qwen, Llama) with persistent memory, mul
 
 - **Runs locally** — any OpenAI-compatible backend: Ollama, vLLM, Groq, OpenRouter
 - **Meets you where you are** — Telegram, Matrix, CLI, or HTTP webhook, all at once
-- **Remembers** — per-user memory and conversation history persisted as Markdown
+- **Talk to it** — voice messages are transcribed automatically; Matrix VoIP calls let you speak to PawLia directly
+- **Threads** — isolate side conversations in Telegram forum topics or Matrix threads, each with its own context and model
+- **Multi-user** — every user gets their own session with separate memory, history, and model settings
+- **Remembers** — conversation history and user facts persisted as Markdown, with automatic summarization
+- **Switch models on the fly** — `/model qwen3:4b` swaps the LLM at runtime, per-thread or session-wide
 - **Extensible** — drop a `SKILL.md` in `skills/user/` and the agent picks it up automatically
 - **Proactive** — built-in scheduler delivers reminders and calendar alerts through your active interface
+- **Private mode** — `/private` prevents messages from being written to disk
 
 ## Quick Start
 
@@ -36,7 +41,14 @@ See [docs/installation.md](docs/installation.md) for full setup instructions, in
 
 ## Interfaces
 
-CLI · Telegram · Matrix · Webhook — all run simultaneously in server mode. Telegram and Matrix support voice messages, images, and threads. Matrix additionally supports VoIP calls.
+| Interface | Voice | Images | Threads | VoIP |
+|-----------|:-----:|:------:|:-------:|:----:|
+| **Telegram** | transcription | vision agent | forum topics | — |
+| **Matrix** | transcription | vision agent | thread replies | full duplex |
+| **CLI** | — | — | `/thread` | — |
+| **Webhook** | — | base64 | via `thread_id` | — |
+
+All interfaces run simultaneously in server mode.
 
 → [docs/interfaces.md](docs/interfaces.md)
 
