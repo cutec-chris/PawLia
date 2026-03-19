@@ -26,41 +26,33 @@ PawLia runs small language models (e.g. Qwen, Llama) with persistent memory, mul
 ## Quick Start
 
 ```bash
-# 1. Configure
 cp config.sample.yaml config.yaml
-# edit config.yaml — add your Ollama/Groq/etc. credentials
+# edit config.yaml — add your provider URL and bot tokens
 
-# 2. Run
-python -m pawlia            # interactive CLI
-python -m pawlia --mode server  # Telegram + Matrix + Webhook
-
-# Or with Docker
 docker compose up -d
 ```
 
+See [docs/installation.md](docs/installation.md) for full setup instructions, including manual installation for development.
+
 ## Interfaces
 
-| Interface | How to run | Notes |
-|-----------|-----------|-------|
-| **CLI** | `python -m pawlia` | Interactive terminal |
-| **Telegram** | `--mode server` | Voice, images, threads |
-| **Matrix** | `--mode server` | Element-compatible, threads |
-| **Webhook** | `--mode server` | `POST /chat`, `GET /notifications` |
+CLI · Telegram · Matrix · Webhook — all run simultaneously in server mode. Telegram and Matrix support voice messages, images, and threads. Matrix additionally supports VoIP calls.
 
-All interfaces can run simultaneously in server mode.
+→ [docs/interfaces.md](docs/interfaces.md)
 
 ## Skills
 
-Skills are self-contained directories with a `SKILL.md` — same format as [AgentSkills](https://agentskills.io). Each skill runs as a sub-agent with its own LLM session.
+Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and it loads automatically. Bundled: searxng · perplexica · browser · files · organizer.
 
-**Bundled:** searxng · perplexica · browser · files · organizer
-
-**Custom:** place your skill in `skills/user/` (gitignored) — it loads automatically.
+→ [docs/skills.md](docs/skills.md)
 
 ## Documentation
 
-- [Command reference](docs/commands.md) — `/model`, `/private`, and platform prefixes
-- `config.sample.yaml` — full configuration reference with comments
+- [Installation](docs/installation.md) — Docker setup, first steps
+- [Interfaces](docs/interfaces.md) — CLI, Telegram, Matrix, Webhook, sessions, scheduler
+- [Configuration](docs/config.md) — providers, models, agents, fallback chain
+- [Skills](docs/skills.md) — bundled skills, custom skills, SKILL.md format
+- [Commands](docs/commands.md) — `/thread`, `/model`, `/private`
 
 ## Project Structure
 
