@@ -179,7 +179,8 @@ def _load_json(path: str) -> list:
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except Exception as e:
+        logger.error("Failed to load %s: %s", path, e)
         return []
 
 

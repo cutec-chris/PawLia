@@ -116,13 +116,13 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         await client.close()
         return
 
+    from pawlia.interfaces.common import AgentCache, handle_model_command
+
     # One agent per Matrix room (shared context for everyone in the room)
-    agents: Dict[str, object] = {}  # room_id -> agent
+    agent_cache = AgentCache(app)
 
     def get_agent(room_id: str):
-        if room_id not in agents:
-            agents[room_id] = app.make_agent(f"mx_{room_id}")
-        return agents[room_id]
+        return agent_cache.get(f"mx_{room_id}")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -173,12 +173,18 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return relates_to.get("event_id")
         return None
 
-    async def _handle_model_command(
+    async def _handle_model_cmd(
         room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
     ) -> None:
         """Handle '!model [name]' — show or change the model for this context."""
-        session = app.memory.load_session(session_id)
         ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
+        result = handle_model_command(app, session_id, args, thread_id=thread_id, ctx_label=ctx_label)
+
+        if result.invalidate_agent:
+            agent_cache.invalidate(session_id)
+            logger.info("Matrix: model changed for %s -> %s", session_id, result.model)
+        elif result.action == "set":
+            logger.info("Matrix: model changed for %s thread %s -> %s", session_id, thread_id and thread_id[:8], result.model)
 
         async def _reply(text: str) -> None:
             if thread_id:
@@ -186,24 +192,10 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             else:
                 await _send_text(room.room_id, text)
 
-        if not args.strip():
-            if thread_id:
-                current = app.memory.get_thread_model_override(session, thread_id) or "(default)"
-            else:
-                current = session.model_override or "(default)"
-            await _reply(f"**Aktives Modell** [{ctx_label}]: `{current}`")
-            return
-
-        new_model = args.strip()
-        if thread_id:
-            app.memory.set_thread_model_override(session, thread_id, new_model)
-            logger.info("Matrix: model changed for %s thread %s -> %s", session_id, thread_id[:8], new_model)
+        if result.action == "show":
+            await _reply(f"**Aktives Modell** [{result.ctx_label}]: `{result.model}`")
         else:
-            app.memory.set_model_override(session, new_model)
-            agents.pop(session_id, None)  # recreate with new LLM on next message
-            logger.info("Matrix: model changed for %s -> %s", session_id, new_model)
-
-        await _reply(f"✓ Modell für **{ctx_label}** auf `{new_model}` gesetzt.")
+            await _reply(f"✓ Modell für **{result.ctx_label}** auf `{result.model}` gesetzt.")
 
     async def _handle(
         room: MatrixRoom,
@@ -229,7 +221,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
 
         if text.startswith("!model"):
-            await _handle_model_command(room, session_id, text[len("!model"):], thread_id)
+            await _handle_model_cmd(room, session_id, text[len("!model"):], thread_id)
             return
 
         async def _send(text: str) -> None:

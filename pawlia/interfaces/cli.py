@@ -120,16 +120,15 @@ async def start_cli(app: "App") -> None:
             continue
 
         if user_input.strip().lower().startswith("/model"):
-            parts = user_input.strip().split(maxsplit=1)
-            session = app.memory.load_session("cli_user")
-            if len(parts) == 1:
-                current = session.model_override or "(default)"
-                print(f"Aktives Modell: {current}\n")
+            from pawlia.interfaces.common import handle_model_command
+            args_str = user_input.strip()[len("/model"):].strip()
+            result = handle_model_command(app, "cli_user", args_str)
+            if result.action == "show":
+                print(f"Aktives Modell: {result.model}\n")
             else:
-                new_model = parts[1].strip()
-                app.memory.set_model_override(session, new_model)
-                agent = app.make_agent("cli_user", on_interim=_on_interim)
-                print(f"✓ Modell auf '{new_model}' gesetzt.\n")
+                if result.invalidate_agent:
+                    agent = app.make_agent("cli_user", on_interim=_on_interim)
+                print(f"✓ Modell auf '{result.model}' gesetzt.\n")
             continue
 
         active_fut = asyncio.current_task()

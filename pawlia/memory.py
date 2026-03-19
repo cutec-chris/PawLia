@@ -63,6 +63,7 @@ class MemoryManager:
         self.session_dir = session_dir
         self.logger = logger or logging.getLogger("pawlia.memory")
         os.makedirs(session_dir, exist_ok=True)
+        self._sessions: Dict[str, Session] = {}  # cached session instances
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -147,7 +148,14 @@ class MemoryManager:
         return [(m.group(1).strip(), m.group(2).strip()) for m in pattern.finditer(history)]
 
     def load_session(self, user_id: str) -> Session:
-        """Load session data from disk and return a Session object."""
+        """Load or return cached session for a user.
+
+        Returns the same Session instance for the same user_id, so all
+        callers (agent, command handlers, etc.) share one object.
+        """
+        if user_id in self._sessions:
+            return self._sessions[user_id]
+
         self._memory_dir(user_id)  # ensure dirs exist
 
         session = Session(user_id)
@@ -158,6 +166,8 @@ class MemoryManager:
         session.exchange_count = len(session.exchanges)
         override = self._read(self._model_override_path(user_id)).strip()
         session.model_override = override or None
+
+        self._sessions[user_id] = session
         return session
 
     def set_model_override(self, session: Session, model: Optional[str]) -> None:
