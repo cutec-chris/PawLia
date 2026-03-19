@@ -119,6 +119,12 @@ async def start_cli(app: "App") -> None:
                 print(f"Error: {e}\n")
             continue
 
+        if user_input.strip().lower() == "/status":
+            from pawlia.interfaces.common import build_status, format_status, md_to_text
+            status = build_status(app, "cli_user", agent)
+            print(f"\n{md_to_text(format_status(status))}\n")
+            continue
+
         if user_input.strip().lower().startswith("/model"):
             from pawlia.interfaces.common import handle_model_command
             args_str = user_input.strip()[len("/model"):].strip()
