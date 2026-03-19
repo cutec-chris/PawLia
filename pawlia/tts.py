@@ -26,11 +26,11 @@ async def synthesize(text: str, config: Dict[str, Any]) -> Optional[bytes]:
     Returns MP3 bytes (edge) or raw PCM bytes (piper), or ``None`` if TTS
     is not configured.
     """
-    cfg = config.get("tts", {})
-    if not cfg:
+    cfg = _effective_tts_cfg(config)
+    if cfg is None:
         return None
 
-    provider = cfg.get("provider", "edge")
+    provider = cfg.get("provider", "piper")
     try:
         if provider == "edge":
             return await _synthesize_edge(text, cfg.get("edge", {}))
@@ -56,25 +56,52 @@ async def synthesize_pcm(
     """
     import numpy as np
 
+    cfg = _effective_tts_cfg(config)
+    if cfg is None:
+        return None
+
     audio_bytes = await synthesize(text, config)
     if audio_bytes is None:
         return None
 
-    return _decode_to_pcm(audio_bytes, config, sample_rate)
+    return _decode_to_pcm(audio_bytes, cfg, sample_rate)
 
 
-def _decode_to_pcm(audio_bytes: bytes, config: Dict[str, Any], target_rate: int) -> "np.ndarray":
+_DEFAULT_PIPER_VOICE = "de_DE-kerstin-low"
+_PIPER_DOWNLOAD_DIR = "/app/piper"
+
+
+def _effective_tts_cfg(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the effective TTS config dict, applying built-in defaults.
+
+    Returns ``None`` when TTS is not configured.
+    """
+    cfg = config.get("tts", {})
+    if cfg:
+        # Fill in default voice if provider is piper but model omitted
+        if cfg.get("provider") == "piper" and not cfg.get("piper", {}).get("model"):
+            cfg = dict(cfg)
+            cfg["piper"] = {"model": _DEFAULT_PIPER_VOICE, **cfg.get("piper", {})}
+        return cfg
+
+    # No tts: section — default to piper with built-in voice
+    return {
+        "provider": "piper",
+        "piper": {"model": _DEFAULT_PIPER_VOICE},
+    }
+
+
+def _decode_to_pcm(audio_bytes: bytes, cfg: Dict[str, Any], target_rate: int) -> "np.ndarray":
     """Decode audio bytes to float32 mono PCM at *target_rate* Hz via PyAV."""
     import av  # type: ignore
     import numpy as np
 
-    cfg = config.get("tts", {})
-    provider = cfg.get("provider", "edge")
+    provider = cfg.get("provider", "piper")
 
     if provider == "piper":
         # piper returns raw s16le PCM — wrap in WAV header for av
         piper_cfg = cfg.get("piper", {})
-        src_rate = piper_cfg.get("sample_rate", 22050)
+        src_rate = piper_cfg.get("sample_rate", 16000)
         audio_bytes = _raw_s16_to_wav(audio_bytes, src_rate, channels=1)
 
     container = av.open(io.BytesIO(audio_bytes))
@@ -139,27 +166,33 @@ async def _synthesize_edge(text: str, cfg: Dict) -> bytes:
 
 
 async def _synthesize_piper(text: str, cfg: Dict) -> bytes:
-    """Synthesize using piper-tts locally (must be installed separately)."""
-    executable = cfg.get("executable", "piper")
-    model = cfg.get("model", "")
+    """Synthesize using piper-tts locally."""
+    import os
+
+    model = cfg.get("model") or _DEFAULT_PIPER_VOICE
     model_config = cfg.get("config", "")
 
-    if not model:
-        raise RuntimeError("tts.piper.model not configured")
+    # Voice name (no path separator, no .onnx) → resolve to bundled model path
+    is_voice_name = os.sep not in model and "/" not in model and not model.endswith(".onnx")
+    if is_voice_name:
+        model = os.path.join(_PIPER_DOWNLOAD_DIR, f"{model}.onnx")
+        model_config = model + ".json"
 
+    executable = cfg.get("executable", "piper")
     cmd = [executable, "--model", model, "--output_raw"]
-    if model_config:
+    if model_config and os.path.exists(model_config):
         cmd += ["--config", model_config]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate(input=text.encode("utf-8"))
+    stdout, stderr = await proc.communicate(input=text.encode("utf-8"))
 
     if proc.returncode != 0:
-        raise RuntimeError(f"piper exited with code {proc.returncode}")
+        err = stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"piper exited with code {proc.returncode}: {err}")
 
     return stdout

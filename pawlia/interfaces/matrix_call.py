@@ -28,6 +28,7 @@ try:
         RTCSessionDescription,
     )
     from aiortc.mediastreams import MediaStreamError  # type: ignore
+    from aiortc import RTCConfiguration, RTCIceServer  # type: ignore
     _AIORTC_AVAILABLE = True
 except Exception as _e:
     import logging as _logging
@@ -93,6 +94,75 @@ if _AIORTC_AVAILABLE:
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _strip_red_codec(sdp: str) -> str:
+    """Remove RED codec (and CN) from an SDP offer.
+
+    Element/Chrome may send RED-wrapped Opus (PT 63) which aiortc cannot
+    decode, causing all received audio to be silence.  By removing RED
+    from the m= line and dropping its rtpmap/fmtp lines, the caller is
+    forced to use plain Opus.
+    """
+    import re
+    lines = sdp.splitlines()
+    # Find RED payload type(s)
+    red_pts: set = set()
+    for line in lines:
+        m = re.match(r"a=rtpmap:(\d+)\s+red/", line)
+        if m:
+            red_pts.add(m.group(1))
+    if not red_pts:
+        return sdp
+
+    out = []
+    for line in lines:
+        # Drop rtpmap / fmtp / rtcp-fb lines for RED PTs
+        skip = False
+        for pt in red_pts:
+            if line.startswith(f"a=rtpmap:{pt} ") or \
+               line.startswith(f"a=fmtp:{pt} ") or \
+               line.startswith(f"a=rtcp-fb:{pt} "):
+                skip = True
+                break
+        if skip:
+            continue
+        # Remove RED PTs from the m= line
+        if line.startswith("m=audio "):
+            for pt in red_pts:
+                line = line.replace(f" {pt} ", " ").replace(f" {pt}\r", "\r").replace(f" {pt}\n", "\n")
+                if line.endswith(f" {pt}"):
+                    line = line[: -len(f" {pt}")]
+        out.append(line)
+    return "\n".join(out)
+
+
+def _parse_sdp_candidates(sdp: str) -> List[Dict]:
+    """Extract ICE candidates from a local SDP description.
+
+    Returns a list of dicts suitable for ``m.call.candidates``.
+    """
+    import re
+    candidates = []
+    mid = None
+    mline_index = -1
+    for line in sdp.splitlines():
+        if line.startswith("m="):
+            mline_index += 1
+            mid = None
+        elif line.startswith("a=mid:"):
+            mid = line[6:].strip()
+        elif line.startswith("a=candidate:"):
+            candidates.append({
+                "sdpMid": mid or str(mline_index),
+                "sdpMLineIndex": mline_index,
+                "candidate": line[2:],  # strip "a=" prefix → "candidate:..."
+            })
+    return candidates
+
+
+# ---------------------------------------------------------------------------
 # Per-call session
 # ---------------------------------------------------------------------------
 
@@ -128,7 +198,7 @@ class CallSession:
 
         self._pc: Optional["RTCPeerConnection"] = None
         self._tts_track: Optional["_TTSAudioTrack"] = None
-        self._agent = app.make_agent(f"call_{room_id}")
+        self._agent = app.make_agent(f"mx_{room_id}")
         self._done = asyncio.Event()
         self._pending_candidates: List[Dict] = []
         self._speaking = False
@@ -137,28 +207,85 @@ class CallSession:
     # Public API
     # ------------------------------------------------------------------
 
+    async def _get_ice_servers(self) -> List["RTCIceServer"]:
+        """Fetch TURN credentials from Synapse, fall back to config STUN servers."""
+        servers = []
+        try:
+            import aiohttp
+            url = f"{self._client.homeserver}/_matrix/client/v3/voip/turnServer"
+            headers = {"Authorization": f"Bearer {self._client.access_token}"}
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        uris = data.get("uris", [])
+                        username = data.get("username", "")
+                        password = data.get("password", "")
+                        if uris:
+                            servers.append(RTCIceServer(urls=uris, username=username, credential=password))
+                            logger.info("call %s: using %d TURN/STUN URIs from Synapse: %s",
+                                        self.call_id[:8], len(uris), uris)
+        except Exception as e:
+            logger.warning("call %s: could not fetch TURN servers from Synapse: %s", self.call_id[:8], e)
+
+        for stun in self._cfg.get("stun_servers", [] if servers else ["stun:stun.l.google.com:19302"]):
+            servers.append(RTCIceServer(urls=stun))
+
+        return servers
+
     async def start(self, sdp_offer: str) -> Optional[str]:
         """Accept the call. Returns SDP answer string, or None on error."""
         if not _AIORTC_AVAILABLE:
             logger.error("matrix_call: aiortc not installed — cannot accept call")
             return None
 
-        self._pc = RTCPeerConnection()
+        # Temporarily enable verbose aiortc logging for DTLS/SRTP debugging
+        for _name in ("aiortc", "aioice"):
+            logging.getLogger(_name).setLevel(logging.DEBUG)
+
+        ice_servers = await self._get_ice_servers()
+        self._pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
         self._tts_track = _TTSAudioTrack()
         self._pc.addTrack(self._tts_track)
 
         @self._pc.on("track")
         def on_track(track):
+            logger.info("call %s: track received kind=%s id=%s readyState=%s",
+                        self.call_id[:8], track.kind,
+                        getattr(track, "id", "?"), getattr(track, "readyState", "?"))
             if track.kind == "audio":
+                # Log codec info from receivers
+                for r in self._pc.getReceivers():
+                    if r.track == track:
+                        logger.info("call %s: receiver params: %s",
+                                    self.call_id[:8], getattr(r, "_track", None))
                 asyncio.ensure_future(self._audio_pipeline(track))
+
+        @self._pc.on("connectionstatechange")
+        async def on_conn_state():
+            logger.info("call %s: connection state → %s",
+                        self.call_id[:8], self._pc.connectionState)
 
         @self._pc.on("iceconnectionstatechange")
         async def on_ice_state():
             state = self._pc.iceConnectionState
             logger.info("call %s: ICE state → %s", self.call_id[:8], state)
-            if state in ("failed", "closed", "disconnected"):
+            if state in ("failed", "closed"):
                 self._done.set()
 
+        _gathering_done = asyncio.Event()
+
+        @self._pc.on("icegatheringstatechange")
+        def on_gathering_state():
+            state = self._pc.iceGatheringState
+            logger.info("call %s: ICE gathering → %s", self.call_id[:8], state)
+            if state == "complete":
+                _gathering_done.set()
+
+        # Strip RED codec from offer — Element may send RED-wrapped Opus
+        # (PT 63) which aiortc silently drops, causing silence.
+        sdp_offer = _strip_red_codec(sdp_offer)
+        logger.info("call %s: SDP offer (cleaned):\n%s", self.call_id[:8], sdp_offer)
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=sdp_offer, type="offer")
         )
@@ -170,12 +297,44 @@ class CallSession:
 
         answer = await self._pc.createAnswer()
         await self._pc.setLocalDescription(answer)
+        logger.info("call %s: SDP answer:\n%s", self.call_id[:8],
+                    self._pc.localDescription.sdp)
 
         # Auto-hangup watchdog
         asyncio.ensure_future(self._watchdog())
+        # Send our ICE candidates once gathering completes (parsed from local SDP)
+        asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
+        # Periodic RTP receiver stats for diagnostics
+        asyncio.ensure_future(self._log_receiver_stats())
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
+
+    async def _flush_local_candidates(self, done: asyncio.Event) -> None:
+        """Wait for ICE gathering then send candidates parsed from local SDP."""
+        try:
+            await asyncio.wait_for(done.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.warning("call %s: ICE gathering timed out", self.call_id[:8])
+
+        if not self._pc or not self._pc.localDescription:
+            return
+
+        sdp = self._pc.localDescription.sdp
+        logger.debug("call %s: local SDP:\n%s", self.call_id[:8], sdp)
+
+        candidates = _parse_sdp_candidates(sdp)
+        for c in candidates:
+            logger.info("call %s: local candidate: %s", self.call_id[:8], c["candidate"])
+        if not candidates:
+            return
+
+        await self._client.room_send(
+            room_id=self.room_id,
+            message_type="m.call.candidates",
+            content={"call_id": self.call_id, "version": 0, "candidates": candidates},
+        )
+        logger.info("call %s: sent %d local ICE candidates", self.call_id[:8], len(candidates))
 
     async def add_candidates(self, candidates: List[Dict]) -> None:
         """Feed ICE candidates from ``m.call.candidates``."""
@@ -207,26 +366,54 @@ class CallSession:
         silence_count = 0
 
         logger.info("call %s: audio pipeline started", self.call_id[:8])
+        frames_received = 0
         try:
             while not self._done.is_set():
                 try:
                     frame = await asyncio.wait_for(track.recv(), timeout=5.0)
                 except asyncio.TimeoutError:
+                    if frames_received == 0:
+                        logger.warning("call %s: no audio frames received yet", self.call_id[:8])
                     continue
                 except MediaStreamError:
+                    logger.warning("call %s: MediaStreamError after %d frames — track ended",
+                                   self.call_id[:8], frames_received)
                     break
 
+                frames_received += 1
+
                 # Convert AudioFrame → float32 mono
-                arr = frame.to_ndarray()  # (channels, samples) or (samples,)
-                if arr.ndim > 1:
-                    arr = arr.mean(axis=0)
-                pcm = arr.astype(np.float32)
-                if pcm.dtype == np.int16 or pcm.max() > 1.0:
-                    pcm = pcm / 32768.0
+                raw_bytes = bytes(frame.planes[0])
+                n_channels = max(len(frame.layout.channels), 1)
+                n_int16 = frame.samples * n_channels
+                raw = np.frombuffer(raw_bytes, dtype=np.int16)[:n_int16]
+                if n_channels > 1:
+                    # Stereo → mono: average as float (no int16 truncation)
+                    pcm = raw.reshape(-1, n_channels).astype(np.float32).mean(axis=1) / 32768.0
+                else:
+                    pcm = raw.astype(np.float32) / 32768.0
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
+                if frames_received <= 5:
+                    nz_count = int(np.count_nonzero(raw))
+                    logger.info("call %s: frame #%d fmt=%s pts=%s ch=%d "
+                                "pcm_len=%d nz_samples=%d rms=%.4f "
+                                "raw_first10=%s",
+                                self.call_id[:8], frames_received,
+                                frame.format.name, frame.pts, n_channels,
+                                len(pcm), nz_count, rms,
+                                raw[:10].tolist())
+                elif frames_received % 50 == 0:
+                    import hashlib
+                    h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
+                    logger.info("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
+                                self.call_id[:8], frames_received, rms,
+                                len(speech_buffer), silence_count, h)
 
                 if rms > self.SILENCE_THRESHOLD:
+                    if not speech_buffer and silence_count == 0:
+                        logger.info("call %s: speech started (rms=%.4f)",
+                                    self.call_id[:8], rms)
                     speech_buffer.append(pcm)
                     silence_count = 0
                 elif speech_buffer:
@@ -235,32 +422,47 @@ class CallSession:
 
                     if silence_count >= silence_threshold:
                         chunk = np.concatenate(speech_buffer)
+                        duration = len(chunk) / SAMPLE_RATE
+                        logger.info("call %s: speech ended — %.1fs, %d samples",
+                                    self.call_id[:8], duration, len(chunk))
                         speech_buffer = []
                         silence_count = 0
 
                         if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
+                            logger.info("call %s: sending chunk for transcription",
+                                        self.call_id[:8])
                             asyncio.ensure_future(
                                 self._process_speech(chunk, SAMPLE_RATE)
                             )
+                        else:
+                            logger.info("call %s: chunk too short (%.1fs), skipping",
+                                        self.call_id[:8], duration)
         except Exception as e:
             logger.error("call %s: audio pipeline error: %s", self.call_id[:8], e)
         finally:
             self._done.set()
             logger.info("call %s: audio pipeline ended", self.call_id[:8])
 
-    async def _process_speech(self, pcm: np.ndarray, sample_rate: int) -> None:
+    async def _process_speech(self, pcm: "np.ndarray", sample_rate: int) -> None:
         """Transcribe a speech chunk and query the agent."""
-        from pawlia.transcription import transcribe_pcm
-        from pawlia.tts import synthesize_pcm
+        try:
+            from pawlia.transcription import transcribe_pcm
+            from pawlia.tts import synthesize_pcm
+        except ImportError as e:
+            logger.error("call %s: missing dependency: %s", self.call_id[:8], e)
+            return
 
         text = await transcribe_pcm(pcm, sample_rate, self._app.config)
         if not text:
-            logger.debug("call %s: empty transcription", self.call_id[:8])
+            logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
             return
 
         logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
 
-        # Show typing / speaking indicator in the room
+        # Send transcription immediately so it appears before the response
+        await self._send_text(self.room_id, f"🎙️ *{text}*")
+
+        # Show typing indicator while agent thinks
         try:
             await self._client.room_typing(self.room_id, typing_state=True)
         except Exception:
@@ -277,8 +479,7 @@ class CallSession:
             except Exception:
                 pass
 
-        # Always send text to the room as well (transcript + reply)
-        await self._send_text(self.room_id, f"🎙️ *{text}*\n\n{response}")
+        await self._send_text(self.room_id, response)
 
         # TTS: synthesise and feed to outgoing audio track
         if self._tts_track and self._app.config.get("tts"):
@@ -289,6 +490,25 @@ class CallSession:
             except Exception as e:
                 logger.warning("call %s: TTS failed: %s", self.call_id[:8], e)
 
+    async def _log_receiver_stats(self) -> None:
+        """Periodically log RTP receiver stats to diagnose audio delivery."""
+        await asyncio.sleep(5)  # wait for connection to establish
+        for _ in range(15):  # log for ~75s max
+            if self._done.is_set() or not self._pc:
+                break
+            try:
+                stats = await self._pc.getStats()
+                for report in stats.values():
+                    t = getattr(report, "type", "")
+                    if t in ("inbound-rtp", "transport", "candidate-pair"):
+                        logger.info("call %s: STATS [%s] %s",
+                                    self.call_id[:8], t,
+                                    {k: v for k, v in report.__dict__.items()
+                                     if not k.startswith("_")})
+            except Exception as e:
+                logger.debug("call %s: stats error: %s", self.call_id[:8], e)
+            await asyncio.sleep(5)
+
     async def _watchdog(self) -> None:
         """Auto-hangup after MAX_CALL_SECONDS."""
         try:
@@ -298,20 +518,43 @@ class CallSession:
             await self.hangup()
             await self._send_hangup_event()
 
+    @staticmethod
+    def _parse_candidate_string(candidate_str: str) -> Optional[Dict]:
+        """Parse an SDP candidate attribute string into field kwargs for RTCIceCandidate."""
+        s = candidate_str
+        if s.startswith("candidate:"):
+            s = s[len("candidate:"):]
+        parts = s.split()
+        if len(parts) < 8:
+            return None
+        result: Dict = {
+            "foundation": parts[0],
+            "component": int(parts[1]),
+            "protocol": parts[2].lower(),
+            "priority": int(parts[3]),
+            "ip": parts[4],
+            "port": int(parts[5]),
+            # parts[6] == "typ"
+            "type": parts[7],
+        }
+        for i in range(8, len(parts) - 1, 2):
+            if parts[i] == "raddr":
+                result["relatedAddress"] = parts[i + 1]
+            elif parts[i] == "rport":
+                result["relatedPort"] = int(parts[i + 1])
+        return result
+
     async def _add_candidate(self, c: Dict) -> None:
         if not c.get("candidate"):
             return  # end-of-candidates signal
         try:
+            parsed = self._parse_candidate_string(c["candidate"])
+            if not parsed:
+                return
             candidate = RTCIceCandidate(
                 sdpMid=c.get("sdpMid"),
                 sdpMLineIndex=c.get("sdpMLineIndex"),
-                foundation=c.get("foundation", ""),
-                component=int(c.get("component", 1)),
-                priority=int(c.get("priority", 0)),
-                host=c.get("ip", ""),
-                type=c.get("type", "host"),
-                port=int(c.get("port", 0)),
-                protocol=c.get("protocol", "udp"),
+                **parsed,
             )
             await self._pc.addIceCandidate(candidate)
         except Exception as e:
