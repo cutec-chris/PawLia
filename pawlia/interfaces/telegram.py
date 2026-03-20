@@ -107,6 +107,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             )
         except Exception as e:
             logger.error("Telegram: error processing message: %s", e)
+            await update.message.reply_text(f"Fehler: {e}")
 
     async def on_private_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/private — toggle private mode for the current thread (threads only)."""
