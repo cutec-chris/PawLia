@@ -59,13 +59,6 @@ class Scheduler:
         """Start the scheduler as a background asyncio task."""
         if self._task and not self._task.done():
             return
-
-        # Initialize automation processors — they route through self._notify
-        # which handles LLM formatting + fallback before delivering to interfaces
-        self._checklist = ChecklistProcessor(self.session_dir, self._notify)
-        self._jobs = JobRunner(self.session_dir, self._notify)
-        self._task_reminders = TaskReminderProcessor(self.session_dir, self._notify)
-
         self._task = asyncio.create_task(self._loop())
         logger.info("Scheduler started (interval=%ds)", CHECK_INTERVAL)
 
@@ -87,10 +80,19 @@ class Scheduler:
         except asyncio.CancelledError:
             pass
 
+    def _ensure_processors(self) -> None:
+        """Lazily initialize automation processors on first use."""
+        if self._checklist is None:
+            self._checklist = ChecklistProcessor(self.session_dir, self._notify)
+            self._jobs = JobRunner(self.session_dir, self._notify)
+            self._task_reminders = TaskReminderProcessor(self.session_dir, self._notify)
+
     async def _check_all(self) -> None:
         """Scan all user sessions for due items."""
         if not os.path.isdir(self.session_dir):
             return
+
+        self._ensure_processors()
 
         for user_id in os.listdir(self.session_dir):
             user_dir = os.path.join(self.session_dir, user_id)
