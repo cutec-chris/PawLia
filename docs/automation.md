@@ -52,23 +52,23 @@ python organizer.py add-reminder --user-id <id> --session-dir <dir> \
 Events can have a checklist of automated preparation steps. Each item is either a **script** that gets executed or a **plain notification**.
 
 ```
-"Termin am Freitag 14 Uhr, PRÜF-Demo in Magdeburg"
+"Termin am Freitag 14 Uhr, Kundenpräsentation in Hamburg"
 ```
 
 The LLM creates the event with a checklist:
 
 ```json
 {
-  "title": "PRÜF-Demo Magdeburg",
+  "title": "Kundenpräsentation Hamburg",
   "start": "2026-03-21T14:00:00",
-  "location": "Innenstadt Magdeburg",
+  "location": "Hamburg Innenstadt",
   "checklist": [
     {
       "id": "chk-a1b2c3d4",
       "script": "",
       "trigger": "relative",
       "trigger_offset": "-1d",
-      "message": "Morgen: PRÜF-Demo in Magdeburg. Unterlagen vorbereiten!",
+      "message": "Morgen: Kundenpräsentation in Hamburg. Unterlagen vorbereiten!",
       "status": "pending"
     },
     {
@@ -76,7 +76,7 @@ The LLM creates the event with a checklist:
       "script": "route_plan.py",
       "trigger": "relative",
       "trigger_offset": "-90m",
-      "params": {"from": "home", "to": "Innenstadt Magdeburg"},
+      "params": {"from": "home", "to": "Hamburg Innenstadt"},
       "notify": true,
       "status": "pending"
     },
@@ -85,7 +85,7 @@ The LLM creates the event with a checklist:
       "script": "check_traffic.py",
       "trigger": "relative",
       "trigger_offset": "-60m",
-      "params": {"destination": "Magdeburg"},
+      "params": {"destination": "Hamburg"},
       "notify": true,
       "status": "pending"
     }
@@ -109,8 +109,8 @@ The LLM creates the event with a checklist:
 ### Execution timeline example
 
 ```
-T-1d     📋 "Morgen: PRÜF-Demo in Magdeburg. Unterlagen vorbereiten!"
-T-90m    📋 route_plan.py → "RE1 ab 12:15 Hbf, Ankunft 13:40, Gleis 3"
+T-1d     📋 "Morgen: Kundenpräsentation in Hamburg. Unterlagen vorbereiten!"
+T-90m    📋 route_plan.py → "ICE 1523 ab 11:15 Hbf, Ankunft 13:20, Gleis 8"
 T-60m    📋 check_traffic.py → "Keine Verspätungen, alles planmäßig"
 T-15m    📅 Standard event notification (built-in)
 ```
@@ -243,8 +243,8 @@ Trigger fires (reminder / checklist / job)
 The LLM receives the raw data and the user's context (memory, preferences) to produce a natural, personalized message.
 
 **Example:**
-- Raw: `📋 PRÜF-Demo Magdeburg: RE1 ab 12:15 Hbf, Ankunft 13:40, Gleis 3`
-- LLM: `Für deine Demo in Magdeburg — nimm den RE1 um 12:15 vom Hauptbahnhof, du bist um 13:40 da (Gleis 3).`
+- Raw: `📋 Kundenpräsentation Hamburg: ICE 1523 ab 11:15 Hbf, Ankunft 13:20, Gleis 8`
+- LLM: `Für deine Präsentation in Hamburg — nimm den ICE 1523 um 11:15 vom Hauptbahnhof, du bist um 13:20 da (Gleis 8).`
 
 ## Architecture
 
