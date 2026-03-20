@@ -76,6 +76,16 @@ def install_all_skill_deps(skills_dir: str) -> None:
             if not kind or not package:
                 continue
             if kind == "node":
+                # Strip version spec: "pkg@1.0" → "pkg", "@org/pkg@1.0" → "@org/pkg"
+                if package.startswith("@"):
+                    parts = package[1:].split("@")
+                    pkg_name = "@" + parts[0]
+                else:
+                    pkg_name = package.split("@")[0]
+                node_modules = os.path.join(skill_path, "node_modules", pkg_name)
+                if os.path.isdir(node_modules):
+                    logger.debug("npm package '%s' already installed — skipping", package)
+                    continue
                 npm = shutil.which("npm")
                 if not npm:
                     logger.warning("npm not found — skipping '%s'", package)
