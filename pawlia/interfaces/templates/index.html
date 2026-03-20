@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PawLia</title>
+<style>
+:root {
+  --bg:       #1a1b26;
+  --bg2:      #24253a;
+  --bg3:      #2d2e4a;
+  --border:   #3b3c5e;
+  --text:     #c0caf5;
+  --muted:    #565f89;
+  --accent:   #7aa2f7;
+  --accent2:  #73daca;
+  --warn:     #e0af68;
+  --err:      #f7768e;
+  --ok:       #9ece6a;
+  --radius:   8px;
+  --shadow:   0 4px 24px #00000055;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); height: 100vh; overflow: hidden; }
+input, select, textarea, button { font-family: inherit; font-size: 14px; }
+
+/* ── Login ── */
+#login { display:flex; align-items:center; justify-content:center; height:100vh; }
+#login-card {
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 40px 48px;
+  width: 360px; box-shadow: var(--shadow);
+}
+#login-card h1 { font-size: 22px; color: var(--accent); margin-bottom: 6px; }
+#login-card p  { color: var(--muted); font-size: 13px; margin-bottom: 28px; }
+#login-card label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+#login-card input {
+  width:100%; background:var(--bg3); border:1px solid var(--border);
+  color:var(--text); padding:10px 14px; border-radius:6px; outline:none;
+}
+#login-card input:focus { border-color: var(--accent); }
+#login-err { color:var(--err); font-size:13px; margin-top:10px; min-height:20px; }
+#login-btn {
+  margin-top:20px; width:100%; padding:11px; background:var(--accent);
+  color:#1a1b26; border:none; border-radius:6px; font-weight:600;
+  cursor:pointer; transition: opacity .15s;
+}
+#login-btn:hover { opacity: .88; }
+
+/* ── Layout ── */
+#app { display:none; flex-direction:column; height:100vh; }
+header {
+  display:flex; align-items:center; gap:14px; padding:0 20px;
+  height:52px; background:var(--bg2); border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+header .logo { font-size:18px; font-weight:700; color:var(--accent); }
+header .logo span { color:var(--accent2); }
+nav { display:flex; gap:4px; flex:1; }
+nav button {
+  background:none; border:none; color:var(--muted); cursor:pointer;
+  padding:6px 14px; border-radius:6px; font-size:14px; transition:.15s;
+}
+nav button:hover { background:var(--bg3); color:var(--text); }
+nav button.active { background:var(--bg3); color:var(--accent); font-weight:600; }
+#logout-btn {
+  background:none; border:1px solid var(--border); color:var(--muted);
+  padding:5px 12px; border-radius:6px; cursor:pointer; font-size:13px; transition:.15s;
+}
+#logout-btn:hover { border-color:var(--err); color:var(--err); }
+
+main { flex:1; overflow:hidden; }
+.tab { display:none; height:100%; flex-direction:column; }
+.tab.active { display:flex; }
+
+/* ── Chat ── */
+#chat-toolbar {
+  display:flex; align-items:center; gap:10px; padding:10px 20px;
+  border-bottom:1px solid var(--border); background:var(--bg2); flex-shrink:0;
+}
+#chat-toolbar label { font-size:12px; color:var(--muted); }
+#chat-uid {
+  background:var(--bg3); border:1px solid var(--border); color:var(--text);
+  padding:5px 10px; border-radius:6px; width:160px; outline:none;
+}
+#chat-uid:focus { border-color:var(--accent); }
+#chat-messages {
+  flex:1; overflow-y:auto; padding:20px; display:flex; flex-direction:column; gap:14px;
+  scroll-behavior: smooth;
+}
+.msg { display:flex; gap:10px; max-width:820px; align-self:flex-start; }
+.msg.user { align-self:flex-end; flex-direction:row-reverse; }
+.msg-avatar {
+  width:32px; height:32px; border-radius:50%; display:flex; align-items:center;
+  justify-content:center; font-size:14px; flex-shrink:0; margin-top:2px;
+}
+.msg.user .msg-avatar  { background: #3d5a99; }
+.msg.bot  .msg-avatar  { background: #3b5e45; }
+.msg-body {
+  background:var(--bg2); border:1px solid var(--border);
+  border-radius:var(--radius); padding:10px 14px; font-size:14px;
+  line-height:1.6; max-width:680px;
+}
+.msg.user .msg-body { background:var(--bg3); border-color:#3d5a99; }
+.msg-body pre {
+  background:var(--bg); border:1px solid var(--border); border-radius:6px;
+  padding:10px 14px; overflow-x:auto; margin:8px 0; font-size:13px;
+}
+.msg-body code { background:var(--bg); padding:2px 5px; border-radius:4px; font-size:13px; }
+.msg-body pre code { background:none; padding:0; }
+.msg-body p { margin-bottom:6px; }
+.msg-body p:last-child { margin-bottom:0; }
+.typing { color:var(--muted); font-style:italic; }
+#chat-input-row {
+  display:flex; gap:10px; padding:14px 20px;
+  border-top:1px solid var(--border); background:var(--bg2); flex-shrink:0;
+}
+#chat-input {
+  flex:1; background:var(--bg3); border:1px solid var(--border);
+  color:var(--text); padding:10px 14px; border-radius:8px; outline:none;
+  resize:none; height:44px; max-height:160px; overflow-y:auto; line-height:1.5;
+  transition: border-color .15s;
+}
+#chat-input:focus { border-color: var(--accent); }
+#send-btn {
+  background:var(--accent); color:#1a1b26; border:none; padding:0 20px;
+  border-radius:8px; cursor:pointer; font-weight:600; font-size:16px;
+  transition:.15s; flex-shrink:0;
+}
+#send-btn:hover:not(:disabled) { opacity:.85; }
+#send-btn:disabled { opacity:.4; cursor:default; }
+
+/* ── Config tabs (Providers / Models) ── */
+.cfg-tab { padding:24px; overflow-y:auto; height:100%; }
+.cfg-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px; }
+.cfg-header h2 { font-size:18px; font-weight:600; }
+.cfg-notice { font-size:12px; color:var(--muted); margin-top:4px; }
+.add-btn {
+  background:var(--accent2); color:#1a1b26; border:none; padding:8px 16px;
+  border-radius:6px; cursor:pointer; font-weight:600; font-size:14px; transition:.15s;
+}
+.add-btn:hover { opacity:.85; }
+table { width:100%; border-collapse:collapse; font-size:14px; }
+th { text-align:left; padding:8px 12px; color:var(--muted); font-size:12px;
+     border-bottom:1px solid var(--border); font-weight:600; text-transform:uppercase; letter-spacing:.05em; }
+td { padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:top; }
+tr:last-child td { border-bottom:none; }
+tr:hover td { background:var(--bg2); }
+.tag {
+  display:inline-block; padding:2px 8px; border-radius:4px; font-size:12px;
+  background:var(--bg3); border:1px solid var(--border); color:var(--muted);
+}
+.tag.provider { border-color:#3d5a99; color:#7aa2f7; background:#1d2b4a; }
+.tag.think    { border-color:#3b5e45; color:#9ece6a; background:#1d2e1f; }
+.action-btns { display:flex; gap:6px; }
+.btn-edit, .btn-del {
+  padding:4px 10px; border-radius:5px; border:1px solid; cursor:pointer;
+  font-size:12px; font-weight:600; transition:.15s;
+}
+.btn-edit { border-color:var(--accent); color:var(--accent); background:transparent; }
+.btn-edit:hover { background:var(--accent); color:#1a1b26; }
+.btn-del  { border-color:var(--err);    color:var(--err);   background:transparent; }
+.btn-del:hover  { background:var(--err);   color:#1a1b26; }
+
+/* ── Modal ── */
+#modal-bg {
+  display:none; position:fixed; inset:0; background:#00000088;
+  align-items:center; justify-content:center; z-index:100;
+}
+#modal-bg.open { display:flex; }
+#modal {
+  background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius);
+  padding:28px 32px; width:460px; box-shadow:var(--shadow); max-height:90vh; overflow-y:auto;
+}
+#modal h3 { font-size:16px; margin-bottom:20px; color:var(--accent); }
+.field { margin-bottom:14px; }
+.field label { display:block; font-size:12px; color:var(--muted); margin-bottom:5px; }
+.field input, .field select {
+  width:100%; background:var(--bg3); border:1px solid var(--border);
+  color:var(--text); padding:9px 12px; border-radius:6px; outline:none;
+}
+.field input:focus, .field select:focus { border-color:var(--accent); }
+.field select option { background:var(--bg2); }
+.field-row { display:flex; gap:10px; }
+.field-row .field { flex:1; }
+.field-check { display:flex; align-items:center; gap:8px; }
+.field-check input[type=checkbox] { width:16px; height:16px; accent-color:var(--accent2); }
+.modal-btns { display:flex; gap:10px; justify-content:flex-end; margin-top:22px; }
+.modal-btns button { padding:9px 20px; border-radius:6px; cursor:pointer; font-size:14px; font-weight:600; transition:.15s; }
+#modal-cancel { background:none; border:1px solid var(--border); color:var(--muted); }
+#modal-cancel:hover { border-color:var(--text); color:var(--text); }
+#modal-save { background:var(--accent); border:none; color:#1a1b26; }
+#modal-save:hover { opacity:.85; }
+#modal-err { color:var(--err); font-size:13px; margin-top:8px; min-height:18px; }
+
+/* ── Toast ── */
+#toast {
+  position:fixed; bottom:24px; right:24px; background:var(--bg3);
+  border:1px solid var(--border); color:var(--text); padding:10px 18px;
+  border-radius:8px; font-size:14px; box-shadow:var(--shadow);
+  opacity:0; transform:translateY(8px); transition:.25s; pointer-events:none; z-index:200;
+}
+#toast.show { opacity:1; transform:translateY(0); }
+#toast.ok  { border-color:var(--ok);  color:var(--ok); }
+#toast.err { border-color:var(--err); color:var(--err); }
+
+/* ── Upload ── */
+#upload-zone {
+  border: 2px dashed var(--border); border-radius: var(--radius);
+  padding: 28px; text-align: center; cursor: pointer; transition: .2s;
+  color: var(--muted); font-size: 14px; margin-bottom: 24px;
+}
+#upload-zone:hover, #upload-zone.drag { border-color: var(--accent2); color: var(--accent2); }
+#upload-zone input { display: none; }
+#upload-progress { font-size: 13px; color: var(--accent2); margin-top: 8px; min-height: 20px; }
+.skill-row td:first-child { width: 160px; }
+.status-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+}
+.status-dot.ok  { background: var(--ok); }
+.status-dot.err { background: var(--err); }
+.status-dot.off { background: var(--muted); }
+
+/* scrollbar */
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login">
+  <div id="login-card">
+    <h1>PawLia <span>✦</span></h1>
+    <p>Gib das Token ein, das beim Start in der Konsole angezeigt wurde.</p>
+    <label>Access Token</label>
+    <input type="password" id="token-input" placeholder="••••••••••••••••" autocomplete="off">
+    <div id="login-err"></div>
+    <button id="login-btn">Anmelden</button>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <header>
+    <div class="logo">PawLia <span>✦</span></div>
+    <nav>
+      <button class="tab-btn active" data-tab="chat">💬 Chat</button>
+      <button class="tab-btn" data-tab="config">⚙️ Konfiguration</button>
+      <button class="tab-btn" data-tab="skills">🧩 Skills</button>
+    </nav>
+    <button id="logout-btn">Abmelden</button>
+  </header>
+  <main>
+    <!-- Chat -->
+    <section class="tab active" id="tab-chat">
+      <div id="chat-toolbar">
+        <label>User-ID:</label>
+        <input type="text" id="chat-uid" value="web_user" spellcheck="false">
+      </div>
+      <div id="chat-messages"></div>
+      <div id="chat-input-row">
+        <textarea id="chat-input" placeholder="Nachricht …" rows="1"></textarea>
+        <button id="send-btn">➤</button>
+      </div>
+    </section>
+
+    <!-- Konfiguration (Provider + Modelle) -->
+    <section class="tab" id="tab-config">
+      <div class="cfg-tab">
+        <div class="cfg-header">
+          <div>
+            <h2>Provider</h2>
+            <div class="cfg-notice">Änderungen werden sofort gespeichert. Neustart erforderlich, damit sie aktiv werden.</div>
+          </div>
+          <button class="add-btn" id="add-provider-btn">+ Provider</button>
+        </div>
+        <table id="providers-table">
+          <thead><tr><th>Name</th><th>API Base</th><th>API Key</th><th>Timeout</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+
+        <div class="cfg-header" style="margin-top:36px">
+          <div>
+            <h2>Modelle</h2>
+          </div>
+          <button class="add-btn" id="add-model-btn">+ Modell</button>
+        </div>
+        <table id="models-table">
+          <thead><tr><th>Key</th><th>Modell</th><th>Provider</th><th>Temp.</th><th>Think</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+    <!-- Skills -->
+    <section class="tab" id="tab-skills">
+      <div class="cfg-tab">
+        <div class="cfg-header" style="margin-bottom:16px">
+          <div>
+            <h2>Skills</h2>
+            <div class="cfg-notice">ZIP von ClawhHub hochladen · Neustart aktiviert den Skill</div>
+          </div>
+        </div>
+
+        <div id="upload-zone">
+          <input type="file" id="skill-file" accept=".zip">
+          <div>📦 ZIP hier ablegen oder <strong>klicken</strong> zum Auswählen</div>
+          <div id="upload-progress"></div>
+        </div>
+
+        <table id="skills-table">
+          <thead><tr><th>Skill</th><th>Version</th><th>Status</th><th>Konfiguration</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- Modal -->
+<div id="modal-bg">
+  <div id="modal">
+    <h3 id="modal-title">Provider</h3>
+    <div id="modal-fields"></div>
+    <div id="modal-err"></div>
+    <div class="modal-btns">
+      <button id="modal-cancel">Abbrechen</button>
+      <button id="modal-save">Speichern</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+
+const $ = id => document.getElementById(id);
+
+function toast(msg, type = 'ok') {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.className = '', 2800);
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderMd(text) {
+  let html = esc(text);
+  // Fenced code blocks
+  html = html.replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) =>
+    `<pre><code>${code.trimEnd()}</code></pre>`);
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Paragraphs
+  const paras = html.split(/\n{2,}/);
+  html = paras.map(p => {
+    if (p.startsWith('<pre>')) return p;
+    return '<p>' + p.replace(/\n/g, '<br>') + '</p>';
+  }).join('');
+  return html;
+}
+
+// ── API ────────────────────────────────────────────────────────────────────
+
+const api = {
+  async post(url, data) {
+    return fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data),
+      credentials: 'include'
+    });
+  },
+  async get(url) {
+    return fetch(url, {credentials: 'include'});
+  }
+};
+
+// ── Auth ───────────────────────────────────────────────────────────────────
+
+$('login-btn').addEventListener('click', doLogin);
+$('token-input').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+
+async function doLogin() {
+  const token = $('token-input').value.trim();
+  if (!token) return;
+  const r = await api.post('/api/auth', {token});
+  if (r.ok) { showApp(); } else { $('login-err').textContent = 'Ungültiges Token.'; }
+}
+
+$('logout-btn').addEventListener('click', async () => {
+  await api.post('/api/logout', {});
+  location.reload();
+});
+
+function showApp() {
+  $('login').style.display = 'none';
+  $('app').style.display = 'flex';
+  loadProviders();
+  loadModels();
+}
+
+// Try auto-login via existing session cookie
+(async () => {
+  const r = await api.get('/api/providers');
+  if (r.ok) showApp();
+})();
+
+// ── Tabs ───────────────────────────────────────────────────────────────────
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    $('tab-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'config') { loadProviders(); loadModels(); }
+    if (btn.dataset.tab === 'skills') loadSkills();
+  });
+});
+
+// ── Chat ───────────────────────────────────────────────────────────────────
+
+const chatInput = $('chat-input');
+const sendBtn   = $('send-btn');
+const messages  = $('chat-messages');
+
+chatInput.addEventListener('input', () => {
+  chatInput.style.height = 'auto';
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + 'px';
+});
+
+chatInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+sendBtn.addEventListener('click', sendMessage);
+
+function appendMsg(role, html) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.innerHTML = `
+    <div class="msg-avatar">${role === 'user' ? '👤' : '✦'}</div>
+    <div class="msg-body">${html}</div>`;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+  return div;
+}
+
+async function sendMessage() {
+  const msg = chatInput.value.trim();
+  if (!msg) return;
+  const uid = $('chat-uid').value.trim() || 'web_user';
+
+  appendMsg('user', renderMd(msg));
+  chatInput.value = '';
+  chatInput.style.height = '44px';
+  sendBtn.disabled = true;
+
+  const typing = appendMsg('bot', '<span class="typing">…</span>');
+
+  try {
+    const r = await api.post('/api/chat', {message: msg, user_id: uid});
+    if (r.status === 401) { location.reload(); return; }
+    const data = await r.json();
+    typing.querySelector('.msg-body').innerHTML = renderMd(data.response || data.error || '(leer)');
+  } catch (e) {
+    typing.querySelector('.msg-body').innerHTML = '<span style="color:var(--err)">Verbindungsfehler.</span>';
+  } finally {
+    sendBtn.disabled = false;
+    messages.scrollTop = messages.scrollHeight;
+  }
+}
+
+// ── Providers ──────────────────────────────────────────────────────────────
+
+let providers = {};
+
+async function loadProviders() {
+  const r = await api.get('/api/providers');
+  if (!r.ok) return;
+  providers = (await r.json()).providers || {};
+  renderProviders();
+}
+
+function renderProviders() {
+  const tbody = document.querySelector('#providers-table tbody');
+  tbody.innerHTML = '';
+  for (const [name, p] of Object.entries(providers)) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${esc(name)}</strong></td>
+      <td><code style="font-size:12px">${esc(p.apiBase || '')}</code></td>
+      <td><span class="tag">${p.apiKey ? '••••••' : '—'}</span></td>
+      <td>${p.timeout ?? '—'}</td>
+      <td class="action-btns">
+        <button class="btn-edit" onclick="editProvider('${esc(name)}')">Bearbeiten</button>
+        <button class="btn-del"  onclick="deleteProvider('${esc(name)}')">Löschen</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  if (!Object.keys(providers).length)
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px">Keine Provider konfiguriert</td></tr>';
+}
+
+$('add-provider-btn').addEventListener('click', () => openProviderModal(null));
+window.editProvider   = name => openProviderModal(name);
+window.deleteProvider = async name => {
+  if (!confirm(`Provider "${name}" löschen?`)) return;
+  delete providers[name];
+  await saveProviders();
+  renderProviders();
+};
+
+function openProviderModal(editName) {
+  const p = editName ? (providers[editName] || {}) : {};
+  showModal(editName ? `Provider bearbeiten: ${editName}` : 'Neuer Provider', `
+    <div class="field"><label>Name (Key)</label>
+      <input id="f-name" value="${esc(editName ?? '')}" placeholder="ollama" ${editName ? 'readonly style="opacity:.6"' : ''}>
+    </div>
+    <div class="field"><label>API Base URL</label>
+      <input id="f-apiBase" value="${esc(p.apiBase ?? '')}" placeholder="http://localhost:11434/v1">
+    </div>
+    <div class="field"><label>API Key</label>
+      <input id="f-apiKey" value="${esc(p.apiKey ?? '')}" placeholder="ollama">
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Timeout (s)</label>
+        <input id="f-timeout" type="number" value="${p.timeout ?? ''}" placeholder="120">
+      </div>
+      <div class="field"><label>Keep-Alive (s, -1 = immer)</label>
+        <input id="f-keepAlive" type="number" value="${p.keepAlive ?? ''}" placeholder="-1">
+      </div>
+    </div>
+  `, async () => {
+    const name = $('f-name').value.trim();
+    if (!name) { $('modal-err').textContent = 'Name erforderlich.'; return false; }
+    if (!editName && providers[name]) { $('modal-err').textContent = 'Name bereits vergeben.'; return false; }
+    const obj = { apiBase: $('f-apiBase').value.trim(), apiKey: $('f-apiKey').value.trim() };
+    const t = $('f-timeout').value;   if (t)      obj.timeout   = Number(t);
+    const k = $('f-keepAlive').value; if (k !== '') obj.keepAlive = Number(k);
+    if (editName && editName !== name) delete providers[editName];
+    providers[name] = obj;
+    await saveProviders();
+    renderProviders();
+    return true;
+  });
+}
+
+async function saveProviders() {
+  const r = await api.post('/api/providers', {providers});
+  if (r.ok) toast('Provider gespeichert'); else toast('Fehler beim Speichern', 'err');
+}
+
+// ── Models ─────────────────────────────────────────────────────────────────
+
+let models = {};
+
+async function loadModels() {
+  const r = await api.get('/api/models');
+  if (!r.ok) return;
+  models = (await r.json()).models || {};
+  renderModels();
+}
+
+function renderModels() {
+  const tbody = document.querySelector('#models-table tbody');
+  tbody.innerHTML = '';
+  for (const [key, m] of Object.entries(models)) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><strong>${esc(key)}</strong></td>
+      <td><code style="font-size:12px">${esc(m.model || '')}</code></td>
+      <td><span class="tag provider">${esc(m.provider || '?')}</span></td>
+      <td>${m.temperature ?? '—'}</td>
+      <td>${m.think ? '<span class="tag think">ja</span>' : '—'}</td>
+      <td class="action-btns">
+        <button class="btn-edit" onclick="editModel('${esc(key)}')">Bearbeiten</button>
+        <button class="btn-del"  onclick="deleteModel('${esc(key)}')">Löschen</button>
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  if (!Object.keys(models).length)
+    tbody.innerHTML = '<tr><td colspan="6" style="color:var(--muted);text-align:center;padding:24px">Keine Modelle konfiguriert</td></tr>';
+}
+
+$('add-model-btn').addEventListener('click', () => openModelModal(null));
+window.editModel   = key => openModelModal(key);
+window.deleteModel = async key => {
+  if (!confirm(`Modell "${key}" löschen?`)) return;
+  delete models[key];
+  await saveModels();
+  renderModels();
+};
+
+function providerOptions(selected) {
+  const names = Object.keys(providers);
+  if (!names.length) return '<option value="">— (kein Provider konfiguriert)</option>';
+  return names.map(n => `<option value="${esc(n)}" ${n === selected ? 'selected' : ''}>${esc(n)}</option>`).join('');
+}
+
+function openModelModal(editKey) {
+  const m = editKey ? (models[editKey] || {}) : {};
+  showModal(editKey ? `Modell bearbeiten: ${editKey}` : 'Neues Modell', `
+    <div class="field"><label>Key (z.B. "fast", "smart")</label>
+      <input id="f-key" value="${esc(editKey ?? '')}" placeholder="fast" ${editKey ? 'readonly style="opacity:.6"' : ''}>
+    </div>
+    <div class="field"><label>Modellname (z.B. qwen3:4b)</label>
+      <input id="f-model" value="${esc(m.model ?? '')}" placeholder="qwen3:4b">
+    </div>
+    <div class="field"><label>Provider</label>
+      <select id="f-provider">${providerOptions(m.provider ?? '')}</select>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>Temperature (0–2)</label>
+        <input id="f-temp" type="number" step="0.1" min="0" max="2" value="${m.temperature ?? '0.7'}" placeholder="0.7">
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-check">
+        <input type="checkbox" id="f-think" ${m.think ? 'checked' : ''}>
+        <label for="f-think" style="margin-bottom:0">Think-Modus (Chain-of-Thought)</label>
+      </div>
+    </div>
+  `, async () => {
+    const key = $('f-key').value.trim();
+    if (!key) { $('modal-err').textContent = 'Key erforderlich.'; return false; }
+    if (!editKey && models[key]) { $('modal-err').textContent = 'Key bereits vergeben.'; return false; }
+    const obj = {
+      model:    $('f-model').value.trim(),
+      provider: $('f-provider').value,
+    };
+    const t = $('f-temp').value; if (t !== '') obj.temperature = parseFloat(t);
+    if ($('f-think').checked) obj.think = true;
+    if (editKey && editKey !== key) delete models[editKey];
+    models[key] = obj;
+    await saveModels();
+    renderModels();
+    return true;
+  });
+}
+
+async function saveModels() {
+  const r = await api.post('/api/models', {models});
+  if (r.ok) toast('Modell gespeichert'); else toast('Fehler beim Speichern', 'err');
+}
+
+// ── Skills ─────────────────────────────────────────────────────────────────
+
+let _skills = [];
+
+async function loadSkills() {
+  const r = await api.get('/api/skills');
+  if (!r.ok) return;
+  _skills = (await r.json()).skills || [];
+  renderSkills();
+}
+
+function renderSkills() {
+  const tbody = document.querySelector('#skills-table tbody');
+  tbody.innerHTML = '';
+  for (const s of _skills) {
+    const dot  = s.active ? 'ok' : (s.requires_config.length ? 'err' : 'ok');
+    const label = s.active ? 'Aktiv' : (s.missing_config.length
+      ? `Fehlt: ${s.missing_config.join(', ')}`
+      : 'Inaktiv');
+    const delBtn = s.is_user
+      ? `<button class="btn-del" onclick="deleteSkill('${esc(s.name)}')">Entfernen</button>`
+      : '<span style="color:var(--muted);font-size:12px">built-in</span>';
+    const tr = document.createElement('tr');
+    tr.className = 'skill-row';
+    tr.innerHTML = `
+      <td><strong>${esc(s.name)}</strong><br><span style="color:var(--muted);font-size:12px">${esc(s.author)}</span></td>
+      <td><span class="tag">${esc(s.version || '—')}</span></td>
+      <td><span class="status-dot ${dot}"></span>${esc(label)}</td>
+      <td>
+        ${s.requires_config.length
+          ? `<button class="btn-edit" onclick="configSkill('${esc(s.name)}')">Konfigurieren</button>`
+          : '<span style="color:var(--muted);font-size:12px">—</span>'}
+      </td>
+      <td class="action-btns">${delBtn}</td>`;
+    tbody.appendChild(tr);
+  }
+  if (!_skills.length)
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px">Keine Skills installiert</td></tr>';
+}
+
+// ── Upload ──────────────────────────────────────────────────────────────────
+
+const uploadZone = $('upload-zone');
+const skillFile  = $('skill-file');
+const uploadProg = $('upload-progress');
+
+uploadZone.addEventListener('click', () => skillFile.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('drag'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file) uploadSkill(file);
+});
+skillFile.addEventListener('change', () => {
+  if (skillFile.files[0]) uploadSkill(skillFile.files[0]);
+  skillFile.value = '';
+});
+
+async function uploadSkill(file) {
+  if (!file.name.endsWith('.zip')) { toast('Nur ZIP-Dateien erlaubt', 'err'); return; }
+  uploadProg.textContent = `Lade hoch: ${file.name} …`;
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const r = await fetch('/api/skills/upload', {
+      method: 'POST', body: fd, credentials: 'include'
+    });
+    const data = await r.json();
+    if (r.ok) {
+      uploadProg.textContent = `✓ "${data.name}" installiert — ${data.message}`;
+      toast(`Skill "${data.name}" installiert`);
+      await loadSkills();
+    } else {
+      uploadProg.textContent = `Fehler: ${data.error}`;
+      toast(data.error, 'err');
+    }
+  } catch (e) {
+    uploadProg.textContent = 'Verbindungsfehler';
+    toast('Upload fehlgeschlagen', 'err');
+  }
+}
+
+window.deleteSkill = async name => {
+  if (!confirm(`Skill "${name}" entfernen?`)) return;
+  const r = await fetch(`/api/skills/${encodeURIComponent(name)}`, {
+    method: 'DELETE', credentials: 'include'
+  });
+  if (r.ok) { toast(`Skill "${name}" entfernt`); await loadSkills(); }
+  else       { const d = await r.json(); toast(d.error || 'Fehler', 'err'); }
+};
+
+// ── Skill-Konfiguration ─────────────────────────────────────────────────────
+
+window.configSkill = async name => {
+  const skill = _skills.find(s => s.name === name);
+  if (!skill) return;
+
+  // Alle Keys: required + vorhandene optionale
+  const allKeys = [...new Set([...skill.requires_config, ...Object.keys(skill.config)])];
+
+  const fields = allKeys.map(k => `
+    <div class="field">
+      <label>${esc(k)}${skill.requires_config.includes(k) ? ' <span style="color:var(--err)">*</span>' : ''}</label>
+      <input id="sc-${esc(k)}" value="${esc(skill.config[k] ?? '')}" placeholder="${esc(k)}">
+    </div>`).join('');
+
+  const extraField = `
+    <div class="field" style="margin-top:10px">
+      <label style="color:var(--muted)">Weitere Keys (key=value, eine pro Zeile)</label>
+      <textarea id="sc-extra" rows="3" style="width:100%;background:var(--bg3);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:6px;outline:none;resize:vertical"></textarea>
+    </div>`;
+
+  showModal(`Skill konfigurieren: ${name}`, fields + extraField, async () => {
+    const cfg = {};
+    for (const k of allKeys) {
+      const v = document.getElementById(`sc-${k}`)?.value.trim();
+      if (v) cfg[k] = v;
+    }
+    // Parse extra lines
+    const extra = $('sc-extra').value.trim();
+    for (const line of extra.split('\n')) {
+      const idx = line.indexOf('=');
+      if (idx > 0) {
+        const k = line.slice(0, idx).trim();
+        const v = line.slice(idx + 1).trim();
+        if (k && v) cfg[k] = v;
+      }
+    }
+    // Load full skill-config, update this skill's section, save
+    const r = await api.get('/api/skill-config');
+    const sc = r.ok ? (await r.json()).skill_config || {} : {};
+    sc[name] = cfg;
+    const r2 = await api.post('/api/skill-config', {skill_config: sc});
+    if (r2.ok) {
+      toast(`Konfiguration für "${name}" gespeichert`);
+      await loadSkills();
+      return true;
+    } else {
+      $('modal-err').textContent = 'Fehler beim Speichern';
+      return false;
+    }
+  });
+};
+
+// ── Modal ──────────────────────────────────────────────────────────────────
+
+let _modalSave = null;
+
+function showModal(title, fieldsHtml, onSave) {
+  $('modal-title').textContent = title;
+  $('modal-fields').innerHTML = fieldsHtml;
+  $('modal-err').textContent = '';
+  _modalSave = onSave;
+  $('modal-bg').classList.add('open');
+  const first = $('modal-fields').querySelector('input:not([readonly])');
+  if (first) setTimeout(() => first.focus(), 50);
+}
+
+$('modal-cancel').addEventListener('click', closeModal);
+$('modal-bg').addEventListener('click', e => { if (e.target === $('modal-bg')) closeModal(); });
+function closeModal() { $('modal-bg').classList.remove('open'); }
+
+$('modal-save').addEventListener('click', async () => {
+  if (!_modalSave) return;
+  const ok = await _modalSave();
+  if (ok) closeModal();
+});
+
+$('modal').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') $('modal-save').click();
+  if (e.key === 'Escape') closeModal();
+});
+</script>
+</body>
+</html>

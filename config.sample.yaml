@@ -43,6 +43,10 @@ agents:
 interfaces:
   # Remove the comment to enable an interface.
 
+  # web:
+  #   port: 8888          # Web-UI with chat, provider & model management
+  #   # token: mysecret   # optional — auto-generated and printed to console if omitted
+
   # webhook:
   #   port: 8080
 

@@ -1,0 +1,466 @@
+"""Web interface for PawLia — single-page app with chat, provider & model management.
+
+A random access token is generated on startup and printed to the console.
+Enter it in the browser to authenticate.
+
+Config (under ``interfaces.web``):
+    host: 0.0.0.0
+    port: 8888
+    token: <optional — auto-generated if omitted>
+"""
+
+import asyncio
+import json
+import logging
+import os
+import secrets
+from collections import defaultdict
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+import io
+import shutil
+import tempfile
+import zipfile
+
+import jinja2
+import yaml
+from aiohttp import web
+
+if TYPE_CHECKING:
+    from pawlia.app import App
+
+logger = logging.getLogger("pawlia.interfaces.web")
+
+_PKG_ROOT       = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_SKILLS_DIR     = os.path.join(_PKG_ROOT, "skills")
+_USER_SKILLS_DIR = os.path.join(_SKILLS_DIR, "user")
+
+_TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+_jinja_env = jinja2.Environment(
+    loader=jinja2.FileSystemLoader(_TEMPLATES_DIR),
+    autoescape=False,  # HTML is trusted; JS template literals must not be escaped
+)
+
+# ---------------------------------------------------------------------------
+# Config file helpers
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Skill helpers
+# ---------------------------------------------------------------------------
+
+def _scan_skills(skill_config: dict) -> list:
+    """Scan ALL skills (built-in + user), regardless of config completeness."""
+    from pawlia.skills.loader import _parse_frontmatter
+
+    candidates: List[tuple] = []
+    if os.path.isdir(_SKILLS_DIR):
+        for entry in os.listdir(_SKILLS_DIR):
+            p = os.path.join(_SKILLS_DIR, entry)
+            if os.path.isdir(p) and os.path.isfile(os.path.join(p, "SKILL.md")):
+                candidates.append((p, False))
+
+    if os.path.isdir(_USER_SKILLS_DIR):
+        for entry in os.listdir(_USER_SKILLS_DIR):
+            p = os.path.join(_USER_SKILLS_DIR, entry)
+            if os.path.isdir(p) and os.path.isfile(os.path.join(p, "SKILL.md")):
+                candidates.append((p, True))
+
+    result = []
+    for skill_path, is_user in candidates:
+        try:
+            fm = _parse_frontmatter(os.path.join(skill_path, "SKILL.md"))
+            if not fm or not fm.get("name"):
+                continue
+            name = fm["name"]
+            requires = fm.get("metadata", {}).get("requires_config", [])
+            current  = skill_config.get(name, {})
+            missing  = [k for k in requires if k not in current]
+            result.append({
+                "name":           name,
+                "description":    fm.get("description", ""),
+                "version":        str(fm.get("metadata", {}).get("version", "")),
+                "author":         fm.get("metadata", {}).get("author", ""),
+                "requires_config": requires,
+                "config":         current,
+                "missing_config": missing,
+                "active":         len(missing) == 0,
+                "is_user":        is_user,
+            })
+        except Exception as e:
+            logger.debug("Skill scan error at %s: %s", skill_path, e)
+
+    return sorted(result, key=lambda x: x["name"])
+
+
+def _find_config_path(hint: Optional[str] = None) -> Optional[str]:
+    """Locate the active config file on disk."""
+    candidates: List[str] = []
+    if hint:
+        candidates.append(hint)
+    pkg_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    for base in (os.getcwd(), pkg_root):
+        for name in ("config.yaml", "config.yml", "config.json"):
+            candidates.append(os.path.join(base, name))
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _read_config(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        if path.endswith((".yaml", ".yml")):
+            return yaml.safe_load(f) or {}
+        return json.load(f)
+
+
+def _write_config(path: str, cfg: dict) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        if path.endswith((".yaml", ".yml")):
+            yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+        else:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+async def start_web(app: "App", cfg: Dict) -> None:
+    """Start the web interface server."""
+    host: str = cfg.get("host", "0.0.0.0")
+    port: int = cfg.get("port", 8888)
+
+    # Token: use configured or auto-generate
+    token: str = cfg.get("token") or secrets.token_urlsafe(32)
+
+    # Print prominently to console
+    border = "=" * 62
+    print(f"\n{border}")
+    print("  PAWLIA WEB INTERFACE")
+    print(f"  URL:   http://localhost:{port}")
+    print(f"  TOKEN: {token}")
+    print(f"{border}\n")
+
+    config_path = _find_config_path(getattr(app, "config_path", None))
+    if not config_path:
+        logger.warning("Web: could not locate config file — provider/model edits disabled")
+
+    from pawlia.interfaces.common import AgentCache
+
+    agent_cache = AgentCache(app)
+    pending: Dict[str, List[str]] = defaultdict(list)
+    sessions: set = set()
+
+    _COOKIE = "pawlia_session"
+
+    def _authed(request: web.Request) -> bool:
+        return request.cookies.get(_COOKIE, "") in sessions
+
+    def _unauth() -> web.Response:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    # ── Static ──────────────────────────────────────────────────────────────
+
+    async def handle_index(_r: web.Request) -> web.Response:
+        html = _jinja_env.get_template("index.html").render()
+        return web.Response(text=html, content_type="text/html")
+
+    # ── Auth ────────────────────────────────────────────────────────────────
+
+    async def handle_auth(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if body.get("token") != token:
+            return web.json_response({"error": "invalid token"}, status=401)
+        sid = secrets.token_urlsafe(32)
+        sessions.add(sid)
+        resp = web.json_response({"ok": True})
+        resp.set_cookie(_COOKIE, sid, httponly=True, samesite="Strict", max_age=86400 * 7)
+        return resp
+
+    async def handle_logout(request: web.Request) -> web.Response:
+        sessions.discard(request.cookies.get(_COOKIE, ""))
+        resp = web.json_response({"ok": True})
+        resp.del_cookie(_COOKIE)
+        return resp
+
+    # ── Chat ────────────────────────────────────────────────────────────────
+
+    async def handle_chat(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        user_id = body.get("user_id", "web_user")
+        message = body.get("message", "").strip()
+        images = body.get("images") or None
+        thread_id = body.get("thread_id") or None
+
+        if not message and not images:
+            return web.json_response({"error": "empty message"}, status=400)
+
+        # ── Commands (/status, /model, /private, /thread) ──
+        lower = message.lower().strip()
+
+        if lower == "/status":
+            from pawlia.interfaces.common import build_status, format_status
+            agent = agent_cache.get(user_id)
+            status = build_status(app, user_id, agent, thread_id=thread_id)
+            return web.json_response({"response": format_status(status)})
+
+        if lower.startswith("/model"):
+            from pawlia.interfaces.common import handle_model_command
+            args_str = message.strip()[len("/model"):].strip()
+            result = handle_model_command(app, user_id, args_str, thread_id=thread_id)
+            if result.invalidate_agent:
+                agent_cache.invalidate(user_id)
+            if result.action == "show":
+                return web.json_response({"response": f"**Model ({result.ctx_label}):** `{result.model}`"})
+            return web.json_response({"response": f"Model auf `{result.model}` gesetzt ({result.ctx_label})."})
+
+        if lower == "/private":
+            session = app.memory.load_session(user_id)
+            if thread_id:
+                active = app.memory.toggle_private_thread(session, thread_id)
+            else:
+                active = app.memory.toggle_private(session)
+            icon = "\U0001f512" if active else "\U0001f513"
+            state = "aktiviert" if active else "deaktiviert"
+            return web.json_response({"response": f"{icon} Private Mode {state}"})
+
+        if lower.startswith("/thread"):
+            thread_msg = message.strip()[len("/thread"):].strip()
+            if not thread_msg:
+                return web.json_response({"response": "_Verwendung: /thread <Nachricht>_"})
+            import time as _time
+            new_thread = f"web_{int(_time.time())}"
+            agent = agent_cache.get(user_id)
+            resp = await agent.run(thread_msg, thread_id=new_thread)
+            return web.json_response({"response": resp, "thread_id": new_thread})
+
+        # ── Normal message ──
+        logger.info("Web chat: %s: %s", user_id, message[:80])
+        try:
+            agent = agent_cache.get(user_id)
+            response = await agent.run(message, images=images, thread_id=thread_id)
+            return web.json_response({"response": response})
+        except Exception as e:
+            logger.error("Web chat error: %s", e, exc_info=True)
+            return web.json_response({"error": "internal error"}, status=500)
+
+    async def handle_notifications(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        uid = request.query.get("user_id", "web_user")
+        msgs = pending.pop(uid, [])
+        return web.json_response({"notifications": msgs})
+
+    # ── Providers ────────────────────────────────────────────────────────────
+
+    async def handle_get_providers(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        if not config_path:
+            return web.json_response({"providers": {}})
+        try:
+            data = _read_config(config_path)
+            return web.json_response({"providers": data.get("providers", {})})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_save_providers(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        if not config_path:
+            return web.json_response({"error": "no config file"}, status=500)
+        try:
+            body = await request.json()
+            data = _read_config(config_path)
+            data["providers"] = body.get("providers", {})
+            _write_config(config_path, data)
+            logger.info("Web: providers updated")
+            return web.json_response({"ok": True})
+        except Exception as e:
+            logger.error("Web: error saving providers: %s", e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ── Models ───────────────────────────────────────────────────────────────
+
+    async def handle_get_models(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        if not config_path:
+            return web.json_response({"models": {}})
+        try:
+            data = _read_config(config_path)
+            return web.json_response({"models": data.get("models", {})})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_save_models(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        if not config_path:
+            return web.json_response({"error": "no config file"}, status=500)
+        try:
+            body = await request.json()
+            data = _read_config(config_path)
+            data["models"] = body.get("models", {})
+            _write_config(config_path, data)
+            logger.info("Web: models updated")
+            return web.json_response({"ok": True})
+        except Exception as e:
+            logger.error("Web: error saving models: %s", e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ── Skills ───────────────────────────────────────────────────────────────
+
+    async def handle_list_skills(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        try:
+            cfg_data = _read_config(config_path) if config_path else {}
+            skills = _scan_skills(cfg_data.get("skill-config", {}))
+            return web.json_response({"skills": skills})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_skill_upload(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+
+        os.makedirs(_USER_SKILLS_DIR, exist_ok=True)
+
+        reader = await request.multipart()
+        field = await reader.next()
+        if field is None or field.name != "file":
+            return web.json_response({"error": "no file field in form"}, status=400)
+
+        zip_data = await field.read()
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(zip_data))
+        except zipfile.BadZipFile:
+            return web.json_response({"error": "ungültige ZIP-Datei"}, status=400)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            zf.extractall(tmpdir)
+
+            # Find SKILL.md — at root or one level deep
+            skill_root = None
+            if os.path.isfile(os.path.join(tmpdir, "SKILL.md")):
+                skill_root = tmpdir
+            else:
+                for entry in sorted(os.listdir(tmpdir)):
+                    ep = os.path.join(tmpdir, entry)
+                    if os.path.isdir(ep) and os.path.isfile(os.path.join(ep, "SKILL.md")):
+                        skill_root = ep
+                        break
+
+            if not skill_root:
+                return web.json_response({"error": "Keine SKILL.md im ZIP gefunden"}, status=400)
+
+            from pawlia.skills.loader import _parse_frontmatter
+            fm = _parse_frontmatter(os.path.join(skill_root, "SKILL.md"))
+            if not fm or not fm.get("name"):
+                return web.json_response({"error": "SKILL.md hat keinen Namen"}, status=400)
+
+            skill_name = fm["name"]
+            dest = os.path.join(_USER_SKILLS_DIR, skill_name)
+
+            # Replace existing
+            if os.path.exists(dest):
+                shutil.rmtree(dest)
+            shutil.copytree(skill_root, dest)
+
+        # Install declared deps in background thread
+        from pawlia.install_skill_deps import install_all_skill_deps
+        await asyncio.to_thread(install_all_skill_deps, _USER_SKILLS_DIR)
+
+        logger.info("Web: skill '%s' installed", skill_name)
+        return web.json_response({
+            "ok": True,
+            "name": skill_name,
+            "message": "Neustart erforderlich, damit der Skill aktiv wird.",
+        })
+
+    async def handle_skill_delete(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        skill_name = request.match_info["name"]
+        dest = os.path.join(_USER_SKILLS_DIR, skill_name)
+        # Path traversal guard
+        if not os.path.abspath(dest).startswith(os.path.abspath(_USER_SKILLS_DIR) + os.sep):
+            return web.json_response({"error": "ungültiger Name"}, status=400)
+        if not os.path.isdir(dest):
+            return web.json_response({"error": "Skill nicht gefunden"}, status=404)
+        shutil.rmtree(dest)
+        logger.info("Web: skill '%s' deleted", skill_name)
+        return web.json_response({"ok": True})
+
+    async def handle_get_skill_config(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        if not config_path:
+            return web.json_response({"skill_config": {}})
+        try:
+            data = _read_config(config_path)
+            return web.json_response({"skill_config": data.get("skill-config", {})})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_save_skill_config(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        if not config_path:
+            return web.json_response({"error": "no config file"}, status=500)
+        try:
+            body = await request.json()
+            data = _read_config(config_path)
+            data["skill-config"] = body.get("skill_config", {})
+            _write_config(config_path, data)
+            logger.info("Web: skill-config updated")
+            return web.json_response({"ok": True})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ── Scheduler callback ───────────────────────────────────────────────────
+
+    async def _notify(user_id: str, message: str) -> None:
+        pending[user_id].append(message)
+
+    app.scheduler.register(_notify)
+
+    # ── Build & start ────────────────────────────────────────────────────────
+
+    webapp = web.Application()
+    webapp.router.add_get("/",                    handle_index)
+    webapp.router.add_post("/api/auth",           handle_auth)
+    webapp.router.add_post("/api/logout",         handle_logout)
+    webapp.router.add_post("/api/chat",           handle_chat)
+    webapp.router.add_get("/api/notifications",   handle_notifications)
+    webapp.router.add_get("/api/providers",       handle_get_providers)
+    webapp.router.add_post("/api/providers",      handle_save_providers)
+    webapp.router.add_get("/api/models",          handle_get_models)
+    webapp.router.add_post("/api/models",         handle_save_models)
+    webapp.router.add_get("/api/skills",          handle_list_skills)
+    webapp.router.add_post("/api/skills/upload",  handle_skill_upload)
+    webapp.router.add_delete("/api/skills/{name}", handle_skill_delete)
+    webapp.router.add_get("/api/skill-config",    handle_get_skill_config)
+    webapp.router.add_post("/api/skill-config",   handle_save_skill_config)
+
+    runner = web.AppRunner(webapp)
+    await runner.setup()
+    site = web.TCPSite(runner, host, port)
+    await site.start()
+    logger.info("Web interface: http://%s:%d", host, port)
+
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await runner.cleanup()
+        logger.info("Web interface: stopped")
