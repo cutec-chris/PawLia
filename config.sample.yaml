@@ -97,7 +97,8 @@ interfaces:
 #   #   voice: de-DE-KatjaNeural   # run `edge-tts --list-voices` for options
 
 skill-install:
-  allow_remote: false   # allow skill installation via Matrix/Telegram file upload
+  allow_remote: false      # allow skill installation via Matrix/Telegram file upload
+  allow_workspace: false   # load skills from session/<user>/workspace/skills/ (default: false)
 
 skill-config:
   # searxng:
