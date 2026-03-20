@@ -97,7 +97,8 @@ interfaces:
 #   #   sample_rate: 22050
 
 skill-install:
-  allow_remote: false   # allow skill installation via Matrix/Telegram file upload
+  allow_remote: false      # allow skill installation via Matrix/Telegram file upload
+  allow_workspace: false   # load skills from session/<user>/workspace/skills/ (default: false)
 
 skill-config:
   # searxng:

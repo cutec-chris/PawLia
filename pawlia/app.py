@@ -44,9 +44,23 @@ class App:
         self.tools.register(BashTool())
         self.tools.register(ReminderTool())
 
-        # Skills
+        # Skills — built-in and user-provided (skills/user/)
         skills_dir = os.path.join(pkg_dir, "skills")
         self.skills: Dict[str, AgentSkill] = SkillLoader.discover(skills_dir, config)
+
+        # Also discover skills placed in any session workspace (session/<user>/workspace/skills/)
+        # Requires skill-install.allow_workspace: true in config (default: false)
+        allow_workspace = config.get("skill-install", {}).get("allow_workspace", False)
+        if allow_workspace and os.path.isdir(self.session_dir):
+            for user_entry in os.listdir(self.session_dir):
+                workspace_dir = os.path.join(self.session_dir, user_entry, "workspace")
+                workspace_skills_dir = os.path.join(workspace_dir, "skills")
+                if os.path.isdir(workspace_skills_dir):
+                    workspace_skills = SkillLoader.discover(
+                        workspace_skills_dir, config, base_dir=workspace_dir
+                    )
+                    self.skills.update(workspace_skills)
+
         if self.skills:
             self.logger.info("Loaded skills: %s", ", ".join(self.skills.keys()))
         else:
