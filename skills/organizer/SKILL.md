@@ -1,6 +1,6 @@
 ---
 name: organizer
-description: Personal planner for reminders, calendar events, tasks, and scheduled automations. Use when the user wants to be reminded of something, plan a personal event/appointment, manage personal tasks, or schedule recurring automation scripts.
+description: "Personal planner for reminders, calendar events, and tasks. Use when the user wants to: be reminded of something, plan an event/appointment, or manage personal tasks."
 license: MIT
 metadata:
   author: Christian Ulrich
