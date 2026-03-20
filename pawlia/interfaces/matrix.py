@@ -303,6 +303,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 await client.room_typing(room.room_id, typing_state=False)
             except Exception:
                 pass
+            await _send(f"Fehler: {e}")
 
     # ------------------------------------------------------------------
     # Call manager (VoIP)
