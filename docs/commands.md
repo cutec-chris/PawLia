@@ -4,10 +4,10 @@ PawLia supports a set of slash commands across all interactive interfaces. The p
 
 | Interface | Prefix | Example |
 |-----------|--------|---------|
-| Telegram  | `/`    | `/model qwen3:4b` |
-| Matrix    | `//`   | `//model qwen3:4b` |
-| CLI       | `/`    | `/model qwen3:4b` |
-| Web       | `/`    | `/model qwen3:4b` |
+| Telegram  | `/`    | `/model qwen3.5:4b` |
+| Matrix    | `//`   | `//model qwen3.5:4b` |
+| CLI       | `/`    | `/model qwen3.5:4b` |
+| Web       | `/`    | `/model qwen3.5:4b` |
 
 ---
 
@@ -53,7 +53,7 @@ Subsequent messages to that thread work exactly like any other thread: reply ins
 
 Matrix prefix: `//model` / `//model <name>`
 
-`<name>` accepts either a **model key** defined in `config.yaml` (e.g. `fast`, `smart`) or a **raw model name** (e.g. `qwen3:4b`, `llama3.1:8b`).
+`<name>` accepts either a **model key** defined in `config.yaml` (e.g. `fast`, `smart`) or a **raw model name** (e.g. `qwen3.5:4b`).
 
 ### Scope
 
