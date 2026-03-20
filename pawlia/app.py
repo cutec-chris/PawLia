@@ -8,12 +8,12 @@ import logging
 import os
 from typing import Any, Callable, Dict, Optional
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from pawlia.config import load_config
 from pawlia.llm import LLMFactory
 from pawlia.memory import MemoryManager
 from pawlia.tools.base import ToolRegistry
 from pawlia.tools.bash import BashTool
-from pawlia.tools.reminder import ReminderTool
 from pawlia.skills.loader import AgentSkill, SkillLoader
 from pawlia.install_skill_deps import install_all_skill_deps
 from pawlia.agents.chat import ChatAgent
@@ -43,7 +43,6 @@ class App:
         # Tools
         self.tools = ToolRegistry()
         self.tools.register(BashTool())
-        self.tools.register(ReminderTool())
 
         # Skills — built-in and user-provided (skills/user/)
         skills_dir = os.path.join(pkg_dir, "skills")
@@ -70,6 +69,33 @@ class App:
 
         # Scheduler for proactive reminders / event notifications
         self.scheduler = Scheduler(self.session_dir)
+        self.scheduler.set_llm_formatter(self._format_notification)
+
+    async def _format_notification(self, user_id: str, raw_message: str) -> str:
+        """Pass a raw notification through the LLM for personalized delivery.
+
+        The LLM receives the raw data (reminder text, script output, etc.)
+        and produces a natural, personalized message for the user.
+        If the LLM is busy (e.g. handling a chat request on a local model),
+        the scheduler's timeout + fallback ensures the raw message still
+        gets delivered.
+        """
+        session = self.memory.load_session(user_id)
+        llm = self.llm.get("chat")
+
+        # Minimal prompt — keep it short so local models respond fast
+        system = (
+            "Formuliere diese Benachrichtigung natürlich und kurz (1-2 Sätze). "
+            "Behalte alle Fakten (Zeiten, Orte, Namen). Antworte nur mit dem Text."
+        )
+
+        messages = [
+            SystemMessage(content=system),
+            HumanMessage(content=raw_message),
+        ]
+
+        response = await llm.ainvoke(messages)
+        return response.content or raw_message
 
     def make_agent(self, user_id: str = "default", **kwargs) -> ChatAgent:
         """Create a new ChatAgent for a user session.
