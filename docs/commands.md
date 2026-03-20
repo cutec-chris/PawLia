@@ -74,3 +74,30 @@ Thread-local overrides do not affect the main conversation or other threads. All
 ```
 
 To reset to the default model, restart the session or (CLI) set the override to the default key.
+
+---
+
+## `/status` — Show session status
+
+Displays information about the current session or thread: active model, context size, private mode, loaded skills, and more.
+
+```
+/status          # Telegram & CLI
+!status          # Matrix
+```
+
+When sent inside a thread, the output reflects the thread's context (exchanges, model override). Otherwise it shows the main session.
+
+### Output fields
+
+| Field | Description |
+|-------|-------------|
+| **Model** | Active model name (marked with "override" if set via `/model`) |
+| **Temp** | Sampling temperature |
+| **Provider** | API base URL of the LLM provider |
+| **Context** | Number of exchanges and estimated token count |
+| **Summary** | Size of the auto-generated conversation summary (if any) |
+| **Private** | Whether private mode is active |
+| **Threads** | Number of active thread contexts in this session |
+| **Skills** | Loaded skill names |
+| **Idle** | Time since last exchange |
