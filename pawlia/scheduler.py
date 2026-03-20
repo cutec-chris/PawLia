@@ -1,8 +1,9 @@
-"""Scheduler - periodic background task that fires due reminders and events.
+"""Scheduler - periodic background task that fires due reminders, events,
+checklist items, task reminders, and scheduled automation jobs.
 
 Runs as an asyncio task alongside the interfaces. Every CHECK_INTERVAL seconds
-it scans all user sessions for due reminders and upcoming events, then calls
-registered notification callbacks to deliver messages proactively.
+it scans all user sessions for due items, then calls registered notification
+callbacks to deliver messages proactively.
 """
 
 import asyncio
@@ -12,31 +13,59 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
+from pawlia.automation import ChecklistProcessor, JobRunner, TaskReminderProcessor
+
 CHECK_INTERVAL = 60  # seconds between checks
 EVENT_REMINDER_MINUTES = 15  # notify this many minutes before an event
 
 # Type for notification callbacks: async def send(user_id, message) -> None
 NotifyCallback = Callable[[str, str], Coroutine[Any, Any, None]]
 
+# Type for LLM formatter: async def format(user_id, raw_message) -> str
+LLMFormatter = Callable[[str, str], Coroutine[Any, Any, str]]
+
 logger = logging.getLogger("pawlia.scheduler")
 
 
+
 class Scheduler:
-    """Periodically checks for due reminders and upcoming events."""
+    """Periodically checks for due reminders, events, checklists, and jobs."""
 
     def __init__(self, session_dir: str):
         self.session_dir = session_dir
         self._callbacks: List[NotifyCallback] = []
         self._task: Optional[asyncio.Task] = None
+        self._llm_formatter: Optional[LLMFormatter] = None
+
+        # Automation processors (initialized lazily after callbacks are registered)
+        self._checklist: Optional[ChecklistProcessor] = None
+        self._jobs: Optional[JobRunner] = None
+        self._task_reminders: Optional[TaskReminderProcessor] = None
 
     def register(self, callback: NotifyCallback) -> None:
         """Register a notification callback (one per interface)."""
         self._callbacks.append(callback)
 
+    def set_llm_formatter(self, formatter: LLMFormatter) -> None:
+        """Set the LLM formatter for personalizing notifications.
+
+        The formatter receives (user_id, raw_message) and returns a
+        personalized message.  If it fails or times out, the raw message
+        is used as fallback.
+        """
+        self._llm_formatter = formatter
+
     def start(self) -> None:
         """Start the scheduler as a background asyncio task."""
         if self._task and not self._task.done():
             return
+
+        # Initialize automation processors — they route through self._notify
+        # which handles LLM formatting + fallback before delivering to interfaces
+        self._checklist = ChecklistProcessor(self.session_dir, self._notify)
+        self._jobs = JobRunner(self.session_dir, self._notify)
+        self._task_reminders = TaskReminderProcessor(self.session_dir, self._notify)
+
         self._task = asyncio.create_task(self._loop())
         logger.info("Scheduler started (interval=%ds)", CHECK_INTERVAL)
 
@@ -68,13 +97,34 @@ class Scheduler:
             if not os.path.isdir(user_dir):
                 continue
 
-            # Check reminders
+            # 1. Legacy reminders
             reminders_path = os.path.join(user_dir, "reminders.json")
             await self._check_reminders(user_id, reminders_path)
 
-            # Check calendar events
+            # 2. Calendar events (basic 15-min notification)
             events_path = os.path.join(user_dir, "calendar", "events.json")
             await self._check_events(user_id, events_path)
+
+            # 3. Event checklists (script-based automation)
+            if self._checklist:
+                try:
+                    await self._checklist.process_user(user_id)
+                except Exception as e:
+                    logger.error("Checklist processing failed for %s: %s", user_id, e)
+
+            # 4. Task reminders
+            if self._task_reminders:
+                try:
+                    await self._task_reminders.process_user(user_id)
+                except Exception as e:
+                    logger.error("Task reminder processing failed for %s: %s", user_id, e)
+
+            # 5. Scheduled jobs
+            if self._jobs:
+                try:
+                    await self._jobs.process_user(user_id)
+                except Exception as e:
+                    logger.error("Job processing failed for %s: %s", user_id, e)
 
     async def _check_reminders(self, user_id: str, path: str) -> None:
         """Fire due reminders and handle recurrence."""
@@ -147,10 +197,26 @@ class Scheduler:
             _save_json(path, events)
 
     async def _notify(self, user_id: str, message: str) -> None:
-        """Send a notification to all registered interfaces."""
+        """Send a notification to all registered interfaces.
+
+        If an LLM formatter is set, the raw message is first passed through
+        the LLM for a personalized response.  On failure or timeout, the raw
+        message is delivered as-is.
+        """
+        formatted = message
+        if self._llm_formatter:
+            try:
+                formatted = await self._llm_formatter(user_id, message)
+                if not formatted or not formatted.strip():
+                    logger.warning("LLM returned empty response, using raw message")
+                    formatted = message
+            except Exception as e:
+                logger.warning("LLM formatting failed for %s: %s, using raw message", user_id, e)
+                formatted = message
+
         for callback in self._callbacks:
             try:
-                await callback(user_id, message)
+                await callback(user_id, formatted)
             except Exception as e:
                 logger.error("Notify callback failed for %s: %s", user_id, e)
 
@@ -162,13 +228,11 @@ def _next_occurrence(fire_at: datetime, recurrence: str) -> datetime:
     elif recurrence == "weekly":
         return fire_at + timedelta(weeks=1)
     elif recurrence == "monthly":
-        # Advance by ~30 days (good enough for most cases)
         month = fire_at.month % 12 + 1
         year = fire_at.year + (1 if month == 1 else 0)
         try:
             return fire_at.replace(year=year, month=month)
         except ValueError:
-            # Handle months with fewer days (e.g. Jan 31 -> Feb 28)
             return fire_at.replace(year=year, month=month, day=28)
     return fire_at + timedelta(days=1)
 

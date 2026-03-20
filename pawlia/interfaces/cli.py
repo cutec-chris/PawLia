@@ -59,30 +59,23 @@ async def start_cli(app: "App") -> None:
         if active_fut and not active_fut.done():
             active_fut.cancel()
 
-    loop.add_signal_handler(signal.SIGINT, _on_sigint)
+    try:
+        loop.add_signal_handler(signal.SIGINT, _on_sigint)
+    except NotImplementedError:
+        # Windows doesn't support add_signal_handler; fall back to signal.signal
+        signal.signal(signal.SIGINT, lambda *_: _on_sigint())
 
     while True:
-        # Read from stdin via event loop (non-blocking)
-        fut: asyncio.Future[str] = loop.create_future()
-        active_fut = fut
-
         sys.stdout.write("You: ")
         sys.stdout.flush()
         _waiting_for_input = True
 
-        def _on_readable():
-            line = sys.stdin.readline()
-            if not fut.done():
-                if not line:
-                    fut.set_exception(EOFError())
-                else:
-                    fut.set_result(line.rstrip("\n"))
-            loop.remove_reader(sys.stdin)
-
-        loop.add_reader(sys.stdin, _on_readable)
-
         try:
-            user_input = await fut
+            user_input = await loop.run_in_executor(None, sys.stdin.readline)
+            if not user_input:
+                print()
+                break
+            user_input = user_input.rstrip("\n")
         except (EOFError, asyncio.CancelledError):
             print()
             break
