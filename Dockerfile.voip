@@ -1,13 +1,75 @@
-FROM thalia:latest
+# ── Stage 1: build ────────────────────────────────────────────────────────
+# Compiles Python packages that have no musllinux wheels (e.g. cryptography,
+# aiohttp) against Alpine musl so the runtime stage stays build-tool-free.
+FROM python:3.13-alpine AS builder
 
-# VoIP system dependencies:
-#   espeak-ng — required by piper-tts for phonemisation
-#   ffmpeg    — audio decoding/encoding for aiortc/av
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
+        gcc \
+        musl-dev \
+        python3-dev \
+        openssl-dev \
+        libffi-dev
+
+COPY requirements.txt requirements-voip.txt ./
+RUN pip install --no-cache-dir --prefix=/install \
+        -r requirements.txt \
+        -r requirements-voip.txt
+
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────
+FROM python:3.13-alpine
+
+# Runtime system deps:
+#   nodejs/npm   — AgentSkills
+#   espeak-ng    — phonemisation for Piper
+#   ffmpeg       — audio codec support for aiortc/av
+#   openssl/libffi — runtime for cryptography (compiled in stage 1)
+#   gcompat      — glibc compatibility layer for Piper binary
+#   libstdc++    — C++ runtime for Piper
+RUN apk add --no-cache \
+        nodejs \
+        npm \
         espeak-ng \
         ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+        wget \
+        openssl \
+        libffi \
+        gcompat \
+        libstdc++
 
-# VoIP / telephony extras (aiortc, av, numpy, edge-tts, piper-tts)
-COPY requirements-voip.txt requirements-voip.txt
-RUN pip install --no-cache-dir -r requirements-voip.txt
+WORKDIR /app
+
+# Copy compiled Python packages from builder
+COPY --from=builder /install /usr/local
+
+# Application code
+COPY pawlia/ pawlia/
+COPY skills/ skills/
+RUN mkdir -p skills/user
+
+# Install npm packages declared in bundled skills
+RUN python -m pawlia.install_skill_deps
+
+# Piper TTS binary (v1.2.0 — glibc binary, runs via gcompat on Alpine)
+# Extracts to /opt/piper/piper + bundled ONNX-runtime .so files
+RUN wget -q -O /tmp/piper.tar.gz \
+        "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_x86_64.tar.gz" && \
+    tar -xzf /tmp/piper.tar.gz -C /opt/ && \
+    rm /tmp/piper.tar.gz
+
+ENV PATH="/opt/piper:$PATH"
+
+# Default voice model: German Kerstin low (~15 MB, 16 kHz)
+RUN mkdir -p /app/piper && \
+    wget -q -O /app/piper/de_DE-kerstin-low.onnx \
+        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx" && \
+    wget -q -O /app/piper/de_DE-kerstin-low.onnx.json \
+        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json"
+
+
+# Session data lives in a volume
+VOLUME ["/app/session"]
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "-m", "pawlia", "--mode", "server"]

@@ -284,9 +284,19 @@ class ChatAgent(BaseAgent):
             )),
         ]
 
-        response = await self._invoke(messages, llm=self.llm)
-        summary = self.extract_text(response)
+        try:
+            response = await asyncio.wait_for(
+                self._invoke(messages, llm=self.llm),
+                timeout=120,
+            )
+        except asyncio.TimeoutError:
+            self.logger.error("Summarization timed out for %s", self.session.user_id)
+            return
+        except Exception as e:
+            self.logger.error("Summarization failed for %s: %s", self.session.user_id, e)
+            return
 
+        summary = self.extract_text(response)
         if summary:
             self.memory.summarize(self.session, summary)
 
@@ -304,7 +314,10 @@ class ChatAgent(BaseAgent):
             reason = self.memory.should_summarize(self.session)
             if reason:
                 self.logger.info("Summarizing conversation (trigger: idle)")
-                await self._summarize_conversation()
+                try:
+                    await self._summarize_conversation()
+                except Exception as e:
+                    self.logger.error("Idle summarization failed: %s", e)
 
         try:
             self._idle_task = asyncio.create_task(_idle_watcher())

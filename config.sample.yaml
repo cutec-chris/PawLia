@@ -85,16 +85,16 @@ interfaces:
 
 # Text-to-speech for VoIP call responses — pick one provider and uncomment it.
 # tts:
-#   provider: edge
-#   edge:
-#     voice: de-DE-KatjaNeural     # any edge-tts voice; run `edge-tts --list-voices`
+#   provider: piper                # local TTS, no internet needed (model pre-installed in Docker)
+#   piper:
+#     executable: piper
+#     model: /app/piper/de_DE-kerstin-low.onnx
+#     config: /app/piper/de_DE-kerstin-low.onnx.json
+#     sample_rate: 16000
 #
-#   # provider: piper              # local TTS, no internet needed
-#   # piper:
-#   #   executable: piper          # path to piper binary
-#   #   model: /path/to/de_DE-thorsten-medium.onnx
-#   #   config: /path/to/de_DE-thorsten-medium.onnx.json
-#   #   sample_rate: 22050
+#   # provider: edge               # Microsoft Edge TTS (requires internet)
+#   # edge:
+#   #   voice: de-DE-KatjaNeural   # run `edge-tts --list-voices` for options
 
 skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload

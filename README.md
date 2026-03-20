@@ -11,156 +11,59 @@
         ░▓▓█
 ```
 
-A lightweight, open-source AI assistant built for small language models (e.g., Qwen 3.5 9b). PawLia brings persistent memory, multi-user sessions, and extensible skills to local hardware — no cloud API required.
+**A lightweight, open-source AI assistant built for local hardware.**
 
-## Key Features
+PawLia runs small language models (e.g. Qwen, Llama) with persistent memory, multi-user sessions, and extensible skills — no cloud required.
 
-### 🔌 Multiple Interfaces
-All interfaces can run simultaneously in server mode:
-- **CLI** — interactive terminal session
-- **Telegram** — bot with voice transcription, image support, threads, and model switching
-- **Matrix** — Element-compatible bot with voice transcription, image support, threads, and model switching
-- **Webhook** — HTTP endpoint for custom integrations (`POST /chat`, `GET /notifications`)
+## Why PawLia?
 
-### 👥 Multi-User Sessions
-Each user gets their own isolated session with per-user memory and conversation history. Sessions are persisted to disk as Markdown files and expire from RAM after inactivity.
-
-### 🧵 Thread Support
-Telegram threads (forum topics) and Matrix thread-replies each get their own isolated **context window** within the user's session. Everything else — memory, identity files, skills, workspace — stays shared.
-
-- The first message in a thread is seeded with the last 5 exchanges from the main conversation so the model has immediate context.
-- Thread history is logged separately (`memory/thread_<id>_<date>.md`) and does not pollute the main conversation log.
-- Model overrides (see below) can be set per-thread independently of the main context.
-
-### 🤖 Per-Context Model Switching
-Users can switch the active LLM at runtime without restarting the bot.
-
-**Telegram** — `/model` command:
-```
-/model                  # show the current model for this context
-/model qwen3:4b         # switch model (main chat or current thread)
-```
-
-**Matrix** — `!model` message prefix:
-```
-!model                  # show the current model for this context
-!model qwen3:4b         # switch model (room or current thread)
-```
-
-The switch is **context-local**: using `/model` inside a thread only affects that thread; the main chat (and other threads) keep their own model. Overrides are persisted to disk and survive restarts.
-
-### ⏰ Scheduler
-PawLia can act proactively — a background scheduler checks every 60 seconds for:
-- **Due reminders** from the built-in reminder tool (with daily/weekly/monthly recurrence)
-- **Upcoming calendar events** from the organizer skill (15 min before start)
-
-Notifications are delivered directly through the active interface (CLI, Telegram, Matrix) or buffered for polling (Webhook).
-
-### 🛠️ AgentSkills
-PawLia supports the [AgentSkills](https://agentskills.io) specification. Skills are self-contained directories with a `SKILL.md` and optional scripts.
-
-Each skill runs as a **sub-agent** with its own LLM session and access to tools (Bash, etc.). The dispatcher (ChatAgent) decides which skill to call based on the user's request.
-
-**User skills:** Place custom skills in `skills/user/`. They are loaded exactly like built-in skills — same format, same `SKILL.md` frontmatter. The `user/` directory is gitignored so personal skills don't pollute the repo.
-
-### ⚙️ Provider-Agnostic LLM
-Any OpenAI-compatible API works as a backend — Groq, OpenRouter, Ollama, vLLM, or any local server.
-
-Models are defined once by name and referenced from agent types and skills — no repetition of provider, temperature, or flags:
-
-```yaml
-providers:
-  ollama:
-    apiBase: http://localhost:11434/v1
-  groq:
-    apiBase: https://api.groq.com/openai/v1
-    apiKey: gsk_...
-
-models:
-  fast:
-    model: qwen3:4b
-    provider: ollama
-    temperature: 0.7
-  smart:
-    model: qwen3.5:latest
-    provider: ollama
-    temperature: 0.9
-    think: true
-  vision:
-    model: qwen2.5vl:latest
-    provider: ollama
-  groq-fast:
-    model: qwen3:4b
-    provider: groq
-    temperature: 0.3
-
-agents:
-  default: smart        # global fallback
-  skill_runner: fast
-  vision: vision
-  skills:
-    searxng: groq-fast
-```
-
-The lookup follows a fallback chain so you only configure what you want to override:
-
-| Agent type | Fallback chain |
-|------------|----------------|
-| `chat` | `agents.chat` → `agents.default` |
-| `skill_runner` | `agents.skill_runner` → `agents.default` |
-| `vision` | `agents.vision` → `agents.chat` → `agents.default` |
-| `skill.<name>` | `agents.skills.<name>` → `agents.skill_runner` → `agents.default` |
-
-LLMs with identical configuration are reused across agent types — no redundant connections.
-
-The `/model` and `!model` runtime commands accept both model keys (e.g. `fast`) and raw model names (e.g. `llama3.1:8b`).
+- **Runs locally** — any OpenAI-compatible backend: Ollama, vLLM, Groq, OpenRouter
+- **Meets you where you are** — Telegram, Matrix, CLI, or HTTP webhook, all at once
+- **Remembers** — per-user memory and conversation history persisted as Markdown
+- **Extensible** — drop a `SKILL.md` in `skills/user/` and the agent picks it up automatically
+- **Proactive** — built-in scheduler delivers reminders and calendar alerts through your active interface
 
 ## Quick Start
 
-1. Copy `config.sample.yaml` to `config.yaml` and fill in your provider credentials.
-2. Run in CLI mode:
-   ```bash
-   python -m pawlia
-   ```
-3. Run in server mode (Telegram, Matrix, Webhook):
-   ```bash
-   python -m pawlia --mode server
-   ```
-4. With Docker:
-   ```bash
-   docker compose up -d
-   ```
+```bash
+cp config.sample.yaml config.yaml
+# edit config.yaml — add your provider URL and bot tokens
+
+docker compose up -d
+```
+
+See [docs/installation.md](docs/installation.md) for full setup instructions, including manual installation for development.
+
+## Interfaces
+
+CLI · Telegram · Matrix · Webhook — all run simultaneously in server mode. Telegram and Matrix support voice messages, images, and threads. Matrix additionally supports VoIP calls.
+
+→ [docs/interfaces.md](docs/interfaces.md)
+
+## Skills
+
+Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and it loads automatically. Bundled: searxng · perplexica · browser · files · organizer.
+
+→ [docs/skills.md](docs/skills.md)
+
+## Documentation
+
+- [Installation](docs/installation.md) — Docker setup, first steps
+- [Interfaces](docs/interfaces.md) — CLI, Telegram, Matrix, Webhook, sessions, scheduler
+- [Configuration](docs/config.md) — providers, models, agents, fallback chain
+- [Skills](docs/skills.md) — bundled skills, custom skills, SKILL.md format
+- [Commands](docs/commands.md) — `/thread`, `/model`, `/private`
 
 ## Project Structure
 
 ```
 pawlia/
-├── pawlia/              # Python package
-│   ├── agents/          # ChatAgent (dispatcher), SkillRunnerAgent
-│   ├── interfaces/      # CLI, Telegram, Matrix, Webhook
-│   ├── tools/           # Built-in tools (bash, reminders)
-│   ├── skills/          # Skill loader
-│   ├── scheduler.py     # Proactive reminders & event notifications
-│   └── memory.py        # Session & memory management
-├── skills/              # Installed skill packages
-│   └── user/            # Custom user skills (gitignored)
-├── session/             # Per-user session data
-├── config.yaml          # Your configuration
-└── config.sample.yaml   # Configuration reference
+├── pawlia/          # Python package
+│   ├── agents/      # ChatAgent (dispatcher), SkillRunnerAgent
+│   ├── interfaces/  # CLI, Telegram, Matrix, Webhook
+│   ├── tools/       # Built-in tools (bash, reminders)
+│   └── memory.py    # Session & memory management
+├── skills/          # Skill packages (user/ is gitignored)
+├── session/         # Per-user session data
+└── config.yaml      # Your configuration
 ```
-
-## Configuration
-
-See `config.sample.yaml` for all available options. Both `.yaml` and `.json` are supported.
-
-| Key | Purpose |
-|-----|---------|
-| `providers` | LLM backend(s) with API keys and base URLs |
-| `models` | Named model definitions (model, provider, temperature, …) |
-| `agents.default` | Global fallback model key |
-| `agents.chat` | Model key for the chat agent |
-| `agents.skill_runner` | Default model key for all skill sub-agents |
-| `agents.vision` | Model key used when the user sends an image |
-| `agents.skills.<name>` | Per-skill model key override |
-| `interfaces` | Enable Telegram / Matrix / Webhook |
-| `skill-config` | Per-skill configuration (URLs, API keys, …) |
