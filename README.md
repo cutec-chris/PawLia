@@ -18,7 +18,7 @@ PawLia brings persistent memory, multi-user sessions, and extensible skills to (
 ## Why PawLia?
 
 - **Runs locally** — any OpenAI-compatible backend: Ollama, vLLM, Groq, OpenRouter
-- **Meets you where you are** — Telegram, Matrix, CLI, or HTTP webhook, all at once
+- **Meets you where you are** — Telegram, Matrix, Web UI, CLI, or HTTP webhook, all at once
 - **Talk to it** — voice messages are transcribed automatically; Matrix VoIP calls let you speak to PawLia directly
 - **Threads** — isolate side conversations in Telegram forum topics or Matrix threads, each with its own context and model
 - **Multi-user** — every user gets their own session with separate memory, history, and model settings
@@ -45,6 +45,7 @@ See [docs/installation.md](docs/installation.md) for full setup instructions, in
 |-----------|:-----:|:------:|:-------:|:----:|
 | **Telegram** | transcription | vision agent | forum topics | — |
 | **Matrix** | transcription | vision agent | thread replies | full duplex |
+| **Web** | — | — | `/thread` | — |
 | **CLI** | — | — | `/thread` | — |
 | **Webhook** | — | base64 | via `thread_id` | — |
 
@@ -72,7 +73,7 @@ Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and
 pawlia/
 ├── pawlia/          # Python package
 │   ├── agents/      # ChatAgent (dispatcher), SkillRunnerAgent
-│   ├── interfaces/  # CLI, Telegram, Matrix, Webhook
+│   ├── interfaces/  # CLI, Telegram, Matrix, Web, Webhook
 │   ├── tools/       # Built-in tools (bash, reminders)
 │   └── memory.py    # Session & memory management
 ├── skills/          # Skill packages (user/ is gitignored)
