@@ -99,6 +99,11 @@ async def _run(args) -> None:
             start_webhook(app, iface_cfg["webhook"])
         ))
 
+    from pawlia.interfaces.web import start_web
+    tasks.append(asyncio.create_task(
+        start_web(app, iface_cfg.get("web", {}))
+    ))
+
     if not tasks:
         logging.getLogger("pawlia").error(
             "Server mode: no interfaces configured in config.json under 'interfaces'."

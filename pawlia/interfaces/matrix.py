@@ -176,7 +176,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     async def _handle_model_cmd(
         room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
     ) -> None:
-        """Handle '!model [name]' — show or change the model for this context."""
+        """Handle '//model [name]' — show or change the model for this context."""
         ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
         result = handle_model_command(app, session_id, args, thread_id=thread_id, ctx_label=ctx_label)
 
@@ -209,7 +209,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         logger.info("Matrix: message in %s%s: %s (images=%d)", room.room_id, ctx, text[:80], len(images or []))
 
         # Commands
-        if text.strip() == "!status":
+        if text.strip() == "//status":
             agent = get_agent(room.room_id)
             status = build_status(app, session_id, agent, thread_id=thread_id)
             text_out = format_status(status)
@@ -219,9 +219,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 await _send_text(room.room_id, text_out)
             return
 
-        if text.startswith("!private"):
+        if text.startswith("//private"):
             if not thread_id:
-                await _send_text(room.room_id, "_!private funktioniert nur in Threads._")
+                await _send_text(room.room_id, "_//private funktioniert nur in Threads._")
                 return
             session = app.memory.load_session(session_id)
             active = app.memory.toggle_private_thread(session, thread_id)
@@ -230,8 +230,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             await _send_text(room.room_id, f"{icon} Private Mode {state} — Nachrichten werden {'**nicht** ' if active else ''}gespeichert.")
             return
 
-        if text.startswith("!model"):
-            await _handle_model_cmd(room, session_id, text[len("!model"):], thread_id)
+        if text.startswith("//model"):
+            await _handle_model_cmd(room, session_id, text[len("//model"):], thread_id)
             return
 
         async def _send(text: str) -> None:
@@ -335,14 +335,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         if not text:
             return
 
-        if text.startswith("!thread"):
-            message = text[len("!thread"):].strip()
+        if text.startswith("//thread"):
+            message = text[len("//thread"):].strip()
             if not message:
-                await _send_text(room.room_id, "_Verwendung: !thread <Nachricht>_")
+                await _send_text(room.room_id, "_Verwendung: //thread <Nachricht>_")
                 return
             thread_id = event.event_id
             session_id = f"mx_{room.room_id}"
-            logger.info("Matrix: !thread in %s: %s", room.room_id, message[:80])
+            logger.info("Matrix: //thread in %s: %s", room.room_id, message[:80])
             try:
                 await client.room_typing(room.room_id, typing_state=True)
                 agent = get_agent(room.room_id)
@@ -350,7 +350,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 await client.room_typing(room.room_id, typing_state=False)
                 await _send_thread_reply(room.room_id, thread_id, response)
             except Exception as e:
-                logger.error("Matrix: !thread error: %s", e)
+                logger.error("Matrix: //thread error: %s", e)
                 try:
                     await client.room_typing(room.room_id, typing_state=False)
                 except Exception:
