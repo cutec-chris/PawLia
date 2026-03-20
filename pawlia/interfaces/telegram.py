@@ -62,18 +62,11 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     """
     token: str = cfg["token"]
 
+    from pawlia.interfaces.common import AgentCache, handle_model_command
+
     # One agent per user; thread context is passed at run() time
-    agents: Dict[str, object] = {}
+    agent_cache = AgentCache(app)
     chat_ids: Dict[str, int] = {}
-
-    def get_agent(user_id: str):
-        if user_id not in agents:
-            agents[user_id] = app.make_agent(user_id)
-        return agents[user_id]
-
-    def invalidate_agent(user_id: str) -> None:
-        """Remove cached agent so it gets recreated (e.g. after /model change)."""
-        agents.pop(user_id, None)
 
     async def _handle(update: Update, user_id: str, text: str,
                       thread_id: Optional[int] = None,
@@ -83,7 +76,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             # Show typing indicator while processing
             await update.message.chat.send_action(ChatAction.TYPING)
 
-            agent = get_agent(user_id)
+            agent = agent_cache.get(user_id)
 
             async def _on_interim(interim_text: str) -> None:
                 await update.message.reply_text(
@@ -168,6 +161,28 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             parse_mode=ParseMode.HTML,
         )
 
+    async def on_thread_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/thread <message> — run a message in its own isolated thread context."""
+        if not update.message:
+            return
+        user = update.message.from_user
+        if user is None:
+            return
+
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "<i>Verwendung: /thread &lt;Nachricht&gt;</i>", parse_mode=ParseMode.HTML,
+            )
+            return
+
+        user_id = f"tg_{user.id}"
+        thread_id = str(update.message.message_id)
+        text = " ".join(args)
+
+        logger.info("Telegram: /thread from %s (%s): %s", user.first_name, user_id, text[:80])
+        await _handle(update, user_id, text, thread_id=thread_id)
+
     async def on_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/model [name] — show or change the active model for this session."""
         if not update.message:
@@ -178,37 +193,29 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
         user_id = f"tg_{user.id}"
         thread_id: Optional[int] = update.message.message_thread_id
-        args = (context.args or [])
+        args_str = " ".join(context.args) if context.args else ""
 
-        session = app.memory.load_session(user_id)
-        ctx_label = f"Thread {thread_id}" if thread_id else "Main"
+        result = handle_model_command(
+            app, user_id, args_str,
+            thread_id=str(thread_id) if thread_id else None,
+        )
 
-        if not args:
-            if thread_id:
-                current = app.memory.get_thread_model_override(session, str(thread_id)) or "(default)"
-            else:
-                current = session.model_override or "(default)"
+        if result.invalidate_agent:
+            agent_cache.invalidate(user_id)
+            logger.info("Telegram: model changed for %s -> %s", user_id, result.model)
+        elif result.action == "set":
+            logger.info("Telegram: model changed for %s thread %s -> %s", user_id, thread_id, result.model)
+
+        if result.action == "show":
             await update.message.reply_text(
-                f"<b>Aktives Modell</b> [{ctx_label}]: <code>{current}</code>",
+                f"<b>Aktives Modell</b> [{result.ctx_label}]: <code>{result.model}</code>",
                 parse_mode=ParseMode.HTML,
             )
-            return
-
-        new_model = args[0].strip()
-        if thread_id:
-            # Thread-specific override — does not affect the main context
-            app.memory.set_thread_model_override(session, str(thread_id), new_model)
-            logger.info("Telegram: model changed for %s thread %s -> %s", user_id, thread_id, new_model)
         else:
-            # Session-wide override — affects the main context and recreates agent
-            app.memory.set_model_override(session, new_model)
-            invalidate_agent(user_id)  # recreate with new LLM on next message
-            logger.info("Telegram: model changed for %s -> %s", user_id, new_model)
-
-        await update.message.reply_text(
-            f"✓ Modell für <b>{ctx_label}</b> auf <code>{new_model}</code> gesetzt.",
-            parse_mode=ParseMode.HTML,
-        )
+            await update.message.reply_text(
+                f"✓ Modell für <b>{result.ctx_label}</b> auf <code>{result.model}</code> gesetzt.",
+                parse_mode=ParseMode.HTML,
+            )
 
     async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
@@ -256,6 +263,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("private", on_private_command))
     application.add_handler(CommandHandler("model", on_model_command))
+    application.add_handler(CommandHandler("thread", on_thread_command))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, on_message),
     )

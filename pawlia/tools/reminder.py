@@ -1,6 +1,7 @@
 """ScheduleReminder tool - schedules proactive reminders."""
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -141,7 +142,8 @@ class ReminderTool(Tool):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            logging.getLogger("pawlia.tools.reminder").error("Failed to load %s: %s", path, e)
             return []
 
     @staticmethod

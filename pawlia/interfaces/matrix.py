@@ -13,7 +13,9 @@ Config (in config.yaml under "interfaces.matrix"):
 
 import asyncio
 import base64
+import json
 import logging
+import os
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import markdown
@@ -114,13 +116,13 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         await client.close()
         return
 
+    from pawlia.interfaces.common import AgentCache, handle_model_command
+
     # One agent per Matrix room (shared context for everyone in the room)
-    agents: Dict[str, object] = {}  # room_id -> agent
+    agent_cache = AgentCache(app)
 
     def get_agent(room_id: str):
-        if room_id not in agents:
-            agents[room_id] = app.make_agent(f"mx_{room_id}")
-        return agents[room_id]
+        return agent_cache.get(f"mx_{room_id}")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -146,6 +148,24 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         except Exception as e:
             logger.error("Matrix: send_text failed for %s: %s", room_id, e)
 
+    async def _send_thread_reply(room_id: str, root_event_id: str, text: str) -> None:
+        """Send a message as a Matrix thread reply rooted at root_event_id."""
+        content = _make_content(text)
+        content["m.relates_to"] = {
+            "rel_type": "m.thread",
+            "event_id": root_event_id,
+            "is_falling_back": False,
+            "m.in_reply_to": {"event_id": root_event_id},
+        }
+        try:
+            await client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content=content,
+            )
+        except Exception as e:
+            logger.error("Matrix: send_thread_reply failed for %s: %s", room_id, e)
+
     def _get_thread_id(event: RoomMessageText) -> Optional[str]:
         """Return the thread root event_id if this message is a Matrix thread reply."""
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
@@ -153,31 +173,29 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return relates_to.get("event_id")
         return None
 
-    async def _handle_model_command(
+    async def _handle_model_cmd(
         room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
     ) -> None:
         """Handle '!model [name]' — show or change the model for this context."""
-        session = app.memory.load_session(session_id)
         ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
+        result = handle_model_command(app, session_id, args, thread_id=thread_id, ctx_label=ctx_label)
 
-        if not args.strip():
+        if result.invalidate_agent:
+            agent_cache.invalidate(session_id)
+            logger.info("Matrix: model changed for %s -> %s", session_id, result.model)
+        elif result.action == "set":
+            logger.info("Matrix: model changed for %s thread %s -> %s", session_id, thread_id and thread_id[:8], result.model)
+
+        async def _reply(text: str) -> None:
             if thread_id:
-                current = app.memory.get_thread_model_override(session, thread_id) or "(default)"
+                await _send_thread_reply(room.room_id, thread_id, text)
             else:
-                current = session.model_override or "(default)"
-            await _send_text(room.room_id, f"**Aktives Modell** [{ctx_label}]: `{current}`")
-            return
+                await _send_text(room.room_id, text)
 
-        new_model = args.strip()
-        if thread_id:
-            app.memory.set_thread_model_override(session, thread_id, new_model)
-            logger.info("Matrix: model changed for %s thread %s -> %s", session_id, thread_id[:8], new_model)
+        if result.action == "show":
+            await _reply(f"**Aktives Modell** [{result.ctx_label}]: `{result.model}`")
         else:
-            app.memory.set_model_override(session, new_model)
-            agents.pop(session_id, None)  # recreate with new LLM on next message
-            logger.info("Matrix: model changed for %s -> %s", session_id, new_model)
-
-        await _send_text(room.room_id, f"✓ Modell für **{ctx_label}** auf `{new_model}` gesetzt.")
+            await _reply(f"✓ Modell für **{result.ctx_label}** auf `{result.model}` gesetzt.")
 
     async def _handle(
         room: MatrixRoom,
@@ -203,8 +221,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
 
         if text.startswith("!model"):
-            await _handle_model_command(room, session_id, text[len("!model"):], thread_id)
+            await _handle_model_cmd(room, session_id, text[len("!model"):], thread_id)
             return
+
+        async def _send(text: str) -> None:
+            if thread_id:
+                await _send_thread_reply(room.room_id, thread_id, text)
+            else:
+                await _send_text(room.room_id, text)
 
         try:
             await client.room_typing(room.room_id, typing_state=True)
@@ -216,16 +240,24 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             current_skill: Optional[str] = None
 
             async def _on_interim(interim_text: str) -> None:
-                await _send_text(room.room_id, interim_text)
+                await _send(interim_text)
 
             async def _on_skill_start(skill_name: str, query: str) -> None:
                 nonlocal status_event_id, step_count, current_skill
                 current_skill = skill_name
                 step_count = 0
+                content = _make_status(skill_name, query)
+                if thread_id:
+                    content["m.relates_to"] = {
+                        "rel_type": "m.thread",
+                        "event_id": thread_id,
+                        "is_falling_back": False,
+                        "m.in_reply_to": {"event_id": thread_id},
+                    }
                 resp = await client.room_send(
                     room_id=room.room_id,
                     message_type="m.room.message",
-                    content=_make_status(skill_name, query),
+                    content=content,
                 )
                 status_event_id = getattr(resp, "event_id", None)
 
@@ -254,7 +286,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             response = await agent.run(text, images=images or None, thread_id=thread_id)
 
             await client.room_typing(room.room_id, typing_state=False)
-            await _send_text(room.room_id, response)
+            await _send(response)
         except Exception as e:
             logger.error("Matrix: error processing message: %s", e)
             try:
@@ -291,6 +323,29 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         text = event.body.strip()
         if not text:
             return
+
+        if text.startswith("!thread"):
+            message = text[len("!thread"):].strip()
+            if not message:
+                await _send_text(room.room_id, "_Verwendung: !thread <Nachricht>_")
+                return
+            thread_id = event.event_id
+            session_id = f"mx_{room.room_id}"
+            logger.info("Matrix: !thread in %s: %s", room.room_id, message[:80])
+            try:
+                await client.room_typing(room.room_id, typing_state=True)
+                agent = get_agent(room.room_id)
+                response = await agent.run(message, thread_id=thread_id)
+                await client.room_typing(room.room_id, typing_state=False)
+                await _send_thread_reply(room.room_id, thread_id, response)
+            except Exception as e:
+                logger.error("Matrix: !thread error: %s", e)
+                try:
+                    await client.room_typing(room.room_id, typing_state=False)
+                except Exception:
+                    pass
+            return
+
         await _handle(room, text, thread_id=_get_thread_id(event))
 
     async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
@@ -374,8 +429,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     logger.info("Matrix: starting sync loop...")
     try:
-        # Initial sync to skip old messages (no callbacks yet)
-        await client.sync(timeout=0, full_state=True)
+        # Initial sync to get a since-token and skip old messages (no callbacks yet)
+        await client.sync(timeout=0)
 
         client.add_event_callback(on_message, RoomMessageText)
         client.add_event_callback(on_image, RoomMessageImage)
