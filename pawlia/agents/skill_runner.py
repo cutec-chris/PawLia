@@ -155,13 +155,13 @@ class SkillRunnerAgent(BaseAgent):
                 text = self.extract_text(response)
                 # Nudge the model to keep using tools when it stops too
                 # early: no output, after an error, hallucinated code,
-                # or suspiciously early (only 1 tool call for a multi-step
-                # task).  Allow up to 2 nudges before accepting the answer.
+                # or if it never called a tool at all.
+                # Allow up to 2 nudges before accepting the answer.
                 should_nudge = (
                     not text.strip()
                     or has_error
                     or text.lstrip().startswith(("```", "<!"))
-                    or (total_tool_calls <= 1 and _turn <= 2)
+                    or total_tool_calls == 0
                 )
                 if should_nudge and nudge_count < 2:
                     nudge_count += 1
