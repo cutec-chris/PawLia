@@ -15,6 +15,7 @@ from pawlia.tools.base import ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.tools.reminder import ReminderTool
 from pawlia.skills.loader import AgentSkill, SkillLoader
+from pawlia.install_skill_deps import install_all_skill_deps
 from pawlia.agents.chat import ChatAgent
 from pawlia.agents.skill_runner import SkillRunnerAgent
 from pawlia.scheduler import Scheduler
@@ -56,8 +57,9 @@ class App:
                 workspace_dir = os.path.join(self.session_dir, user_entry, "workspace")
                 workspace_skills_dir = os.path.join(workspace_dir, "skills")
                 if os.path.isdir(workspace_skills_dir):
+                    install_all_skill_deps(workspace_skills_dir)
                     workspace_skills = SkillLoader.discover(
-                        workspace_skills_dir, config, base_dir=workspace_dir
+                        workspace_skills_dir, config, workspace_dir=workspace_dir
                     )
                     self.skills.update(workspace_skills)
 

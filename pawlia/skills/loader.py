@@ -13,10 +13,14 @@ logger = logging.getLogger(__name__)
 class AgentSkill:
     """A single agent skill loaded from a SKILL.md file."""
 
-    def __init__(self, skill_path: str, metadata: Dict[str, Any], base_dir: Optional[str] = None):
+    def __init__(self, skill_path: str, metadata: Dict[str, Any], workspace_dir: Optional[str] = None):
         self.skill_path = skill_path
-        self.base_dir = base_dir or skill_path
         self.metadata = metadata
+        cwd_mode = metadata.get("metadata", {}).get("openclaw", {}).get("cwd", "skill")
+        if cwd_mode == "workspace" and workspace_dir:
+            self.base_dir = workspace_dir
+        else:
+            self.base_dir = skill_path
         self.name: str = metadata.get("name", "")
         self.description: str = metadata.get("description", "")
         self.scripts_dir = os.path.join(skill_path, "scripts")
@@ -58,7 +62,7 @@ class SkillLoader:
     def discover(
         skills_dir: str,
         config: Optional[Dict[str, Any]] = None,
-        base_dir: Optional[str] = None,
+        workspace_dir: Optional[str] = None,
     ) -> Dict[str, AgentSkill]:
         """Discover all valid skills in the given directory.
 
@@ -115,7 +119,7 @@ class SkillLoader:
                         )
                         continue
 
-                skill = AgentSkill(skill_path, metadata, base_dir=base_dir)
+                skill = AgentSkill(skill_path, metadata, workspace_dir=workspace_dir)
                 skills[skill.name] = skill
                 logger.debug("Loaded skill: %s", skill.name)
 
