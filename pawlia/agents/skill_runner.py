@@ -52,7 +52,7 @@ class SkillRunnerAgent(BaseAgent):
         self.skill = skill
         self.tool_registry = tool_registry
         self.context = context or {}
-        self.context["cwd"] = skill.skill_path
+        self.context["cwd"] = skill.base_dir
         self.command_fallback = command_fallback
         self.on_step = None  # Optional[Callable[[str], Awaitable[None]]]
 

@@ -13,8 +13,9 @@ logger = logging.getLogger(__name__)
 class AgentSkill:
     """A single agent skill loaded from a SKILL.md file."""
 
-    def __init__(self, skill_path: str, metadata: Dict[str, Any]):
+    def __init__(self, skill_path: str, metadata: Dict[str, Any], base_dir: Optional[str] = None):
         self.skill_path = skill_path
+        self.base_dir = base_dir or skill_path
         self.metadata = metadata
         self.name: str = metadata.get("name", "")
         self.description: str = metadata.get("description", "")
@@ -57,6 +58,7 @@ class SkillLoader:
     def discover(
         skills_dir: str,
         config: Optional[Dict[str, Any]] = None,
+        base_dir: Optional[str] = None,
     ) -> Dict[str, AgentSkill]:
         """Discover all valid skills in the given directory.
 
@@ -113,7 +115,7 @@ class SkillLoader:
                         )
                         continue
 
-                skill = AgentSkill(skill_path, metadata)
+                skill = AgentSkill(skill_path, metadata, base_dir=base_dir)
                 skills[skill.name] = skill
                 logger.debug("Loaded skill: %s", skill.name)
 
