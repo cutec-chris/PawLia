@@ -65,24 +65,24 @@ interfaces:
 
 | Type | Notes |
 |------|-------|
-| Text | Plain messages and `!`-prefixed commands |
+| Text | Plain messages and `//`-prefixed commands |
 | Images | Sent to the vision agent; message body is used as caption |
 | Voice messages | Transcribed and forwarded to the agent |
 | VoIP calls | Full duplex voice calls (requires `aiortc`; see VoIP section) |
 
 ### Threads
 
-Matrix thread replies (messages with `m.thread` relation) get their own isolated context window — same behaviour as Telegram forum topics. Use `!thread <msg>` to start a new thread from the main room.
+Matrix thread replies (messages with `m.thread` relation) get their own isolated context window — same behaviour as Telegram forum topics. Use `//thread <msg>` to start a new thread from the main room.
 
 ### Commands
 
-Commands use `!` as prefix instead of `/`:
+Commands use `//` as prefix instead of `/`:
 
 | Command | Effect |
 |---------|--------|
-| `!thread <msg>` | Respond as a Matrix thread reply (proper `m.thread` relation) |
-| `!model [name]` | Show or switch the active model |
-| `!private` | Toggle private mode (thread replies only) |
+| `//thread <msg>` | Respond as a Matrix thread reply (proper `m.thread` relation) |
+| `//model [name]` | Show or switch the active model |
+| `//private` | Toggle private mode (thread replies only) |
 
 ### VoIP (optional)
 
@@ -102,6 +102,59 @@ tts:
     config: /app/piper/de_DE-kerstin-low.onnx.json
     sample_rate: 16000
 ```
+
+## Web Interface
+
+A browser-based UI with chat, provider/model management, and skill administration. Always active in server mode.
+
+```yaml
+interfaces:
+  web:                    # optional — works without config
+    host: 0.0.0.0
+    port: 8888
+    # token: OPTIONAL_FIXED_TOKEN
+```
+
+On startup a random access token is printed to the console. Enter it in the browser to authenticate. Sessions are cookie-based (7 days).
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| Chat | Full chat with the agent, supports `/` commands |
+| Providers | View and edit provider config (API base, key, timeout) |
+| Models | View and edit model definitions |
+| Skills | List all skills, upload new ones (ZIP from ClawHub), configure skill settings, delete user skills |
+
+### Commands
+
+Commands use `/` as prefix (same as CLI/Telegram):
+
+| Command | Effect |
+|---------|--------|
+| `/status` | Show session status |
+| `/model [name]` | Show or switch the active model |
+| `/private` | Toggle private mode |
+| `/thread <msg>` | Start a new isolated thread context |
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | Web UI (single-page app) |
+| `POST` | `/api/auth` | Authenticate with token |
+| `POST` | `/api/chat` | Send a message |
+| `GET` | `/api/notifications` | Poll for scheduler notifications |
+| `GET/POST` | `/api/providers` | Read/write provider config |
+| `GET/POST` | `/api/models` | Read/write model config |
+| `GET` | `/api/skills` | List all skills |
+| `POST` | `/api/skills/upload` | Upload a skill ZIP |
+| `DELETE` | `/api/skills/{name}` | Delete a user skill |
+| `GET/POST` | `/api/skill-config` | Read/write skill configuration |
+
+### Skill Upload
+
+Upload a ZIP file containing a skill directory with a `SKILL.md`. The ZIP can have the skill files at the root or nested one level deep. After upload, dependencies declared in `requirements.txt` inside the skill are installed automatically. A restart is required for the skill to become active.
 
 ## Webhook
 
