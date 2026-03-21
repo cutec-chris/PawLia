@@ -1,4 +1,25 @@
 services:
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ./ollama:/root/.ollama
+    # --- GPU support (uncomment ONE section) ---
+    # NVIDIA (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # AMD ROCm:
+    # devices:
+    #   - /dev/kfd
+    #   - /dev/dri
+
   pawlia:
     build:
       context: .
