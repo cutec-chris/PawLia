@@ -194,7 +194,7 @@ class MemoryManager:
                 session.user_id, thread_id, session.current_date_str
             )
             exchanges = self._parse_exchanges(self._read(path))
-            if not exchanges and session.exchanges:
+            if not exchanges and session.exchanges and seed_n > 0:
                 exchanges = list(session.exchanges[-seed_n:])
             session.thread_contexts[thread_id] = exchanges
         return session.thread_contexts[thread_id]
