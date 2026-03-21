@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: docker
+    container: node:20-alpine
+
+    steps:
+    - name: Install Python and Git
+      run: apk add --no-cache python3 py3-pip git
+
+    - name: Checkout code
+      uses: https://code.forgejo.org/actions/checkout@v4
+
+    - name: Get Python site-packages path
+      id: python-path
+      run: echo "site=$(python3 -c 'import site; print(site.getsitepackages()[0])')" >> "$GITHUB_OUTPUT"
+
+    - name: Cache installed packages
+      uses: https://code.forgejo.org/actions/cache@v3
+      id: pip-cache
+      with:
+        path: ${{ steps.python-path.outputs.site }}
+        key: site-packages-${{ hashFiles('requirements.txt') }}
+
+    - name: Create minimal config for CI
+      run: |
+        cat > config.json << 'EOF'
+        {
+          "providers": {
+            "default": {
+              "apiKey": "test-key",
+              "apiBase": "http://localhost:11434/v1",
+              "timeout": 30
+            }
+          },
+          "agents": {
+            "defaults": {
+              "model": "test-model"
+            }
+          }
+        }
+        EOF
+
+    - name: Install dependencies
+      if: steps.pip-cache.outputs.cache-hit != 'true'
+      run: |
+        python3 -m pip install --upgrade pip --break-system-packages
+        python3 -m pip install -r requirements.txt --break-system-packages
+        python3 -m pip install pytest pytest-asyncio --break-system-packages
+
+    - name: Run tests
+      run: |
+        cd $GITHUB_WORKSPACE
+        python -m pytest tests/ -v
+
+    - name: Upload test results
+      if: always()
+      uses: https://code.forgejo.org/actions/upload-artifact@v3
+      with:
+        name: test-results
+        path: |
+          .pytest_cache
+          **/test-*.xml
+          **/pytest-*.txt
