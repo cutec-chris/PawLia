@@ -111,6 +111,10 @@ main { flex:1; overflow:hidden; }
 .msg-body p { margin-bottom:6px; }
 .msg-body p:last-child { margin-bottom:0; }
 .typing { color:var(--muted); font-style:italic; }
+.skill-status {
+  font-size:13px; color:var(--accent2); padding:4px 0;
+  border-bottom:1px solid var(--border); margin-bottom:6px;
+}
 #chat-input-row {
   display:flex; gap:10px; padding:14px 20px;
   border-top:1px solid var(--border); background:var(--bg2); flex-shrink:0;
@@ -221,6 +225,38 @@ tr:hover td { background:var(--bg2); }
 .status-dot.err { background: var(--err); }
 .status-dot.off { background: var(--muted); }
 
+/* ── Knowledge Graph ── */
+#graph-container { flex:1; position:relative; overflow:hidden; background:var(--bg); }
+#graph-container svg { width:100%; height:100%; }
+#graph-toolbar {
+  display:flex; align-items:center; gap:10px; padding:10px 20px;
+  border-bottom:1px solid var(--border); background:var(--bg2); flex-shrink:0;
+}
+#graph-toolbar label { font-size:12px; color:var(--muted); }
+#graph-uid {
+  background:var(--bg3); border:1px solid var(--border); color:var(--text);
+  padding:5px 10px; border-radius:6px; width:160px; outline:none;
+}
+#graph-uid:focus { border-color:var(--accent); }
+#graph-refresh {
+  background:var(--accent2); color:#1a1b26; border:none; padding:5px 14px;
+  border-radius:6px; cursor:pointer; font-weight:600; font-size:13px; transition:.15s;
+}
+#graph-refresh:hover { opacity:.85; }
+#graph-stats { font-size:12px; color:var(--muted); margin-left:auto; }
+#graph-tooltip {
+  position:absolute; display:none; background:var(--bg2); border:1px solid var(--border);
+  border-radius:6px; padding:10px 14px; font-size:13px; max-width:320px;
+  box-shadow:var(--shadow); pointer-events:none; z-index:10;
+}
+#graph-tooltip .tt-label { font-weight:600; color:var(--accent); margin-bottom:4px; }
+#graph-tooltip .tt-type  { font-size:11px; color:var(--muted); margin-bottom:6px; }
+#graph-tooltip .tt-desc  { color:var(--text); line-height:1.4; }
+#graph-empty {
+  position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+  color:var(--muted); font-size:15px;
+}
+
 /* scrollbar */
 ::-webkit-scrollbar { width:6px; }
 ::-webkit-scrollbar-track { background:transparent; }
@@ -249,6 +285,7 @@ tr:hover td { background:var(--bg2); }
       <button class="tab-btn active" data-tab="chat">💬 Chat</button>
       <button class="tab-btn" data-tab="config">⚙️ Konfiguration</button>
       <button class="tab-btn" data-tab="skills">🧩 Skills</button>
+      <button class="tab-btn" data-tab="graph">🕸 Memory</button>
     </nav>
     <button id="logout-btn">Abmelden</button>
   </header>
@@ -324,6 +361,23 @@ tr:hover td { background:var(--bg2); }
           <thead><tr><th>Skill</th><th>Version</th><th>Status</th><th>Konfiguration</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
+      </div>
+    </section>
+    <!-- Knowledge Graph -->
+    <section class="tab" id="tab-graph">
+      <div id="graph-toolbar">
+        <label>User-ID:</label>
+        <input type="text" id="graph-uid" value="web_user" spellcheck="false">
+        <button id="graph-refresh">Laden</button>
+        <span id="graph-stats"></span>
+      </div>
+      <div id="graph-container">
+        <div id="graph-empty">Klicke "Laden" um den Knowledge-Graph anzuzeigen.</div>
+        <div id="graph-tooltip">
+          <div class="tt-label"></div>
+          <div class="tt-type"></div>
+          <div class="tt-desc"></div>
+        </div>
       </div>
     </section>
   </main>
@@ -467,6 +521,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     $('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'config') { loadProviders(); loadModels(); }
     if (btn.dataset.tab === 'skills') loadSkills();
+    if (btn.dataset.tab === 'graph') loadGraph();
   });
 });
 
@@ -509,14 +564,74 @@ async function sendMessage() {
   sendBtn.disabled = true;
 
   const typing = appendMsg('bot', '<span class="typing">…</span>');
+  const body = typing.querySelector('.msg-body');
 
   try {
-    const r = await api.post('/api/chat', {message: msg, user_id: uid});
+    const r = await fetch('/api/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg, user_id: uid}),
+      credentials: 'include',
+    });
     if (r.status === 401) { location.reload(); return; }
-    const data = await r.json();
-    typing.querySelector('.msg-body').innerHTML = renderMd(data.response || data.error || '(leer)');
+
+    // Non-SSE response (commands return JSON directly)
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      const data = await r.json();
+      body.innerHTML = renderMd(data.response || data.error || '(leer)');
+      sendBtn.disabled = false;
+      messages.scrollTop = messages.scrollHeight;
+      return;
+    }
+
+    // SSE stream
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let skillStatus = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, {stream: true});
+
+      // Parse SSE events from buffer
+      const parts = buf.split('\n\n');
+      buf = parts.pop(); // keep incomplete chunk
+
+      for (const part of parts) {
+        let event = '', data = '';
+        for (const line of part.split('\n')) {
+          if (line.startsWith('event: ')) event = line.slice(7);
+          if (line.startsWith('data: '))  data = line.slice(6);
+        }
+        if (!event || !data) continue;
+
+        try {
+          const d = JSON.parse(data);
+          if (event === 'skill_start') {
+            skillStatus = `<div class="skill-status"><span class="typing">⚙ ${esc(d.skill)}</span> <span style="color:var(--muted);font-size:12px">${esc(d.query?.slice(0, 60) || '')}</span></div>`;
+            body.innerHTML = skillStatus;
+          } else if (event === 'skill_step') {
+            skillStatus = skillStatus.replace(/<\/div>$/, ` · ${esc(d.text)}</div>`);
+            body.innerHTML = skillStatus;
+          } else if (event === 'skill_done') {
+            body.innerHTML = skillStatus.replace('typing', 'typing') +
+              `<div style="color:var(--ok);font-size:12px;margin-top:4px">✓ ${esc(d.skill)}</div>` +
+              '<span class="typing">…</span>';
+          } else if (event === 'done') {
+            body.innerHTML = (skillStatus ? skillStatus.replace(/<span class="typing">⚙/g, '<span style="color:var(--ok)">✓') : '') +
+              renderMd(d.response || '(leer)');
+          } else if (event === 'error') {
+            body.innerHTML = `<span style="color:var(--err)">${esc(d.error)}</span>`;
+          }
+        } catch (e) { /* ignore parse error */ }
+        messages.scrollTop = messages.scrollHeight;
+      }
+    }
   } catch (e) {
-    typing.querySelector('.msg-body').innerHTML = '<span style="color:var(--err)">Verbindungsfehler.</span>';
+    body.innerHTML = '<span style="color:var(--err)">Verbindungsfehler.</span>';
   } finally {
     sendBtn.disabled = false;
     messages.scrollTop = messages.scrollHeight;
@@ -909,6 +1024,152 @@ $('modal').addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') $('modal-save').click();
   if (e.key === 'Escape') closeModal();
 });
+
+// ── Knowledge Graph (D3.js force layout) ─────────────────────────────────
+
+let _graphLoaded = false;
+let _d3Script = null;
+
+function ensureD3() {
+  if (_d3Script) return _d3Script;
+  _d3Script = new Promise((resolve, reject) => {
+    if (window.d3) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js';
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+  return _d3Script;
+}
+
+$('graph-refresh').addEventListener('click', () => loadGraph());
+
+async function loadGraph() {
+  await ensureD3();
+  const uid = $('graph-uid').value.trim() || 'web_user';
+  const r = await api.get(`/api/memory/graph?user_id=${encodeURIComponent(uid)}`);
+  if (!r.ok) { toast('Graph konnte nicht geladen werden', 'err'); return; }
+  const data = await r.json();
+  renderGraph(data);
+}
+
+function renderGraph(data) {
+  const container = $('graph-container');
+  const empty = $('graph-empty');
+  const stats = $('graph-stats');
+
+  // Clean up previous
+  const oldSvg = container.querySelector('svg');
+  if (oldSvg) oldSvg.remove();
+
+  if (!data.nodes.length) {
+    empty.style.display = 'flex';
+    empty.textContent = 'Kein Knowledge-Graph vorhanden. Chatlogs werden automatisch im Hintergrund indiziert.';
+    stats.textContent = '';
+    return;
+  }
+  empty.style.display = 'none';
+  stats.textContent = `${data.nodes.length} Knoten · ${data.edges.length} Kanten`;
+
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+
+  // Color by entity type
+  const types = [...new Set(data.nodes.map(n => n.type).filter(Boolean))];
+  const palette = ['#7aa2f7','#73daca','#e0af68','#f7768e','#9ece6a','#bb9af7','#ff9e64','#2ac3de'];
+  const colorMap = {};
+  types.forEach((t, i) => colorMap[t] = palette[i % palette.length]);
+  const getColor = n => colorMap[n.type] || '#565f89';
+
+  const svg = d3.select(container).append('svg')
+    .attr('width', width).attr('height', height);
+
+  // Zoom
+  const g = svg.append('g');
+  svg.call(d3.zoom()
+    .scaleExtent([0.1, 6])
+    .on('zoom', e => g.attr('transform', e.transform)));
+
+  const simulation = d3.forceSimulation(data.nodes)
+    .force('link', d3.forceLink(data.edges).id(d => d.id).distance(80))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(width / 2, height / 2))
+    .force('collision', d3.forceCollide(20));
+
+  // Edges
+  const link = g.append('g')
+    .selectAll('line')
+    .data(data.edges)
+    .join('line')
+    .attr('stroke', '#3b3c5e')
+    .attr('stroke-width', d => Math.max(1, Math.min(3, d.weight)))
+    .attr('stroke-opacity', 0.6);
+
+  // Edge labels
+  const linkLabel = g.append('g')
+    .selectAll('text')
+    .data(data.edges.filter(e => e.label))
+    .join('text')
+    .text(d => d.label.length > 30 ? d.label.slice(0, 28) + '…' : d.label)
+    .attr('font-size', 9)
+    .attr('fill', '#565f89')
+    .attr('text-anchor', 'middle')
+    .attr('dy', -4);
+
+  // Nodes
+  const node = g.append('g')
+    .selectAll('circle')
+    .data(data.nodes)
+    .join('circle')
+    .attr('r', 7)
+    .attr('fill', getColor)
+    .attr('stroke', '#1a1b26')
+    .attr('stroke-width', 1.5)
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    );
+
+  // Node labels
+  const nodeLabel = g.append('g')
+    .selectAll('text')
+    .data(data.nodes)
+    .join('text')
+    .text(d => (d.label || d.id).length > 24 ? (d.label || d.id).slice(0, 22) + '…' : (d.label || d.id))
+    .attr('font-size', 11)
+    .attr('fill', '#c0caf5')
+    .attr('dx', 12)
+    .attr('dy', 4);
+
+  // Tooltip
+  const tooltip = $('graph-tooltip');
+  node
+    .on('mouseover', (e, d) => {
+      tooltip.style.display = 'block';
+      tooltip.querySelector('.tt-label').textContent = d.label || d.id;
+      tooltip.querySelector('.tt-type').textContent = d.type || '';
+      tooltip.querySelector('.tt-desc').textContent = d.description || '';
+    })
+    .on('mousemove', e => {
+      const rect = container.getBoundingClientRect();
+      tooltip.style.left = (e.clientX - rect.left + 14) + 'px';
+      tooltip.style.top = (e.clientY - rect.top + 14) + 'px';
+    })
+    .on('mouseout', () => { tooltip.style.display = 'none'; });
+
+  simulation.on('tick', () => {
+    link
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    linkLabel
+      .attr('x', d => (d.source.x + d.target.x) / 2)
+      .attr('y', d => (d.source.y + d.target.y) / 2);
+    node.attr('cx', d => d.x).attr('cy', d => d.y);
+    nodeLabel.attr('x', d => d.x).attr('y', d => d.y);
+  });
+}
 </script>
 </body>
 </html>

@@ -10,3 +10,4 @@ config.groq.json
 config.*.json
 .claude/*
 skills/user/*
+tmp/*

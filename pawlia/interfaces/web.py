@@ -237,6 +237,15 @@ async def start_web(app: "App", cfg: Dict) -> None:
             state = "aktiviert" if active else "deaktiviert"
             return web.json_response({"response": f"{icon} Private Mode {state}"})
 
+        if lower.startswith("/background"):
+            bg_message = message.strip()[len("/background"):].strip()
+            if not bg_message:
+                return web.json_response({"response": "_Verwendung: /background <Nachricht>_"})
+            task = app.scheduler.bg_tasks.enqueue(user_id, bg_message)
+            return web.json_response({
+                "response": f"⏳ Aufgabe in Warteschlange: **{bg_message[:60]}**\nWird im Hintergrund verarbeitet wenn das System idle ist.",
+            })
+
         if lower.startswith("/thread"):
             thread_msg = message.strip()[len("/thread"):].strip()
             if not thread_msg:
@@ -244,18 +253,67 @@ async def start_web(app: "App", cfg: Dict) -> None:
             import time as _time
             new_thread = f"web_{int(_time.time())}"
             agent = agent_cache.get(user_id)
-            resp = await agent.run(thread_msg, thread_id=new_thread)
+            app.scheduler.acquire_llm()
+            try:
+                resp = await agent.run(thread_msg, thread_id=new_thread)
+            finally:
+                app.scheduler.release_llm()
             return web.json_response({"response": resp, "thread_id": new_thread})
 
-        # ── Normal message ──
+        # ── Normal message (SSE stream) ──
+        app.scheduler.touch_activity(user_id)
         logger.info("Web chat: %s: %s", user_id, message[:80])
+
+        resp = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await resp.prepare(request)
+
+        async def _sse(event: str, data: dict) -> None:
+            try:
+                payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                await resp.write(payload.encode("utf-8"))
+            except (ConnectionResetError, ConnectionError):
+                pass
+
         try:
             agent = agent_cache.get(user_id)
-            response = await agent.run(message, images=images, thread_id=thread_id)
-            return web.json_response({"response": response})
+
+            async def _on_skill_start(skill_name: str, query: str) -> None:
+                await _sse("skill_start", {"skill": skill_name, "query": query})
+
+            async def _on_skill_step(step_text: str) -> None:
+                await _sse("skill_step", {"text": step_text})
+
+            async def _on_skill_done(skill_name: str) -> None:
+                await _sse("skill_done", {"skill": skill_name})
+
+            agent.on_skill_start = _on_skill_start
+            agent.on_skill_step = _on_skill_step
+            agent.on_skill_done = _on_skill_done
+
+            app.scheduler.acquire_llm()
+            try:
+                response = await agent.run(message, images=images, thread_id=thread_id)
+            finally:
+                app.scheduler.release_llm()
+            await _sse("done", {"response": response})
         except Exception as e:
             logger.error("Web chat error: %s", e, exc_info=True)
-            return web.json_response({"error": "internal error"}, status=500)
+            await _sse("error", {"error": "internal error"})
+        finally:
+            agent.on_skill_start = None
+            agent.on_skill_step = None
+            agent.on_skill_done = None
+            await resp.write_eof()
+
+        return resp
 
     async def handle_notifications(request: web.Request) -> web.Response:
         if not _authed(request):
@@ -432,6 +490,49 @@ async def start_web(app: "App", cfg: Dict) -> None:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    # ── Memory graph ─────────────────────────────────────────────────────────
+
+    async def handle_memory_graph(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+
+        user_id = request.query.get("user_id", "web_user")
+        graphml_path = os.path.join(
+            _PKG_ROOT, "session", user_id, "memory_index",
+            "graph_chunk_entity_relation.graphml",
+        )
+        if not os.path.isfile(graphml_path):
+            return web.json_response({"nodes": [], "edges": []})
+
+        try:
+            import networkx as nx
+
+            def _read_graph():
+                g = nx.read_graphml(graphml_path)
+                nodes = []
+                for nid, data in g.nodes(data=True):
+                    nodes.append({
+                        "id": nid,
+                        "label": data.get("entity_name", data.get("label", nid)),
+                        "type": data.get("entity_type", data.get("type", "")),
+                        "description": data.get("description", ""),
+                    })
+                edges = []
+                for src, tgt, data in g.edges(data=True):
+                    edges.append({
+                        "source": src,
+                        "target": tgt,
+                        "label": data.get("description", data.get("label", "")),
+                        "weight": float(data.get("weight", 1.0)),
+                    })
+                return nodes, edges
+
+            nodes, edges = await asyncio.to_thread(_read_graph)
+            return web.json_response({"nodes": nodes, "edges": edges})
+        except Exception as e:
+            logger.error("Memory graph error: %s", e)
+            return web.json_response({"error": str(e)}, status=500)
+
     # ── Scheduler callback ───────────────────────────────────────────────────
 
     async def _notify(user_id: str, message: str) -> None:
@@ -543,6 +644,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
     webapp.router.add_post("/api/skill-config",   handle_save_skill_config)
     webapp.router.add_get("/api/setup-status",    handle_setup_status)
     webapp.router.add_post("/api/setup/auto",     handle_setup_auto)
+    webapp.router.add_get("/api/memory/graph",    handle_memory_graph)
 
     runner = web.AppRunner(webapp)
     await runner.setup()
