@@ -205,6 +205,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     ) -> None:
         """Shared handler for text and image messages."""
         session_id = f"mx_{room.room_id}"
+        app.scheduler.touch_activity(session_id)
         ctx = f" [thread {thread_id[:8]}…]" if thread_id else ""
         logger.info("Matrix: message in %s%s: %s (images=%d)", room.room_id, ctx, text[:80], len(images or []))
 
@@ -232,6 +233,15 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
         if text.startswith("//model"):
             await _handle_model_cmd(room, session_id, text[len("//model"):], thread_id)
+            return
+
+        if text.startswith("//background"):
+            bg_message = text[len("//background"):].strip()
+            if not bg_message:
+                await _send_text(room.room_id, "_Verwendung: //background <Nachricht>_")
+                return
+            task = app.scheduler.bg_tasks.enqueue(session_id, bg_message)
+            await _send_text(room.room_id, f"⏳ Aufgabe in Warteschlange: **{bg_message[:60]}**\nWird im Hintergrund verarbeitet wenn idle.")
             return
 
         async def _send(text: str) -> None:
@@ -293,7 +303,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             agent.on_skill_start = _on_skill_start
             agent.on_skill_step = _on_skill_step
             agent.on_skill_done = _on_skill_done
-            response = await agent.run(text, images=images or None, thread_id=thread_id)
+            app.scheduler.acquire_llm()
+            try:
+                response = await agent.run(text, images=images or None, thread_id=thread_id)
+            finally:
+                app.scheduler.release_llm()
 
             await client.room_typing(room.room_id, typing_state=False)
             await _send(response)

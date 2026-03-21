@@ -197,7 +197,14 @@ class SkillRunnerAgent(BaseAgent):
 
         self.logger.debug("Tool call: %s(%s)", tc_name, json.dumps(tc_args)[:200])
         if self.on_step:
-            step = tc_args.get("command", "") if tc_name == "bash" else tc_name
+            if tc_name == "bash":
+                step = tc_args.get("command", "")
+                # Show only script basenames, not full paths
+                parts = step.split()
+                parts = [os.path.basename(p) if os.sep in p or "/" in p else p for p in parts]
+                step = " ".join(parts)
+            else:
+                step = tc_name
             asyncio.ensure_future(self.on_step(step[:120]))
         result = self.tool_registry.execute(tc_name, tc_args, self.context)
         result_str = str(result)

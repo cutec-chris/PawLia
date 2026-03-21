@@ -9,5 +9,6 @@ matrix-nio>=0.25
 python-telegram-bot>=20.0
 PyYAML>=6.0
 requests>=2.32
+networkx>=3.0
 
 # VoIP / telephony extras → see requirements-voip.txt
