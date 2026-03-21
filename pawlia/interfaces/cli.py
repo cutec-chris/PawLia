@@ -87,6 +87,8 @@ async def start_cli(app: "App") -> None:
         if not user_input.strip():
             continue
 
+        app.scheduler.touch_activity("cli_user")
+
         if user_input.strip().lower() == "/private":
             active = app.memory.toggle_private(agent.session)
             icon = "🔒" if active else "🔓"
@@ -102,6 +104,7 @@ async def start_cli(app: "App") -> None:
             import time
             thread_id = f"cli_{int(time.time())}"
             active_fut = asyncio.current_task()
+            app.scheduler.acquire_llm()
             try:
                 response = await agent.run(message, thread_id=thread_id)
                 print(f"{_CYAN}Bot [Thread]:{_RESET} {response}\n")
@@ -110,12 +113,24 @@ async def start_cli(app: "App") -> None:
             except Exception as e:
                 logger.error("Error: %s", e)
                 print(f"Error: {e}\n")
+            finally:
+                app.scheduler.release_llm()
             continue
 
         if user_input.strip().lower() == "/status":
             from pawlia.interfaces.common import build_status, format_status, md_to_text
             status = build_status(app, "cli_user", agent)
             print(f"\n{md_to_text(format_status(status))}\n")
+            continue
+
+        if user_input.strip().lower().startswith("/background"):
+            bg_message = user_input.strip()[len("/background"):].strip()
+            if not bg_message:
+                print("Verwendung: /background <Nachricht>\n")
+                continue
+            task = app.scheduler.bg_tasks.enqueue("cli_user", bg_message)
+            print(f"⏳ Aufgabe in Warteschlange: {bg_message[:60]}")
+            print(f"   Wird im Hintergrund verarbeitet wenn idle.\n")
             continue
 
         if user_input.strip().lower().startswith("/model"):
@@ -131,6 +146,7 @@ async def start_cli(app: "App") -> None:
             continue
 
         active_fut = asyncio.current_task()
+        app.scheduler.acquire_llm()
         try:
             response = await agent.run(user_input)
             print(f"{_CYAN}Bot:{_RESET} {response}\n")
@@ -139,5 +155,7 @@ async def start_cli(app: "App") -> None:
         except Exception as e:
             logger.error("Error: %s", e)
             print(f"Error: {e}\n")
+        finally:
+            app.scheduler.release_llm()
 
     print("Exiting...")

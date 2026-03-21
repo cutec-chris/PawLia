@@ -1,0 +1,7 @@
+lightrag-hku
+requests
+beautifulsoup4
+html2text
+trafilatura
+pdfminer.six
+youtube-transcript-api

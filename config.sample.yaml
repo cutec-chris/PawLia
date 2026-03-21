@@ -12,7 +12,7 @@ providers:
 # generation parameters.  Agent types and skills reference these by key.
 models:
   fast:
-    model: qwen3:4b
+    model: qwen3.5:4b
     provider: ollama
     temperature: 0.7
   # smart:
@@ -111,3 +111,21 @@ skill-config:
 
   # perplexica:
   #   url: http://localhost:3000
+
+  # researcher:                          # Research projects with LightRAG
+  #   embedding_provider: ollama
+  #   embedding_model: bge-m3:latest
+  #   embedding_dim: 1024
+  #   embedding_host: http://localhost:11434
+  #   # rag_provider: ollama             # defaults to embedding_provider
+  #   # rag_model: qwen3.5:latest        # LLM for RAG queries
+  #   # rag_numctx: 4096
+
+  # memory:                              # Long-term conversation memory (LightRAG)
+  #   embedding_provider: ollama
+  #   embedding_model: bge-m3:latest
+  #   embedding_dim: 1024
+  #   embedding_host: http://localhost:11434
+  #   # rag_provider: ollama
+  #   # rag_model: qwen3.5:latest
+  #   # rag_numctx: 4096
