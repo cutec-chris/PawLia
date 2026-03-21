@@ -29,7 +29,6 @@ from pawlia.skills.loader import AgentSkill
 if TYPE_CHECKING:
     from pawlia.memory import MemoryManager, Session
 
-
 DEFAULT_SYSTEM_PROMPT = (
     "You are PawLia, a helpful AI assistant.\n\n"
     "IMPORTANT: You have skills (tools) available. "
@@ -76,7 +75,6 @@ class ChatAgent(BaseAgent):
         self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self.on_skill_done: Optional[InterimCallback] = None      # (skill_name)
-        self._idle_task: Optional[asyncio.Task] = None
 
         # Bind skill specs as "tools" so the LLM can call them
         self._skill_specs = [s.as_openai_spec() for s in skills.values()]
@@ -198,7 +196,10 @@ class ChatAgent(BaseAgent):
 
         # Turn 2: LLM formulates final answer incorporating skill results
         # Use unbound LLM (no tools) for the final response
+        self.logger.debug("Turn 2: sending %d messages to LLM for final answer", len(messages))
         final = await self._invoke(messages, llm=unbound_llm)
+        self.logger.debug("Turn 2 response: content=%s",
+                          repr(final.content[:200]) if final.content else "(empty)")
         result = self.extract_text(final)
         await self._persist(user_input, result, track_similarity=False, thread_id=thread_id)
         return result
@@ -242,88 +243,4 @@ class ChatAgent(BaseAgent):
             track_similarity=track_similarity,
         )
 
-        reason = self.memory.should_summarize(self.session)
-        if reason:
-            self.logger.info("Summarizing conversation (trigger: %s)", reason)
-            self._schedule_background_summary()
-        else:
-            self._schedule_idle_summary()
-
-    def _schedule_background_summary(self) -> None:
-        """Run summarization as a background task (non-blocking)."""
-        try:
-            asyncio.create_task(self._summarize_conversation())
-        except RuntimeError:
-            pass  # no running event loop
-
-    async def _summarize_conversation(self) -> None:
-        """Ask the LLM to summarize the conversation history."""
-        if not (self.memory and self.session):
-            return
-
-        history = self.session.daily_history.strip()
-        if not history:
-            return
-
-        prior = self.session.summary.strip()
-        context = ""
-        if prior:
-            context = f"Previous summary:\n{prior}\n\n"
-
-        messages = [
-            SystemMessage(content=(
-                "Summarize this conversation in 2-4 short bullet points.\n"
-                "Keep ONLY:\n"
-                "- User preferences and personal facts\n"
-                "- Decisions made or tasks completed\n"
-                "- Open/unanswered requests\n"
-                "DISCARD:\n"
-                "- Specific numbers, routes, or data (the user can ask again)\n"
-                "- Failed attempts, errors, or debugging details\n"
-                "- Greetings and small talk\n"
-                "Write in the user's language. Maximum 4 lines."
-            )),
-            HumanMessage(content=(
-                f"{context}Conversation to summarize:\n{history}"
-            )),
-        ]
-
-        try:
-            response = await asyncio.wait_for(
-                self._invoke(messages, llm=self.llm),
-                timeout=120,
-            )
-        except asyncio.TimeoutError:
-            self.logger.error("Summarization timed out for %s", self.session.user_id)
-            return
-        except Exception as e:
-            self.logger.error("Summarization failed for %s: %s", self.session.user_id, e)
-            return
-
-        summary = self.extract_text(response)
-        if summary:
-            self.memory.summarize(self.session, summary)
-
-    def _schedule_idle_summary(self) -> None:
-        """(Re)start a background timer that summarizes after idle timeout."""
-        if self._idle_task and not self._idle_task.done():
-            self._idle_task.cancel()
-
-        from pawlia.memory import IDLE_TIMEOUT_SECONDS
-
-        async def _idle_watcher():
-            await asyncio.sleep(IDLE_TIMEOUT_SECONDS)
-            if not (self.memory and self.session):
-                return
-            reason = self.memory.should_summarize(self.session)
-            if reason:
-                self.logger.info("Summarizing conversation (trigger: idle)")
-                try:
-                    await self._summarize_conversation()
-                except Exception as e:
-                    self.logger.error("Idle summarization failed: %s", e)
-
-        try:
-            self._idle_task = asyncio.create_task(_idle_watcher())
-        except RuntimeError:
-            pass  # no running event loop (e.g. in tests)
+        # Summarization is handled by the Scheduler based on idle time.

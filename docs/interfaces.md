@@ -43,6 +43,7 @@ See [commands.md](commands.md) for the full reference. Quick overview:
 | `/thread <msg>` | Run message in a new isolated thread context, reply in-thread |
 | `/model [name]` | Show or switch the active model for this context |
 | `/private` | Toggle private mode (threads only) |
+| `/background <msg>` | Queue a message for deferred background processing |
 
 ### Skill status messages
 
@@ -83,6 +84,7 @@ Commands use `//` as prefix instead of `/`:
 | `//thread <msg>` | Respond as a Matrix thread reply (proper `m.thread` relation) |
 | `//model [name]` | Show or switch the active model |
 | `//private` | Toggle private mode (thread replies only) |
+| `//background <msg>` | Queue a message for deferred background processing |
 
 ### VoIP (optional)
 
@@ -136,6 +138,7 @@ Commands use `/` as prefix (same as CLI/Telegram):
 | `/model [name]` | Show or switch the active model |
 | `/private` | Toggle private mode |
 | `/thread <msg>` | Start a new isolated thread context |
+| `/background <msg>` | Queue a message for deferred background processing |
 
 ### API Endpoints
 
@@ -207,9 +210,30 @@ Sessions are persisted to disk as Markdown files under `session/<user_id>/` and 
 
 ## Scheduler
 
-A background task runs every 60 seconds and checks for:
+A background task runs every 60 seconds and checks for due items. Work is split into two priority tiers:
+
+### High priority (every tick)
 
 - **Due reminders** set via the built-in reminder tool (supports daily / weekly / monthly recurrence)
 - **Upcoming calendar events** from the organizer skill (notified 15 minutes before start)
+- **Event checklists** — script-based automation tied to events
+- **Task reminders** — reminders attached to tasks with due dates
+- **Scheduled jobs** — cron-like recurring automation scripts
+
+### Low priority (idle-based)
+
+Low-priority tasks use per-user idle time as their priority. Each task type has a minimum idle threshold (in minutes). Tasks only run when the LLM is free (no active chat request).
+
+| Idle (min) | Task | Description |
+|------------|------|-------------|
+| 5 | **Summarization** | Summarize the conversation when exchange limit, repetition, or idle trigger fires |
+| 10 | **Background tasks** | Deferred `agent.run()` calls queued via `/background` |
+| 20 | **Memory indexing** | LightRAG knowledge graph indexing of conversation logs |
+
+Tasks are processed per-user: if Alice is idle for 10 minutes but Bob just sent a message, Alice's background tasks will still run (as long as the LLM is free).
+
+### LLM priority gate
+
+Chat requests have priority over all background work. Each interface calls `acquire_llm()` / `release_llm()` around `agent.run()` calls. While any chat request is active, all low-priority tasks are deferred. Between each low-priority task, the scheduler re-checks `llm_busy` before proceeding.
 
 Notifications are delivered through the active interface. For Webhook, they are buffered and returned on the next `GET /notifications` poll.

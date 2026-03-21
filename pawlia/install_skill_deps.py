@@ -63,13 +63,29 @@ def install_all_skill_deps(skills_dir: str) -> None:
         return
 
     for skill_path in _collect_skill_dirs(skills_dir):
+        skill_name = os.path.basename(skill_path)
+
+        # ── pip: requirements.txt ──
+        req_txt = os.path.join(skill_path, "requirements.txt")
+        if os.path.isfile(req_txt):
+            logger.info("Installing pip deps for skill '%s'...", skill_name)
+            try:
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-q", "-r", req_txt],
+                    check=True, capture_output=True, text=True,
+                )
+                logger.info("pip install -r requirements.txt for '%s' → OK", skill_name)
+            except subprocess.CalledProcessError as e:
+                logger.warning("pip install for '%s' failed: %s", skill_name, e.stderr.strip())
+
+        # ── npm: openclaw.install steps ──
         skill_md = os.path.join(skill_path, "SKILL.md")
         fm = _parse_frontmatter(skill_md)
         steps = fm.get("metadata", {}).get("openclaw", {}).get("install", [])
         if not steps:
             continue
 
-        logger.info("Installing deps for skill '%s'...", os.path.basename(skill_path))
+        logger.info("Installing npm deps for skill '%s'...", skill_name)
         for step in steps:
             kind = step.get("kind")
             package = step.get("package")

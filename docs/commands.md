@@ -102,3 +102,18 @@ When sent inside a thread, the output reflects the thread's context (exchanges, 
 | **Threads** | Number of active thread contexts in this session |
 | **Skills** | Loaded skill names |
 | **Idle** | Time since last exchange |
+
+---
+
+## `/background` — Run a message in the background
+
+Queues a message for deferred processing. The agent processes it when the system is idle (all users inactive for 20+ minutes and no active chat requests).
+
+```
+/background <message>      # Telegram, CLI & Web
+//background <message>      # Matrix
+```
+
+The task is stored in `session/<user>/background_tasks/` and processed through the normal agent pipeline (including skills). Once complete, the result is delivered as a notification.
+
+Use this for long-running or low-priority tasks that don't need an immediate response — e.g. research, bulk operations, or anything that would block the LLM for other users.

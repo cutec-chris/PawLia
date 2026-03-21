@@ -46,6 +46,7 @@ class App:
 
         # Skills — built-in and user-provided (skills/user/)
         skills_dir = os.path.join(pkg_dir, "skills")
+        install_all_skill_deps(skills_dir)
         self.skills: Dict[str, AgentSkill] = SkillLoader.discover(skills_dir, config)
 
         # Also discover skills placed in any session workspace (session/<user>/workspace/skills/)
@@ -68,7 +69,8 @@ class App:
             self.logger.info("No skills loaded")
 
         # Scheduler for proactive reminders / event notifications
-        self.scheduler = Scheduler(self.session_dir)
+        self.scheduler = Scheduler(self.session_dir, config=self.config)
+        self.scheduler.set_app(self)
         self.scheduler.set_llm_formatter(self._format_notification)
 
     async def _format_notification(self, user_id: str, raw_message: str) -> str:

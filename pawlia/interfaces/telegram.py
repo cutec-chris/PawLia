@@ -44,6 +44,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                       thread_id: Optional[int] = None,
                       images: Optional[List[str]] = None) -> None:
         """Shared handler for text and photo messages."""
+        app.scheduler.touch_activity(user_id)
         try:
             # Show typing indicator while processing
             await update.message.chat.send_action(ChatAction.TYPING)
@@ -97,11 +98,15 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             agent.on_skill_start = _on_skill_start
             agent.on_skill_step = _on_skill_step
             agent.on_skill_done = _on_skill_done
-            response = await agent.run(
-                text,
-                images=images or None,
-                thread_id=str(thread_id) if thread_id else None,
-            )
+            app.scheduler.acquire_llm()
+            try:
+                response = await agent.run(
+                    text,
+                    images=images or None,
+                    thread_id=str(thread_id) if thread_id else None,
+                )
+            finally:
+                app.scheduler.release_llm()
             await update.message.reply_text(
                 md_to_tg_html(response), parse_mode=ParseMode.HTML,
             )
