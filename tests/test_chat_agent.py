@@ -39,6 +39,7 @@ def _make_skill(name="test_skill", description="A test skill",
     skill.instructions = instructions
     skill.skill_path = "/nonexistent"
     skill.scripts_dir = "/nonexistent"
+    skill.base_dir = "/nonexistent"
     skill.as_openai_spec.return_value = {
         "type": "function",
         "function": {
