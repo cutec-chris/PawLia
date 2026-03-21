@@ -5,10 +5,12 @@ FROM python:3.13-alpine AS builder
 
 RUN apk add --no-cache \
         gcc \
+        g++ \
         musl-dev \
         python3-dev \
         openssl-dev \
-        libffi-dev
+        libffi-dev \
+        crc32c-dev
 
 COPY requirements.txt requirements-voip.txt ./
 RUN pip install --no-cache-dir --prefix=/install \
@@ -35,6 +37,7 @@ RUN apk add --no-cache \
         openssl \
         libffi \
         libstdc++ \
+        crc32c \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts \
     || echo "WARN: piper-tts package not available — TTS will not work"
