@@ -71,6 +71,20 @@ async def _run(args) -> None:
     # Start scheduler for proactive reminders/events
     app.scheduler.start()
 
+    # If no models configured, launch web UI for initial setup
+    if not app.config.get("models"):
+        logging.getLogger("pawlia").info(
+            "Keine Modelle konfiguriert — starte Web-UI zur Einrichtung …"
+        )
+        from pawlia.interfaces.web import start_web
+        web_cfg = app.config.get("interfaces", {}).get("web", {})
+        try:
+            await start_web(app, web_cfg)
+        except asyncio.CancelledError:
+            pass
+        app.scheduler.stop()
+        return
+
     if args.mode == "cli":
         from pawlia.interfaces.cli import start_cli
         await start_cli(app)
