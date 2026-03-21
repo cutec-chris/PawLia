@@ -5,6 +5,9 @@ services:
       dockerfile: Dockerfile.voip
     restart: unless-stopped
     network_mode: host
+    ports:
+      - "127.0.0.1:8888:8888"   # Web UI
+      # - "127.0.0.1:8080:8080" # Webhooks
     volumes:
       # Required: your config (copy from config.sample.yaml and fill in)
       - ./config.yaml:/app/config.yaml:ro
