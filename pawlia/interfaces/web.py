@@ -131,12 +131,11 @@ async def start_web(app: "App", cfg: Dict) -> None:
     # Token: use configured or auto-generate
     token: str = cfg.get("token") or secrets.token_urlsafe(32)
 
-    # Print prominently to console
+    # Print prominently to console — include token in URL for click-to-login
     border = "=" * 62
     print(f"\n{border}")
     print("  PAWLIA WEB INTERFACE")
-    print(f"  URL:   http://localhost:{port}")
-    print(f"  TOKEN: {token}")
+    print(f"  URL:   http://localhost:{port}?token={token}")
     print(f"{border}\n")
 
     config_path = _find_config_path(getattr(app, "config_path", None))
@@ -159,9 +158,16 @@ async def start_web(app: "App", cfg: Dict) -> None:
 
     # ── Static ──────────────────────────────────────────────────────────────
 
-    async def handle_index(_r: web.Request) -> web.Response:
+    async def handle_index(request: web.Request) -> web.Response:
+        # Auto-login via ?token= query parameter
+        url_token = request.query.get("token")
         html = _jinja_env.get_template("index.html").render()
-        return web.Response(text=html, content_type="text/html")
+        resp = web.Response(text=html, content_type="text/html")
+        if url_token == token:
+            sid = secrets.token_urlsafe(32)
+            sessions.add(sid)
+            resp.set_cookie(_COOKIE, sid, httponly=True, samesite="Strict", max_age=86400 * 7)
+        return resp
 
     # ── Auth ────────────────────────────────────────────────────────────────
 
@@ -433,6 +439,91 @@ async def start_web(app: "App", cfg: Dict) -> None:
 
     app.scheduler.register(_notify)
 
+    # ── Setup / bootstrap ──────────────────────────────────────────────────
+
+    async def handle_setup_status(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        cfg_data = _read_config(config_path) if config_path else {}
+        has_providers = bool(cfg_data.get("providers"))
+        has_models = bool(cfg_data.get("models"))
+        return web.json_response({
+            "has_providers": has_providers,
+            "has_models": has_models,
+        })
+
+    async def handle_setup_auto(request: web.Request) -> web.Response:
+        """Check if ollama is reachable, pull qwen3.5:latest, write config."""
+        if not _authed(request):
+            return _unauth()
+
+        import aiohttp as _aiohttp
+
+        ollama_base = "http://localhost:11434"
+        # 1) Check connectivity
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.get(f"{ollama_base}/api/tags", timeout=_aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status != 200:
+                        return web.json_response({"error": "Ollama nicht erreichbar", "phase": "connect"}, status=502)
+        except Exception:
+            return web.json_response({"error": "Ollama nicht erreichbar — läuft der Container?", "phase": "connect"}, status=502)
+
+        # 2) Pull model (this can take a while)
+        model_name = "qwen3.5:latest"
+        try:
+            async with _aiohttp.ClientSession() as sess:
+                async with sess.post(
+                    f"{ollama_base}/api/pull",
+                    json={"name": model_name},
+                    timeout=_aiohttp.ClientTimeout(total=600),
+                ) as r:
+                    if r.status != 200:
+                        body = await r.text()
+                        return web.json_response({"error": f"Pull fehlgeschlagen: {body}", "phase": "pull"}, status=502)
+                    # Consume the streaming response to wait for completion
+                    async for _ in r.content:
+                        pass
+        except Exception as e:
+            return web.json_response({"error": f"Pull fehlgeschlagen: {e}", "phase": "pull"}, status=502)
+
+        # 3) Write config
+        cfg_path = config_path
+        if not cfg_path:
+            cfg_path = os.path.join(_PKG_ROOT, "config.yaml")
+
+        cfg_data = _read_config(cfg_path) if os.path.isfile(cfg_path) else {}
+
+        if not cfg_data.get("providers"):
+            cfg_data["providers"] = {}
+        cfg_data["providers"]["ollama"] = {
+            "apiBase": "http://localhost:11434/v1",
+            "apiKey": "ollama",
+            "timeout": 240,
+            "keepAlive": -1,
+        }
+
+        if not cfg_data.get("models"):
+            cfg_data["models"] = {}
+        cfg_data["models"]["fast"] = {
+            "model": model_name,
+            "provider": "ollama",
+            "temperature": 0.7,
+        }
+
+        if not cfg_data.get("agents"):
+            cfg_data["agents"] = {}
+        cfg_data["agents"]["default"] = "fast"
+
+        _write_config(cfg_path, cfg_data)
+
+        # Reload app config so LLMFactory picks up changes on next request
+        app.config.update(cfg_data)
+        app.llm = __import__("pawlia.llm", fromlist=["LLMFactory"]).LLMFactory(app.config)
+
+        logger.info("Auto-setup: ollama + %s configured", model_name)
+        return web.json_response({"ok": True, "model": model_name})
+
     # ── Build & start ────────────────────────────────────────────────────────
 
     webapp = web.Application()
@@ -450,6 +541,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
     webapp.router.add_delete("/api/skills/{name}", handle_skill_delete)
     webapp.router.add_get("/api/skill-config",    handle_get_skill_config)
     webapp.router.add_post("/api/skill-config",   handle_save_skill_config)
+    webapp.router.add_get("/api/setup-status",    handle_setup_status)
+    webapp.router.add_post("/api/setup/auto",     handle_setup_auto)
 
     runner = web.AppRunner(webapp)
     await runner.setup()
