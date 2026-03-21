@@ -5,10 +5,12 @@ FROM python:3.13-alpine AS builder
 
 RUN apk add --no-cache \
         gcc \
+        g++ \
         musl-dev \
         python3-dev \
         openssl-dev \
-        libffi-dev
+        libffi-dev \
+        crc32c-dev
 
 COPY requirements.txt requirements-voip.txt ./
 RUN pip install --no-cache-dir --prefix=/install \
@@ -34,8 +36,11 @@ RUN apk add --no-cache \
         wget \
         openssl \
         libffi \
-        gcompat \
-        libstdc++
+        libstdc++ \
+        crc32c \
+    && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
+        piper-tts \
+    || echo "WARN: piper-tts package not available — TTS will not work"
 
 WORKDIR /app
 
@@ -50,21 +55,13 @@ RUN mkdir -p skills/user
 # Install npm packages declared in bundled skills
 RUN python -m pawlia.install_skill_deps
 
-# Piper TTS binary (v1.2.0 — glibc binary, runs via gcompat on Alpine)
-# Extracts to /opt/piper/piper + bundled ONNX-runtime .so files
-RUN wget -q -O /tmp/piper.tar.gz \
-        "https://github.com/rhasspy/piper/releases/download/v1.2.0/piper_linux_x86_64.tar.gz" && \
-    tar -xzf /tmp/piper.tar.gz -C /opt/ && \
-    rm /tmp/piper.tar.gz
-
-ENV PATH="/opt/piper:$PATH"
-
 # Default voice model: German Kerstin low (~15 MB, 16 kHz)
 RUN mkdir -p /app/piper && \
     wget -q -O /app/piper/de_DE-kerstin-low.onnx \
         "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx" && \
     wget -q -O /app/piper/de_DE-kerstin-low.onnx.json \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json"
+        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json" \
+    || echo "WARN: Piper voice model download failed — TTS will not be available"
 
 
 # Session data lives in a volume

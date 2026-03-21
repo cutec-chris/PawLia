@@ -269,6 +269,17 @@ tr:hover td { background:var(--bg2); }
     <!-- Konfiguration (Provider + Modelle) -->
     <section class="tab" id="tab-config">
       <div class="cfg-tab">
+        <!-- Setup banner (shown when no models configured) -->
+        <div id="setup-banner" style="display:none; background:var(--bg3); border:1px solid var(--accent); border-radius:var(--radius); padding:20px 24px; margin-bottom:24px;">
+          <h3 style="color:var(--accent); margin-bottom:8px;">Willkommen bei PawLia</h3>
+          <p style="color:var(--text); margin-bottom:16px; font-size:14px;">
+            Es sind noch keine Modelle konfiguriert. Wenn Ollama lokal läuft, kann PawLia automatisch
+            <strong>qwen3.5:latest</strong> herunterladen und alles einrichten.
+          </p>
+          <button id="auto-setup-btn" class="add-btn" style="margin-right:10px;">Automatisch einrichten</button>
+          <span id="setup-progress" style="color:var(--muted); font-size:13px;"></span>
+        </div>
+
         <div class="cfg-header">
           <div>
             <h2>Provider</h2>
@@ -406,17 +417,44 @@ $('logout-btn').addEventListener('click', async () => {
   location.reload();
 });
 
-function showApp() {
+async function showApp() {
   $('login').style.display = 'none';
   $('app').style.display = 'flex';
   loadProviders();
   loadModels();
+
+  // Check setup status — hide chat if no models configured
+  try {
+    const r = await api.get('/api/setup-status');
+    if (r.ok) {
+      const st = await r.json();
+      if (!st.has_models) {
+        // Hide chat tab button and section
+        document.querySelector('[data-tab="chat"]').style.display = 'none';
+        $('tab-chat').classList.remove('active');
+        // Switch to config tab
+        document.querySelector('[data-tab="config"]').classList.add('active');
+        $('tab-config').classList.add('active');
+        // Show setup banner
+        $('setup-banner').style.display = 'block';
+      }
+    }
+  } catch (e) { /* ignore */ }
 }
 
-// Try auto-login via existing session cookie
+// Try auto-login via existing session cookie or URL token
 (async () => {
   const r = await api.get('/api/providers');
-  if (r.ok) showApp();
+  if (r.ok) { showApp(); return; }
+  // If URL has ?token=, the server already set the cookie — try again
+  if (new URLSearchParams(location.search).has('token')) {
+    const r2 = await api.get('/api/providers');
+    if (r2.ok) {
+      // Clean URL
+      history.replaceState(null, '', location.pathname);
+      showApp();
+    }
+  }
 })();
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
@@ -803,6 +841,45 @@ window.configSkill = async name => {
     }
   });
 };
+
+// ── Auto-Setup ─────────────────────────────────────────────────────────
+
+$('auto-setup-btn').addEventListener('click', async () => {
+  const btn = $('auto-setup-btn');
+  const prog = $('setup-progress');
+  btn.disabled = true;
+  prog.textContent = 'Verbinde mit Ollama …';
+
+  try {
+    prog.textContent = 'Lade qwen3.5:latest herunter — das kann einige Minuten dauern …';
+    const r = await api.post('/api/setup/auto', {});
+    const data = await r.json();
+    if (r.ok) {
+      prog.style.color = 'var(--ok)';
+      prog.textContent = `Fertig! ${data.model} ist eingerichtet.`;
+      toast('Setup abgeschlossen — PawLia ist bereit!');
+      // Reload UI
+      await loadProviders();
+      await loadModels();
+      // Show chat tab, hide banner
+      document.querySelector('[data-tab="chat"]').style.display = '';
+      $('setup-banner').style.display = 'none';
+      // Switch to chat
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelector('[data-tab="chat"]').classList.add('active');
+      $('tab-chat').classList.add('active');
+    } else {
+      prog.style.color = 'var(--err)';
+      prog.textContent = data.error || 'Setup fehlgeschlagen';
+      btn.disabled = false;
+    }
+  } catch (e) {
+    prog.style.color = 'var(--err)';
+    prog.textContent = 'Verbindungsfehler';
+    btn.disabled = false;
+  }
+});
 
 // ── Modal ──────────────────────────────────────────────────────────────────
 
