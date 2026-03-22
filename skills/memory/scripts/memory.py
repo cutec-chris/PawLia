@@ -40,7 +40,37 @@ def _load_skill_config() -> dict:
     return {}
 
 
+def _load_chat_model() -> dict:
+    """Return {provider, model, host} for the active chat model from main config.
+
+    Resolves agents.chat (or agents.default) → models.* → providers.* so that
+    memory queries use whatever model is currently loaded in Ollama instead of
+    forcing a separate rag_model to be loaded.
+    """
+    for candidate in (_PROJECT_ROOT / "config.yaml", _PROJECT_ROOT / "config.yml"):
+        if candidate.is_file():
+            with open(candidate, encoding="utf-8") as f:
+                cfg = yaml.safe_load(f) or {}
+            agents = cfg.get("agents", {})
+            alias = agents.get("chat") or agents.get("default", "")
+            model_cfg = cfg.get("models", {}).get(alias, {})
+            model = model_cfg.get("model", "")
+            if not model:
+                break
+            provider_name = model_cfg.get("provider", "ollama")
+            api_base = cfg.get("providers", {}).get(provider_name, {}).get(
+                "apiBase", "http://localhost:11434/v1"
+            )
+            # LightRAG ollama funcs expect the bare host without /v1
+            host = api_base.rstrip("/")
+            if host.endswith("/v1"):
+                host = host[:-3]
+            return {"provider": provider_name, "model": model, "host": host}
+    return {}
+
+
 CFG = _load_skill_config()
+_CHAT_MODEL = _load_chat_model()
 
 # ---------------------------------------------------------------------------
 # LightRAG (read-only — same index the scheduler writes to)
@@ -78,19 +108,40 @@ def _build_embedding_func(cfg: dict):
 
 
 def _build_llm_func(cfg: dict):
+    """Build the LLM function for RAG queries.
+
+    For queries we want to reuse whatever model Ollama already has loaded
+    (the active chat model) to avoid an unload/reload cycle.  We therefore
+    auto-detect the chat model from the main config unless rag_model is
+    explicitly set in skill-config.memory.  We deliberately do NOT pass
+    think=False so thinking models can think freely during query synthesis.
+    Indexing (memory_indexer.py) still runs with think=False — that stays
+    unchanged.
+    """
     import lightrag.llm.ollama
     import lightrag.llm.openai
 
-    provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
-    model = cfg.get("rag_model", "qwen3.5:latest")
-    host = cfg.get("embedding_host", "http://localhost:11434")
+    # Prefer explicit rag_model; fall back to active chat model
+    explicit_rag_model = cfg.get("rag_model", "")
+    if explicit_rag_model:
+        provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
+        model = explicit_rag_model
+        host = cfg.get("embedding_host", "http://localhost:11434")
+    elif _CHAT_MODEL:
+        provider = _CHAT_MODEL["provider"]
+        model = _CHAT_MODEL["model"]
+        host = _CHAT_MODEL["host"]
+    else:
+        provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
+        model = cfg.get("rag_model", "")
+        host = cfg.get("embedding_host", "http://localhost:11434")
 
     if provider == "ollama":
         async def _complete(prompt: str, system_prompt: str = "", **kw):
             return await lightrag.llm.ollama.ollama_model_complete(
                 prompt, system_prompt=system_prompt,
                 host=host,
-                options={"num_ctx": int(cfg.get("rag_numctx", 4096)), "think": False},
+                options={"num_ctx": int(cfg.get("rag_numctx", 4096))},
                 **kw,
             )
         return _complete
@@ -119,10 +170,15 @@ async def _get_rag(user_id: str):
     if not index_path.exists():
         return None
 
+    # Resolve the effective model name for LightRAG's internal bookkeeping
+    _query_model_name = (
+        CFG.get("rag_model")
+        or _CHAT_MODEL.get("model", "")
+    )
     _rag_instance = lightrag.LightRAG(
         str(index_path),
         llm_model_func=_build_llm_func(CFG),
-        llm_model_name=CFG.get("rag_model", "qwen3.5:latest"),
+        llm_model_name=_query_model_name,
         summary_max_tokens=8192,
         enable_llm_cache=False,
         llm_model_kwargs={},
