@@ -228,10 +228,11 @@ class MemoryIndexer:
         )
         if not os.path.isdir(memory_dir):
             return []
+        today = datetime.now().strftime("%Y-%m-%d.md")
         return sorted(
             os.path.join(memory_dir, f)
             for f in os.listdir(memory_dir)
-            if _DATE_RE.match(f)
+            if _DATE_RE.match(f) and f != today
         )
 
     async def process_user(self, user_id: str) -> None:
