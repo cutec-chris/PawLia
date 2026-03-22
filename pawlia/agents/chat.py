@@ -42,9 +42,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "the organizer skill — NEVER to the files skill. "
     "The files skill is ONLY for personal notes and preferences "
     "(name, language, habits), NOT for anything time-related.\n\n"
-    "When you learn a persistent fact or preference about the user "
-    "(name, language, habits, preferences, etc.), "
-    "use the files skill to append it to memory/memory.md."
+    "IMPORTANT: Questions about past conversations, things discussed "
+    "previously, or anything the user wants to recall from earlier chats "
+    "ALWAYS go to the memory skill — NEVER answer from your own knowledge."
 )
 
 
