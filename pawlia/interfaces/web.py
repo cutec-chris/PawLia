@@ -283,13 +283,14 @@ async def start_web(app: "App", cfg: Dict) -> None:
             async def _on_skill_done(skill_name: str) -> None:
                 await _sse("skill_done", {"skill": skill_name})
 
-            agent.on_skill_start = _on_skill_start
-            agent.on_skill_step = _on_skill_step
-            agent.on_skill_done = _on_skill_done
-
             app.scheduler.acquire_llm()
             try:
-                response = await agent.run(message, images=images, thread_id=thread_id)
+                response = await agent.run(
+                    message, images=images, thread_id=thread_id,
+                    on_skill_start=_on_skill_start,
+                    on_skill_step=_on_skill_step,
+                    on_skill_done=_on_skill_done,
+                )
             finally:
                 app.scheduler.release_llm()
             await _sse("done", {"response": response})
@@ -297,9 +298,6 @@ async def start_web(app: "App", cfg: Dict) -> None:
             logger.error("Web chat error: %s", e, exc_info=True)
             await _sse("error", {"error": "internal error"})
         finally:
-            agent.on_skill_start = None
-            agent.on_skill_step = None
-            agent.on_skill_done = None
             await resp.write_eof()
 
         return resp

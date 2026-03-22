@@ -300,12 +300,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     )
 
             agent.on_interim = _on_interim
-            agent.on_skill_start = _on_skill_start
-            agent.on_skill_step = _on_skill_step
-            agent.on_skill_done = _on_skill_done
             app.scheduler.acquire_llm()
             try:
-                response = await agent.run(text, images=images or None, thread_id=thread_id)
+                response = await agent.run(
+                    text, images=images or None, thread_id=thread_id,
+                    on_skill_start=_on_skill_start,
+                    on_skill_step=_on_skill_step,
+                    on_skill_done=_on_skill_done,
+                )
             finally:
                 app.scheduler.release_llm()
 

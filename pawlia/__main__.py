@@ -125,7 +125,10 @@ async def _run(args) -> None:
         app.scheduler.stop()
         return
 
-    await asyncio.gather(*tasks)
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        app.scheduler.stop()
 
 
 if __name__ == "__main__":
