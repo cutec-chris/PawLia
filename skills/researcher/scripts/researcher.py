@@ -100,7 +100,7 @@ def _build_llm_func(cfg: dict):
             return await lightrag.llm.ollama.ollama_model_complete(
                 prompt, system_prompt=system_prompt,
                 host=host,
-                options={"num_ctx": int(cfg.get("rag_numctx", 4096))},
+                options={"num_ctx": int(cfg.get("rag_numctx", 4096)), "think": False},
                 **kw,
             )
         return _complete
