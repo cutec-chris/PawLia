@@ -116,8 +116,8 @@ def main():
     sub = parser.add_subparsers(dest="cmd")
 
     def _base(p):
-        p.add_argument("--user-id", required=True)
-        p.add_argument("--session-dir", required=True)
+        p.add_argument("--user-id", default=os.environ.get("PAWLIA_USER_ID"))
+        p.add_argument("--session-dir", default=os.environ.get("PAWLIA_SESSION_DIR"))
 
     p = sub.add_parser("list")
     _base(p)
@@ -136,6 +136,10 @@ def main():
     p.add_argument("--filename", required=True)
 
     args = parser.parse_args()
+
+    if not args.user_id or not args.session_dir:
+        _out({"success": False, "error": "user-id and session-dir are required (via args or PAWLIA_USER_ID / PAWLIA_SESSION_DIR env vars)."})
+        sys.exit(1)
 
     dispatch = {"list": cmd_list, "read": cmd_read, "write": cmd_write, "delete": cmd_delete}
     fn = dispatch.get(args.cmd)

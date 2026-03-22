@@ -59,16 +59,23 @@ class ScriptExecutor:
 
     @staticmethod
     async def run(script_path: str, params: Optional[Dict[str, Any]] = None,
-                  cwd: Optional[str] = None) -> Dict[str, Any]:
+                  cwd: Optional[str] = None,
+                  user_id: Optional[str] = None,
+                  session_dir: Optional[str] = None) -> Dict[str, Any]:
         """Execute a script and return {success, output, error}.
 
         The script receives params as a JSON string via the AUTOMATION_PARAMS
         environment variable, and the working directory is set to cwd.
+        User context is injected via PAWLIA_USER_ID and PAWLIA_SESSION_DIR.
         """
         if not os.path.isfile(script_path):
             return {"success": False, "output": "", "error": f"Script not found: {script_path}"}
 
         env = os.environ.copy()
+        if user_id:
+            env["PAWLIA_USER_ID"] = user_id
+        if session_dir:
+            env["PAWLIA_SESSION_DIR"] = session_dir
         if params:
             env["AUTOMATION_PARAMS"] = json.dumps(params, ensure_ascii=False)
 
@@ -189,7 +196,10 @@ class ChecklistProcessor:
                     for ci in checklist if ci.get("result") is not None
                 }
 
-                result = await ScriptExecutor.run(script_path, params)
+                result = await ScriptExecutor.run(
+                    script_path, params,
+                    user_id=user_id, session_dir=self.session_dir,
+                )
                 item["result"] = result.get("output", "") if result["success"] else result.get("error", "")
                 item["status"] = "done" if result["success"] else "failed"
                 item["executed_at"] = now.isoformat()
@@ -255,7 +265,10 @@ class JobRunner:
             params["user_id"] = user_id
 
             logger.info("Running job '%s' for %s", job.get("name"), user_id)
-            result = await ScriptExecutor.run(script_path, params)
+            result = await ScriptExecutor.run(
+                script_path, params,
+                user_id=user_id, session_dir=self.session_dir,
+            )
 
             job["last_run"] = now.isoformat()
             job["last_result"] = "success" if result["success"] else "failed"

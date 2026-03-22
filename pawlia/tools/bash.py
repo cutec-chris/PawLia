@@ -28,10 +28,21 @@ class BashTool(Tool):
 
         timeout = context.get("timeout", 120) if context else 120
 
+        # Inject context as environment variables so skill scripts can read
+        # them without the LLM having to construct --user-id / --session-dir
+        # arguments (prevents hallucination of these values).
+        env = os.environ.copy()
+        if context:
+            if context.get("user_id"):
+                env["PAWLIA_USER_ID"] = context["user_id"]
+            if context.get("session_dir"):
+                env["PAWLIA_SESSION_DIR"] = context["session_dir"]
+
         run_kwargs: Dict[str, Any] = dict(
             capture_output=True, text=True, timeout=timeout,
             encoding="utf-8", errors="replace",
             cwd=cwd,
+            env=env,
         )
 
         def _fmt(r: subprocess.CompletedProcess) -> str:

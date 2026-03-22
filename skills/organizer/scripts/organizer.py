@@ -369,8 +369,8 @@ def main():
     sub = parser.add_subparsers(dest="cmd")
 
     def _base(p):
-        p.add_argument("--user-id", required=True)
-        p.add_argument("--session-dir", required=True)
+        p.add_argument("--user-id", default=os.environ.get("PAWLIA_USER_ID"))
+        p.add_argument("--session-dir", default=os.environ.get("PAWLIA_SESSION_DIR"))
 
     # add-event (now with --checklist)
     p = sub.add_parser("add-event")
@@ -458,6 +458,10 @@ def main():
     p.add_argument("--job-id", required=True)
 
     args = parser.parse_args()
+
+    if not args.user_id or not args.session_dir:
+        print(json.dumps({"success": False, "error": "user-id and session-dir are required (via args or PAWLIA_USER_ID / PAWLIA_SESSION_DIR env vars)."}))
+        sys.exit(1)
 
     dispatch = {
         "add-event": cmd_add_event,

@@ -198,13 +198,15 @@ python organizer.py add-job --user-id <id> --session-dir <dir> \
 Scripts are plain Python (or Node.js / Bash) files stored in `session/<user>/automations/`.
 
 **Input:** Parameters are passed via the `AUTOMATION_PARAMS` environment variable as JSON.
+User context is available via `PAWLIA_USER_ID` and `PAWLIA_SESSION_DIR` environment variables.
 
 ```python
 import json, os
 
 params = json.loads(os.environ.get("AUTOMATION_PARAMS", "{}"))
 job_name = params.get("job_name", "")
-user_id = params.get("user_id", "")
+user_id = os.environ.get("PAWLIA_USER_ID", "")
+session_dir = os.environ.get("PAWLIA_SESSION_DIR", "")
 ```
 
 **Output:** The script's stdout becomes the notification message. Keep it concise.
