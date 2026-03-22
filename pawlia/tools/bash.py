@@ -1,5 +1,6 @@
 """Bash tool - executes shell commands."""
 
+import os
 import subprocess
 import sys
 from typing import Any, Dict, Optional
