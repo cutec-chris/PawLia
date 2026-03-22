@@ -367,7 +367,7 @@ tr:hover td { background:var(--bg2); }
     <section class="tab" id="tab-graph">
       <div id="graph-toolbar">
         <label>User-ID:</label>
-        <input type="text" id="graph-uid" value="web_user" spellcheck="false">
+        <select id="graph-uid"><option value="">— User wählen —</option></select>
         <button id="graph-refresh">Laden</button>
         <span id="graph-stats"></span>
       </div>
@@ -1045,9 +1045,31 @@ function ensureD3() {
 
 $('graph-refresh').addEventListener('click', () => loadGraph());
 
+let _graphUsersLoaded = false;
+
+async function loadGraphUsers() {
+  if (_graphUsersLoaded) return;
+  const r = await api.get('/api/memory/users');
+  if (!r.ok) return;
+  const {users} = await r.json();
+  const sel = $('graph-uid');
+  sel.innerHTML = '';
+  if (!users.length) {
+    sel.innerHTML = '<option value="">— keine User —</option>';
+    return;
+  }
+  users.forEach(u => {
+    const o = document.createElement('option');
+    o.value = u; o.textContent = u;
+    sel.appendChild(o);
+  });
+  _graphUsersLoaded = true;
+}
+
 async function loadGraph() {
-  await ensureD3();
-  const uid = $('graph-uid').value.trim() || 'web_user';
+  await Promise.all([ensureD3(), loadGraphUsers()]);
+  const uid = $('graph-uid').value;
+  if (!uid) return;
   const r = await api.get(`/api/memory/graph?user_id=${encodeURIComponent(uid)}`);
   if (!r.ok) { toast('Graph konnte nicht geladen werden', 'err'); return; }
   const data = await r.json();
