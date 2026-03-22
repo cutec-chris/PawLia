@@ -120,6 +120,8 @@ skill-config:
   #   # rag_provider: ollama             # defaults to embedding_provider
   #   # rag_model: qwen3.5:latest        # LLM for RAG queries
   #   # rag_numctx: 4096
+  #   # rag_timeout: 600                 # LLM timeout in seconds (default: 600)
+  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (default: 120)
   #   # rag_max_async_llm: 2             # max parallel LLM requests (default: 2)
   #   # rag_max_async_embedding: 4       # max parallel embedding requests (default: 4)
 
@@ -131,5 +133,7 @@ skill-config:
   #   # rag_provider: ollama
   #   # rag_model: qwen3.5:latest
   #   # rag_numctx: 4096
+  #   # rag_timeout: 600                 # LLM timeout in seconds (default: 600)
+  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (default: 120)
   #   # rag_max_async_llm: 2             # max parallel LLM requests (default: 2)
   #   # rag_max_async_embedding: 4       # max parallel embedding requests (default: 4)

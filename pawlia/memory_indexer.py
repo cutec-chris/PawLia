@@ -81,9 +81,22 @@ class MemoryIndexer:
         if provider == "ollama":
             async def _ollama_embed(texts):
                 import numpy as np
-                result = await lightrag.llm.ollama.ollama_embed(
-                    texts, host=host, embed_model=model, max_token_size=8192,
-                )
+                try:
+                    result = await lightrag.llm.ollama.ollama_embed(
+                        texts, host=host, embed_model=model, max_token_size=8192,
+                    )
+                except Exception as e:
+                    err_str = str(e)
+                    if "NaN" in err_str:
+                        # Ollama produced NaN embeddings server-side and failed
+                        # to serialize them.  Return zero vectors so the caller
+                        # can continue instead of crashing the whole pipeline.
+                        logger.warning(
+                            "Ollama NaN embedding error for %d texts, returning zero vectors: %s",
+                            len(texts), err_str,
+                        )
+                        return np.zeros((len(texts), dim))
+                    raise
                 # Replace NaN values from buggy embedding responses
                 arr = np.array(result)
                 if np.isnan(arr).any():
@@ -154,6 +167,7 @@ class MemoryIndexer:
             llm_model_kwargs={},
             embedding_func=self._build_embedding_func(),
             default_llm_timeout=int(self._cfg.get("rag_timeout", 600)),
+            default_embedding_timeout=int(self._cfg.get("rag_embedding_timeout", 120)),
             llm_model_max_async=int(self._cfg.get("rag_max_async_llm", 2)),
             embedding_func_max_async=int(self._cfg.get("rag_max_async_embedding", 4)),
         )
