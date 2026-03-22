@@ -3,7 +3,8 @@
 import os
 import tempfile
 
-from pawlia.skills.loader import AgentSkill, SkillLoader, _parse_frontmatter
+from pawlia.skills.loader import AgentSkill, SkillLoader
+from pawlia.utils import parse_frontmatter
 
 
 def _create_skill_dir(parent: str, name: str, description: str = "Test skill",
@@ -32,7 +33,7 @@ class TestAgentSkill:
     def test_load_from_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             _create_skill_dir(tmpdir, "test_skill", "A test skill")
-            metadata = _parse_frontmatter(
+            metadata = parse_frontmatter(
                 os.path.join(tmpdir, "test_skill", "SKILL.md")
             )
             skill = AgentSkill(os.path.join(tmpdir, "test_skill"), metadata)
@@ -44,7 +45,7 @@ class TestAgentSkill:
     def test_openai_spec(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             _create_skill_dir(tmpdir, "my_skill")
-            metadata = _parse_frontmatter(
+            metadata = parse_frontmatter(
                 os.path.join(tmpdir, "my_skill", "SKILL.md")
             )
             skill = AgentSkill(os.path.join(tmpdir, "my_skill"), metadata)
