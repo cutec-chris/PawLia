@@ -17,31 +17,12 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
+from pawlia.utils import load_json, resolve_script, save_json
+
 logger = logging.getLogger("pawlia.automation")
 
 # async def notify(user_id, message) -> None  (already LLM-formatted by Scheduler)
 NotifyFn = Callable[[str, str], Coroutine[Any, Any, None]]
-
-
-# ---------------------------------------------------------------------------
-# Data helpers
-# ---------------------------------------------------------------------------
-
-def _load_json(path: str) -> list:
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error("Failed to load %s: %s", path, e)
-        return []
-
-
-def _save_json(path: str, data: list) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def _parse_offset(offset: str) -> timedelta:
@@ -63,6 +44,14 @@ def _parse_offset(offset: str) -> timedelta:
 # Script Executor
 # ---------------------------------------------------------------------------
 
+_INTERPRETERS: Dict[str, str] = {
+    ".py": "python",
+    ".mjs": "node",
+    ".js": "node",
+    ".sh": "bash",
+}
+
+
 class ScriptExecutor:
     """Runs scripts in a subprocess and returns their output."""
 
@@ -83,16 +72,11 @@ class ScriptExecutor:
         if params:
             env["AUTOMATION_PARAMS"] = json.dumps(params, ensure_ascii=False)
 
-        # Determine interpreter
-        if script_path.endswith(".py"):
-            cmd = ["python", script_path]
-        elif script_path.endswith(".mjs") or script_path.endswith(".js"):
-            cmd = ["node", script_path]
-        elif script_path.endswith(".sh"):
-            cmd = ["bash", script_path]
-        else:
-            cmd = ["python", script_path]  # default to python
+        ext = os.path.splitext(script_path)[1]
+        interpreter = _INTERPRETERS.get(ext, "python")
+        cmd = [interpreter, script_path]
 
+        proc: Optional[asyncio.subprocess.Process] = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -110,9 +94,10 @@ class ScriptExecutor:
 
             if proc.returncode == 0:
                 return {"success": True, "output": output, "error": ""}
-            else:
-                return {"success": False, "output": output, "error": err or f"Exit code {proc.returncode}"}
+            return {"success": False, "output": output, "error": err or f"Exit code {proc.returncode}"}
         except asyncio.TimeoutError:
+            if proc:
+                proc.kill()
             return {"success": False, "output": "", "error": f"Script timed out after {ScriptExecutor.TIMEOUT}s"}
         except Exception as e:
             return {"success": False, "output": "", "error": str(e)}
@@ -132,7 +117,7 @@ class ChecklistProcessor:
     async def process_user(self, user_id: str) -> None:
         """Check all events for this user and process due checklist items."""
         events_path = os.path.join(self.session_dir, user_id, "calendar", "events.json")
-        events = _load_json(events_path)
+        events = load_json(events_path)
         if not events:
             return
 
@@ -191,8 +176,8 @@ class ChecklistProcessor:
                     continue
 
                 # Resolve script path
-                script_path = self._resolve_script(user_id, script)
-                params = item.get("params", {})
+                script_path = resolve_script(self.session_dir, user_id, script)
+                params = dict(item.get("params", {}))
                 params["event"] = {
                     "id": event.get("id"),
                     "title": event.get("title"),
@@ -222,26 +207,7 @@ class ChecklistProcessor:
                            item.get("id"), event.get("id"), item["status"])
 
         if changed:
-            _save_json(events_path, events)
-
-    def _resolve_script(self, user_id: str, script: str) -> str:
-        """Resolve a script path — check user automations dir first, then global."""
-        user_path = os.path.join(self.session_dir, user_id, "automations", script)
-        if os.path.isfile(user_path):
-            return user_path
-
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        global_path = os.path.join(pkg_dir, "scripts", script)
-        if os.path.isfile(global_path):
-            return global_path
-
-        skills_path = os.path.join(pkg_dir, "skills")
-        for skill_dir in os.listdir(skills_path) if os.path.isdir(skills_path) else []:
-            candidate = os.path.join(skills_path, skill_dir, "scripts", script)
-            if os.path.isfile(candidate):
-                return candidate
-
-        return script
+            save_json(events_path, events)
 
     @staticmethod
     def _interpolate(message: str, event: dict) -> str:
@@ -265,7 +231,7 @@ class JobRunner:
     async def process_user(self, user_id: str) -> None:
         """Check and execute due jobs for this user."""
         jobs_path = os.path.join(self.session_dir, user_id, "automations", "jobs.json")
-        jobs = _load_json(jobs_path)
+        jobs = load_json(jobs_path)
         if not jobs:
             return
 
@@ -283,8 +249,8 @@ class JobRunner:
             if not script:
                 continue
 
-            script_path = self._resolve_script(user_id, script)
-            params = job.get("params", {})
+            script_path = resolve_script(self.session_dir, user_id, script)
+            params = dict(job.get("params", {}))
             params["job_name"] = job.get("name", "")
             params["user_id"] = user_id
 
@@ -304,7 +270,7 @@ class JobRunner:
                         f"⚠️ Job '{job.get('name', '')}' fehlgeschlagen: {result['error'][:200]}")
 
         if changed:
-            _save_json(jobs_path, jobs)
+            save_json(jobs_path, jobs)
 
     @staticmethod
     def _is_due(job: dict, now: datetime) -> bool:
@@ -321,12 +287,16 @@ class JobRunner:
             return False
 
         last_run_str = job.get("last_run", "")
-        last_run = None
+        last_run: Optional[datetime] = None
         if last_run_str:
             try:
                 last_run = datetime.fromisoformat(last_run_str)
             except ValueError:
                 pass
+
+        def _not_run_recently() -> bool:
+            """True if last_run is None or was >120 s ago (dedup guard)."""
+            return last_run is None or (now - last_run).total_seconds() > 120
 
         # interval:Nm or interval:Nh
         if schedule.startswith("interval:"):
@@ -345,18 +315,12 @@ class JobRunner:
             if len(parts) != 4:
                 return False
             try:
-                dow = int(parts[1])
-                hour = int(parts[2])
-                minute = int(parts[3])
+                dow, hour, minute = int(parts[1]), int(parts[2]), int(parts[3])
             except ValueError:
                 return False
             if now.weekday() != dow:
                 return False
-            if now.hour == hour and now.minute == minute:
-                if last_run is None:
-                    return True
-                return (now - last_run).total_seconds() > 120
-            return False
+            return now.hour == hour and now.minute == minute and _not_run_recently()
 
         # monthly:DD:HH:MM
         if schedule.startswith("monthly:"):
@@ -364,18 +328,12 @@ class JobRunner:
             if len(parts) != 4:
                 return False
             try:
-                day = int(parts[1])
-                hour = int(parts[2])
-                minute = int(parts[3])
+                day, hour, minute = int(parts[1]), int(parts[2]), int(parts[3])
             except ValueError:
                 return False
             if now.day != day:
                 return False
-            if now.hour == hour and now.minute == minute:
-                if last_run is None:
-                    return True
-                return (now - last_run).total_seconds() > 120
-            return False
+            return now.hour == hour and now.minute == minute and _not_run_recently()
 
         # HH:MM — daily at that time
         try:
@@ -385,22 +343,7 @@ class JobRunner:
         except (ValueError, IndexError):
             return False
 
-        if now.hour == target_hour and now.minute == target_minute:
-            if last_run is None:
-                return True
-            return (now - last_run).total_seconds() > 120
-        return False
-
-    def _resolve_script(self, user_id: str, script: str) -> str:
-        """Resolve script path (same logic as ChecklistProcessor)."""
-        user_path = os.path.join(self.session_dir, user_id, "automations", script)
-        if os.path.isfile(user_path):
-            return user_path
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        global_path = os.path.join(pkg_dir, "scripts", script)
-        if os.path.isfile(global_path):
-            return global_path
-        return script
+        return now.hour == target_hour and now.minute == target_minute and _not_run_recently()
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +360,7 @@ class TaskReminderProcessor:
     async def process_user(self, user_id: str) -> None:
         """Check all tasks for due reminders."""
         tasks_path = os.path.join(self.session_dir, user_id, "tasks", "tasks.json")
-        tasks = _load_json(tasks_path)
+        tasks = load_json(tasks_path)
         if not tasks:
             return
 
@@ -464,7 +407,7 @@ class TaskReminderProcessor:
                     changed = True
 
         if changed:
-            _save_json(tasks_path, tasks)
+            save_json(tasks_path, tasks)
 
 
 # ---------------------------------------------------------------------------

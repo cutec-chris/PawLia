@@ -14,47 +14,10 @@ import shutil
 import subprocess
 import sys
 
-import yaml
+from pawlia.utils import collect_skill_dirs, parse_frontmatter
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("install_skill_deps")
-
-
-def _parse_frontmatter(skill_md: str) -> dict:
-    try:
-        with open(skill_md, encoding="utf-8") as f:
-            content = f.read()
-        parts = content.split("---", 2)
-        if len(parts) < 3:
-            return {}
-        return yaml.safe_load(parts[1]) or {}
-    except Exception:
-        return {}
-
-
-def _collect_skill_dirs(skills_dir: str) -> list:
-    """Collect skill directories: direct children + skills/user/*."""
-    candidates = []
-    if not os.path.isdir(skills_dir):
-        return candidates
-
-    for entry in os.listdir(skills_dir):
-        entry_path = os.path.join(skills_dir, entry)
-        if not os.path.isdir(entry_path):
-            continue
-        if os.path.isfile(os.path.join(entry_path, "SKILL.md")):
-            candidates.append(entry_path)
-
-    user_dir = os.path.join(skills_dir, "user")
-    if os.path.isdir(user_dir):
-        for entry in os.listdir(user_dir):
-            entry_path = os.path.join(user_dir, entry)
-            if os.path.isdir(entry_path) and os.path.isfile(
-                os.path.join(entry_path, "SKILL.md")
-            ):
-                candidates.append(entry_path)
-
-    return candidates
 
 
 def install_all_skill_deps(skills_dir: str) -> None:
@@ -62,7 +25,7 @@ def install_all_skill_deps(skills_dir: str) -> None:
         logger.info("No skills directory at %s", skills_dir)
         return
 
-    for skill_path in _collect_skill_dirs(skills_dir):
+    for skill_path in collect_skill_dirs(skills_dir):
         skill_name = os.path.basename(skill_path)
 
         # ── pip: requirements.txt ──
@@ -80,7 +43,7 @@ def install_all_skill_deps(skills_dir: str) -> None:
 
         # ── npm: openclaw.install steps ──
         skill_md = os.path.join(skill_path, "SKILL.md")
-        fm = _parse_frontmatter(skill_md)
+        fm = parse_frontmatter(skill_md) or {}
         steps = fm.get("metadata", {}).get("openclaw", {}).get("install", [])
         if not steps:
             continue

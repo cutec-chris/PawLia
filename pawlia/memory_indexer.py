@@ -11,8 +11,8 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Optional
 
 logger = logging.getLogger("pawlia.memory_indexer")
@@ -209,11 +209,9 @@ class MemoryIndexer:
         fail_time = user_fails.get(fname)
         if fail_time is None:
             return False
-        import time
         return (time.time() - fail_time) < RETRY_COOLDOWN
 
     def _mark_failed(self, user_id: str, fname: str):
-        import time
         self._failures.setdefault(user_id, {})[fname] = time.time()
 
     def _clear_failure(self, user_id: str, fname: str):

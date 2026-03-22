@@ -2,9 +2,9 @@
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-import yaml
+from pawlia.utils import collect_skill_dirs, parse_frontmatter
 
 
 logger = logging.getLogger(__name__)
@@ -79,29 +79,10 @@ class SkillLoader:
             logger.debug("Skills directory not found: %s", skills_dir)
             return skills
 
-        # Collect candidate directories: direct children + skills/user/*
-        candidates: List[str] = []
-        for entry in os.listdir(skills_dir):
-            entry_path = os.path.join(skills_dir, entry)
-            if not os.path.isdir(entry_path):
-                continue
-            if os.path.isfile(os.path.join(entry_path, "SKILL.md")):
-                candidates.append(entry_path)
-
-        # User-provided skills live in skills/user/
-        user_dir = os.path.join(skills_dir, "user")
-        if os.path.isdir(user_dir):
-            for sub in os.listdir(user_dir):
-                sub_path = os.path.join(user_dir, sub)
-                if os.path.isdir(sub_path) and os.path.isfile(
-                    os.path.join(sub_path, "SKILL.md")
-                ):
-                    candidates.append(sub_path)
-
-        for skill_path in candidates:
+        for skill_path in collect_skill_dirs(skills_dir):
             skill_md = os.path.join(skill_path, "SKILL.md")
             try:
-                metadata = _parse_frontmatter(skill_md)
+                metadata = parse_frontmatter(skill_md)
                 if not metadata or not metadata.get("name"):
                     continue
 
@@ -127,31 +108,3 @@ class SkillLoader:
                 logger.error("Error loading skill %s: %s", skill_path, e)
 
         return skills
-
-
-def _parse_frontmatter(skill_md_path: str) -> Optional[Dict[str, Any]]:
-    """Parse YAML frontmatter from a SKILL.md file."""
-    with open(skill_md_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    lines = content.split("\n")
-    frontmatter_lines: List[str] = []
-    in_frontmatter = False
-
-    for line in lines:
-        if line.strip() == "---":
-            if in_frontmatter:
-                break
-            in_frontmatter = True
-            continue
-        if in_frontmatter:
-            frontmatter_lines.append(line)
-
-    if not frontmatter_lines:
-        return None
-
-    try:
-        return yaml.safe_load("\n".join(frontmatter_lines))
-    except Exception as e:
-        logger.error("Error parsing YAML in %s: %s", skill_md_path, e)
-        return None

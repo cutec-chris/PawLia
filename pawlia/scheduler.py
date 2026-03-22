@@ -7,7 +7,6 @@ callbacks to deliver messages proactively.
 """
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -15,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from pawlia.automation import ChecklistProcessor, JobRunner, TaskReminderProcessor
+from pawlia.utils import load_json, save_json
 
 CHECK_INTERVAL = 60  # seconds between checks
 EVENT_REMINDER_MINUTES = 15  # notify this many minutes before an event
@@ -318,7 +318,7 @@ class Scheduler:
 
     async def _check_reminders(self, user_id: str, path: str) -> None:
         """Fire due reminders and handle recurrence."""
-        reminders = _load_json(path)
+        reminders = load_json(path)
         if not reminders:
             return
 
@@ -350,11 +350,11 @@ class Scheduler:
                 changed = True
 
         if changed:
-            _save_json(path, reminders)
+            save_json(path, reminders)
 
     async def _check_events(self, user_id: str, path: str) -> None:
         """Notify about upcoming events within the reminder window."""
-        events = _load_json(path)
+        events = load_json(path)
         if not events:
             return
 
@@ -384,7 +384,7 @@ class Scheduler:
 
         # Persist the _notified flags
         if any(e.get("_notified") for e in events):
-            _save_json(path, events)
+            save_json(path, events)
 
     async def _notify(self, user_id: str, message: str) -> None:
         """Send a notification to all registered interfaces.
@@ -427,18 +427,3 @@ def _next_occurrence(fire_at: datetime, recurrence: str) -> datetime:
     return fire_at + timedelta(days=1)
 
 
-def _load_json(path: str) -> list:
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error("Failed to load %s: %s", path, e)
-        return []
-
-
-def _save_json(path: str, data: list) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)

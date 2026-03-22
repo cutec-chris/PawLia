@@ -1555,27 +1555,27 @@ def test_check_events(tmp: str):
 # ═══════════════════════════════════════════════════════════════
 
 def test_load_save_json(tmp: str):
-    section("Scheduler _load_json / _save_json")
-    from pawlia.scheduler import _load_json, _save_json
+    section("load_json / save_json (utils)")
+    from pawlia.utils import load_json, save_json
 
     os.makedirs(tmp, exist_ok=True)
     path = os.path.join(tmp, "test.json")
 
-    check("Missing file -> []", _load_json(path) == [])
+    check("Missing file -> []", load_json(path) == [])
 
-    _save_json(path, [{"a": 1}, {"b": 2}])
-    loaded = _load_json(path)
+    save_json(path, [{"a": 1}, {"b": 2}])
+    loaded = load_json(path)
     check("Saved and loaded", len(loaded) == 2)
     check("Content preserved", loaded[0]["a"] == 1)
 
     # Corrupt JSON
     with open(path, "w") as f:
         f.write("not json {{{")
-    check("Corrupt file -> []", _load_json(path) == [])
+    check("Corrupt file -> []", load_json(path) == [])
 
     # Unicode
-    _save_json(path, [{"text": "Umlaute: aou"}])
-    loaded2 = _load_json(path)
+    save_json(path, [{"text": "Umlaute: aou"}])
+    loaded2 = load_json(path)
     check("Unicode preserved", loaded2[0]["text"] == "Umlaute: aou")
 
 

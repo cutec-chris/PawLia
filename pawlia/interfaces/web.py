@@ -10,17 +10,17 @@ Config (under ``interfaces.web``):
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
 import secrets
-from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional
-
-import io
 import shutil
 import tempfile
+import time
 import zipfile
+from collections import defaultdict
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import jinja2
 import yaml
@@ -51,25 +51,15 @@ _jinja_env = jinja2.Environment(
 
 def _scan_skills(skill_config: dict) -> list:
     """Scan ALL skills (built-in + user), regardless of config completeness."""
-    from pawlia.skills.loader import _parse_frontmatter
+    from pawlia.utils import collect_skill_dirs, parse_frontmatter
 
-    candidates: List[tuple] = []
-    if os.path.isdir(_SKILLS_DIR):
-        for entry in os.listdir(_SKILLS_DIR):
-            p = os.path.join(_SKILLS_DIR, entry)
-            if os.path.isdir(p) and os.path.isfile(os.path.join(p, "SKILL.md")):
-                candidates.append((p, False))
-
-    if os.path.isdir(_USER_SKILLS_DIR):
-        for entry in os.listdir(_USER_SKILLS_DIR):
-            p = os.path.join(_USER_SKILLS_DIR, entry)
-            if os.path.isdir(p) and os.path.isfile(os.path.join(p, "SKILL.md")):
-                candidates.append((p, True))
+    all_dirs = collect_skill_dirs(_SKILLS_DIR)
 
     result = []
-    for skill_path, is_user in candidates:
+    for skill_path in all_dirs:
+        is_user = skill_path.startswith(os.path.abspath(_USER_SKILLS_DIR) + os.sep)
         try:
-            fm = _parse_frontmatter(os.path.join(skill_path, "SKILL.md"))
+            fm = parse_frontmatter(os.path.join(skill_path, "SKILL.md"))
             if not fm or not fm.get("name"):
                 continue
             name = fm["name"]
@@ -250,8 +240,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
             thread_msg = message.strip()[len("/thread"):].strip()
             if not thread_msg:
                 return web.json_response({"response": "_Verwendung: /thread <Nachricht>_"})
-            import time as _time
-            new_thread = f"web_{int(_time.time())}"
+            new_thread = f"web_{int(time.time())}"
             agent = agent_cache.get(user_id)
             app.scheduler.acquire_llm()
             try:
@@ -426,8 +415,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
             if not skill_root:
                 return web.json_response({"error": "Keine SKILL.md im ZIP gefunden"}, status=400)
 
-            from pawlia.skills.loader import _parse_frontmatter
-            fm = _parse_frontmatter(os.path.join(skill_root, "SKILL.md"))
+            from pawlia.utils import parse_frontmatter
+            fm = parse_frontmatter(os.path.join(skill_root, "SKILL.md"))
             if not fm or not fm.get("name"):
                 return web.json_response({"error": "SKILL.md hat keinen Namen"}, status=400)
 
