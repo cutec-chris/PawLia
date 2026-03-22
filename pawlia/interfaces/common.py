@@ -1,5 +1,6 @@
 """Shared utilities for PawLia interfaces."""
 
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -140,8 +141,6 @@ def format_status(status: Dict[str, Any]) -> str:
     lines.append(f"**Idle:** {m}m {s}s")
     return "\n".join(lines)
 
-
-import re
 
 def md_to_text(text: str) -> str:
     """Convert simple markdown to plain text."""

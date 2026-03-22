@@ -30,6 +30,7 @@ Config layout (YAML)::
     #     # language: de
 """
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -129,8 +130,6 @@ async def _transcribe_api(audio_bytes: bytes, provider: str, cfg: Dict, mime: st
 
 async def _transcribe_local(audio_bytes: bytes, cfg: Dict, mime: str) -> Optional[str]:
     """Transcribe using faster-whisper locally (runs in thread pool)."""
-    import asyncio
-
     model_size   = cfg.get("model", "base")
     device       = cfg.get("device", "cpu")
     compute_type = cfg.get("compute_type", "int8")
@@ -157,7 +156,7 @@ async def _transcribe_local(audio_bytes: bytes, cfg: Dict, mime: str) -> Optiona
         finally:
             os.unlink(tmp_path)
 
-    return await asyncio.get_event_loop().run_in_executor(None, _run)
+    return await asyncio.to_thread(_run)
 
 
 # ---------------------------------------------------------------------------
