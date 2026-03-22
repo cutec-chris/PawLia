@@ -60,10 +60,26 @@ def _grey(html: str) -> str:
 
 
 def _status_edit(event_id: str, new_body: str, new_html: str) -> dict:
-    new_content = {"msgtype": "m.text", "body": new_body,
-                   "format": "org.matrix.custom.html", "formatted_body": new_html}
-    return {**new_content, "body": f"* {new_body}", "m.new_content": new_content,
-            "m.relates_to": {"rel_type": "m.replace", "event_id": event_id}}
+    """Build an m.replace (edit) event.
+
+    The outer body is plain text only — some clients (FluffyChat) render the
+    outer body as a fallback even when they also apply the edit, causing the
+    HTML-styled outer formatted_body to appear as an empty/invisible message.
+    Keeping the outer body as plain text ensures a visible fallback.
+    m.new_content carries the full HTML for clients (Element) that apply it.
+    """
+    new_content = {
+        "msgtype": "m.text",
+        "body": new_body,
+        "format": "org.matrix.custom.html",
+        "formatted_body": new_html,
+    }
+    return {
+        "msgtype": "m.text",
+        "body": f"* {new_body}",
+        "m.new_content": new_content,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": event_id},
+    }
 
 
 def _make_status(skill_name: str, query: str) -> dict:
