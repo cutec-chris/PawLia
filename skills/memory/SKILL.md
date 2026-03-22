@@ -18,6 +18,14 @@ metadata:
     - embedding_model
     - embedding_dim
     - embedding_host
+  optional_config:
+    - rag_provider           # defaults to embedding_provider
+    - rag_model              # LLM for RAG entity extraction (default: qwen3.5:latest)
+    - rag_numctx             # LLM context window (default: 4096)
+    - rag_timeout            # LLM timeout in seconds (default: 600)
+    - rag_embedding_timeout  # embedding timeout in seconds (default: 120)
+    - rag_max_async_llm      # max parallel LLM requests (default: 2)
+    - rag_max_async_embedding # max parallel embedding requests (default: 4)
 ---
 
 # Memory Skill
