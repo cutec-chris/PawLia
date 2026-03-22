@@ -133,6 +133,8 @@ async def _get_rag(project_path: pathlib.Path) -> "lightrag.LightRAG":
             enable_llm_cache=False,
             llm_model_kwargs={},
             embedding_func=_build_embedding_func(CFG),
+            llm_model_max_async=int(CFG.get("rag_max_async_llm", 2)),
+            embedding_func_max_async=int(CFG.get("rag_max_async_embedding", 4)),
         )
         await _rags[key].initialize_storages()
         await lightrag.kg.shared_storage.initialize_pipeline_status()
