@@ -283,6 +283,10 @@ class MemoryManager:
             parts.append(f"## Memory\n{session.user_memory.strip()}")
 
         parts.append(
+            f"Current date and time: {datetime.now().strftime('%A, %d. %B %Y %H:%M')}"
+        )
+
+        parts.append(
             "IMPORTANT: You have skills (tools) available. "
             "When a user asks for information that a skill can provide "
             "(routes, train connections, searches, file operations, etc.), "
