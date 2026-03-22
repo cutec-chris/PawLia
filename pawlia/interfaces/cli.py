@@ -1,9 +1,10 @@
 """CLI interface for PawLia."""
 
 import asyncio
+import logging
 import signal
 import sys
-import logging
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -101,7 +102,6 @@ async def start_cli(app: "App") -> None:
             if not message:
                 print("Verwendung: /thread <Nachricht>\n")
                 continue
-            import time
             thread_id = f"cli_{int(time.time())}"
             active_fut = asyncio.current_task()
             app.scheduler.acquire_llm()
