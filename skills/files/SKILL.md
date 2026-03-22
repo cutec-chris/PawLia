@@ -15,20 +15,20 @@ Path traversal outside the workspace is blocked by the script.
 ## IMPORTANT
 
 Always use the **bash tool** to run the commands below.
-Always pass `--user-id` and `--session-dir` from the context.
+The `--user-id` and `--session-dir` arguments are automatically provided via environment variables — do NOT pass them manually.
 
 ---
 
 ## List files
 
 ```
-python <scripts_dir>/files.py list --user-id <user_id> --session-dir "<session_dir>"
+python <scripts_dir>/files.py list
 ```
 
 ## Read a file
 
 ```
-python <scripts_dir>/files.py read --user-id <user_id> --session-dir "<session_dir>" --filename "<name>"
+python <scripts_dir>/files.py read --filename "<name>"
 ```
 
 ## Write a file
@@ -36,13 +36,13 @@ python <scripts_dir>/files.py read --user-id <user_id> --session-dir "<session_d
 **Option A — short content (single line or simple text):** use `--content`:
 
 ```
-python <scripts_dir>/files.py write --user-id <user_id> --session-dir "<session_dir>" --filename "<name>" --content "content here"
+python <scripts_dir>/files.py write --filename "<name>" --content "content here"
 ```
 
 **Option B — multiline content:** pipe content via stdin using a heredoc (works on all platforms):
 
 ```
-python <scripts_dir>/files.py write --user-id <user_id> --session-dir "<session_dir>" --filename "<name>" << 'EOF'
+python <scripts_dir>/files.py write --filename "<name>" << 'EOF'
 line 1
 line 2
 line 3
@@ -54,7 +54,7 @@ Subdirectories are supported in filenames (e.g. `notes/today.txt`).
 ## Delete a file
 
 ```
-python <scripts_dir>/files.py delete --user-id <user_id> --session-dir "<session_dir>" --filename "<name>"
+python <scripts_dir>/files.py delete --filename "<name>"
 ```
 
 ## Output

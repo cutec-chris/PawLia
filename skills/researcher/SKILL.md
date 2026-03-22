@@ -35,30 +35,29 @@ metadata:
 
 ## How to use
 
-The query contains a researcher command. Run it via the Bash tool:
+The query contains a researcher command. Run it via the Bash tool.
+The user ID is automatically provided via the `PAWLIA_USER_ID` environment variable — do NOT pass it manually.
 
 ```
-python <scripts_dir>/researcher.py <user_id> <command> [args...]
+python <scripts_dir>/researcher.py <command> [args...]
 ```
 
 ### Commands
 
 | Command | Bash call | Description |
 |---------|-----------|-------------|
-| `create <name> <desc>` | `python <scripts_dir>/researcher.py <user_id> create "<name>" "<description>"` | Create a new research project |
-| `list` | `python <scripts_dir>/researcher.py <user_id> list` | List all projects |
-| `add <project> <url> [depth]` | `python <scripts_dir>/researcher.py <user_id> add "<project>" "<url>" [depth]` | Scrape URL and index it (depth for recursive crawling) |
-| `query <project> <question>` | `python <scripts_dir>/researcher.py <user_id> query "<project>" "<question>"` | Query the project knowledge base |
-| `delete <project>` | `python <scripts_dir>/researcher.py <user_id> delete "<project>"` | Delete a project |
-| `rename <old> <new>` | `python <scripts_dir>/researcher.py <user_id> rename "<old>" "<new>"` | Rename a project |
+| `create <name> <desc>` | `python <scripts_dir>/researcher.py create "<name>" "<description>"` | Create a new research project |
+| `list` | `python <scripts_dir>/researcher.py list` | List all projects |
+| `add <project> <url> [depth]` | `python <scripts_dir>/researcher.py add "<project>" "<url>" [depth]` | Scrape URL and index it (depth for recursive crawling) |
+| `query <project> <question>` | `python <scripts_dir>/researcher.py query "<project>" "<question>"` | Query the project knowledge base |
+| `delete <project>` | `python <scripts_dir>/researcher.py delete "<project>"` | Delete a project |
+| `rename <old> <new>` | `python <scripts_dir>/researcher.py rename "<old>" "<new>"` | Rename a project |
 
 ## Step-by-step instructions
 
 1. Parse the query to identify the command and arguments.
-2. Replace `<scripts_dir>` with the actual scripts directory path.
-3. Replace `<user_id>` with the actual user ID.
-4. Run the command using the **Bash** tool.
-5. Return the output to the user.
+2. Run the command using the **Bash** tool.
+3. Return the output to the user.
 
 ## Error handling
 

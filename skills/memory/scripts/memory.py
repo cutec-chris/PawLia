@@ -26,7 +26,7 @@ import yaml
 _SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _SKILL_DIR = _SCRIPT_DIR.parent
 _PROJECT_ROOT = _SKILL_DIR.parent.parent  # thalia/
-_SESSION_DIR = _PROJECT_ROOT / "session"
+_SESSION_DIR = pathlib.Path(os.environ["PAWLIA_SESSION_DIR"]) if "PAWLIA_SESSION_DIR" in os.environ else _PROJECT_ROOT / "session"
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 
@@ -206,13 +206,24 @@ async def cmd_status(user_id: str):
 # ---------------------------------------------------------------------------
 
 async def main():
-    if len(sys.argv) < 3:
-        print("Usage: memory.py <user_id> <command> [args...]", file=sys.stderr)
-        sys.exit(1)
+    # Support env-var fallback for user_id to prevent LLM hallucination
+    env_user_id = os.environ.get("PAWLIA_USER_ID")
 
-    user_id = sys.argv[1]
-    command = sys.argv[2]
-    args = sys.argv[3:]
+    if env_user_id and len(sys.argv) >= 2 and sys.argv[1] in (
+        "search", "index", "status"
+    ):
+        # Called without user_id positional arg — use env var
+        user_id = env_user_id
+        command = sys.argv[1]
+        args = sys.argv[2:]
+    elif len(sys.argv) >= 3:
+        user_id = sys.argv[1]
+        command = sys.argv[2]
+        args = sys.argv[3:]
+    else:
+        print("Usage: memory.py [<user_id>] <command> [args...]", file=sys.stderr)
+        print("       (user_id can be set via PAWLIA_USER_ID env var)", file=sys.stderr)
+        sys.exit(1)
 
     if command == "search":
         if not args:
