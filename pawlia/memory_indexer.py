@@ -35,6 +35,9 @@ _patch_tiktoken()
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 
 
+RETRY_COOLDOWN = 3600  # seconds before retrying a failed file (1 hour)
+
+
 class MemoryIndexer:
     """Indexes daily chat logs per user into a LightRAG instance."""
 
@@ -50,6 +53,8 @@ class MemoryIndexer:
         )
         # Per-user RAG instances (lazy)
         self._rags: Dict[str, object] = {}
+        # Track failed indexing attempts: {user_id: {fname: timestamp}}
+        self._failures: Dict[str, Dict[str, float]] = {}
 
         if not self._enabled:
             logger.debug("Memory indexer disabled (skill-config.memory not configured)")
@@ -114,7 +119,7 @@ class MemoryIndexer:
                 return await lightrag.llm.ollama.ollama_model_complete(
                     prompt, system_prompt=system_prompt,
                     host=host,
-                    options={"num_ctx": int(cfg.get("rag_numctx", 4096))},
+                    options={"num_ctx": int(cfg.get("rag_numctx", 4096)), "think": False},
                     **kw,
                 )
             return _complete
@@ -149,7 +154,8 @@ class MemoryIndexer:
             llm_model_kwargs={},
             embedding_func=self._build_embedding_func(),
             default_llm_timeout=int(self._cfg.get("rag_timeout", 600)),
-            llm_model_max_async=1,
+            llm_model_max_async=int(self._cfg.get("rag_max_async_llm", 2)),
+            embedding_func_max_async=int(self._cfg.get("rag_max_async_embedding", 4)),
         )
         await rag.initialize_storages()
         await lightrag.kg.shared_storage.initialize_pipeline_status()
@@ -178,6 +184,27 @@ class MemoryIndexer:
     def _save_tracked(self, user_id: str, data: dict):
         with open(self._tracker_path(user_id), "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+
+    # ------------------------------------------------------------------
+    # Failure cooldown
+    # ------------------------------------------------------------------
+
+    def _is_on_cooldown(self, user_id: str, fname: str) -> bool:
+        """Return True if a previous failure is still within the cooldown window."""
+        user_fails = self._failures.get(user_id, {})
+        fail_time = user_fails.get(fname)
+        if fail_time is None:
+            return False
+        import time
+        return (time.time() - fail_time) < RETRY_COOLDOWN
+
+    def _mark_failed(self, user_id: str, fname: str):
+        import time
+        self._failures.setdefault(user_id, {})[fname] = time.time()
+
+    def _clear_failure(self, user_id: str, fname: str):
+        user_fails = self._failures.get(user_id, {})
+        user_fails.pop(fname, None)
 
     # ------------------------------------------------------------------
     # Index
@@ -219,6 +246,10 @@ class MemoryIndexer:
             if fname in tracked and tracked[fname] == mtime:
                 continue
 
+            if self._is_on_cooldown(user_id, fname):
+                logger.debug("Skipping %s/%s (on cooldown after previous failure)", user_id, fname)
+                continue
+
             try:
                 with open(log_path, encoding="utf-8") as f:
                     content = f.read().strip()
@@ -245,9 +276,12 @@ class MemoryIndexer:
 
                 tracked[fname] = mtime
                 changed = True
+                self._clear_failure(user_id, fname)
                 logger.info("Memory indexed: %s/%s", user_id, fname)
             except Exception as e:
-                logger.error("Memory indexing failed for %s/%s: %s", user_id, fname, e)
+                self._mark_failed(user_id, fname)
+                logger.error("Memory indexing failed for %s/%s (retry in %dh): %s",
+                             user_id, fname, RETRY_COOLDOWN // 3600, e)
 
         if changed:
             self._save_tracked(user_id, tracked)
