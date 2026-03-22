@@ -32,29 +32,29 @@ metadata:
 
 ## How to use
 
-The query is either a search question or a management command. Run via the Bash tool:
+The query is either a search question or a management command. Run via the Bash tool.
+The user ID is automatically provided via the `PAWLIA_USER_ID` environment variable — do NOT pass it manually.
 
 ```
-python <scripts_dir>/memory.py <user_id> search "<question>"
-python <scripts_dir>/memory.py <user_id> index
-python <scripts_dir>/memory.py <user_id> status
+python <scripts_dir>/memory.py search "<question>"
+python <scripts_dir>/memory.py index
+python <scripts_dir>/memory.py status
 ```
 
 ### Commands
 
 | Command | Bash call | Description |
 |---------|-----------|-------------|
-| search | `python <scripts_dir>/memory.py <user_id> search "<question>"` | Semantic search across all past conversations |
-| index | `python <scripts_dir>/memory.py <user_id> index` | Index any new/updated daily chat logs |
-| status | `python <scripts_dir>/memory.py <user_id> status` | Show how many days are indexed |
+| search | `python <scripts_dir>/memory.py search "<question>"` | Semantic search across all past conversations |
+| index | `python <scripts_dir>/memory.py index` | Index any new/updated daily chat logs |
+| status | `python <scripts_dir>/memory.py status` | Show how many days are indexed |
 
 ## Step-by-step instructions
 
 1. Determine if the query is a command (`index`, `status`) or a search question.
 2. For search questions, use the `search` command with the user's question.
-3. Replace `<scripts_dir>` and `<user_id>` with actual values.
-4. Run the command using the **Bash** tool.
-5. Return the result — for searches, present the relevant information naturally.
+3. Run the command using the **Bash** tool.
+4. Return the result — for searches, present the relevant information naturally.
 
 ## Important
 

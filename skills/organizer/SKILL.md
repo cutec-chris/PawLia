@@ -17,7 +17,7 @@ The single entry point for ALL time-related and planning operations:
 
 ## Instructions
 
-Run the script with the appropriate subcommand. Always pass `--user-id` and `--session-dir` from the context.
+Run the script with the appropriate subcommand. The `--user-id` and `--session-dir` arguments are automatically provided via environment variables — do NOT pass them manually.
 
 ### Simple Reminders
 
@@ -25,7 +25,7 @@ For quick reminders like "remind me in 10 minutes" or "remind me tomorrow at 9".
 
 Add a reminder:
 ```
-python <scripts_dir>/organizer.py add-reminder --user-id <user_id> --session-dir "<session_dir>" --fire-at "<time>" --message "<message>" [--label "<label>"] [--recurrence none|daily|weekly|monthly]
+python <scripts_dir>/organizer.py add-reminder --fire-at "<time>" --message "<message>" [--label "<label>"] [--recurrence none|daily|weekly|monthly]
 ```
 
 - `--fire-at`: ISO8601 datetime or relative time: `"10m"`, `"2h"`, `"1d"`
@@ -33,19 +33,19 @@ python <scripts_dir>/organizer.py add-reminder --user-id <user_id> --session-dir
 
 List pending reminders:
 ```
-python <scripts_dir>/organizer.py list-reminders --user-id <user_id> --session-dir "<session_dir>"
+python <scripts_dir>/organizer.py list-reminders
 ```
 
 Delete a reminder:
 ```
-python <scripts_dir>/organizer.py delete-reminder --user-id <user_id> --session-dir "<session_dir>" --reminder-id "<id>"
+python <scripts_dir>/organizer.py delete-reminder --reminder-id "<id>"
 ```
 
 ### Calendar
 
 Add an event:
 ```
-python <scripts_dir>/organizer.py add-event --user-id <user_id> --session-dir "<session_dir>" --title "<title>" --start "<ISO8601>" [--end "<ISO8601>"] [--description "<desc>"] [--location "<loc>"] [--checklist '<JSON>']
+python <scripts_dir>/organizer.py add-event --title "<title>" --start "<ISO8601>" [--end "<ISO8601>"] [--description "<desc>"] [--location "<loc>"] [--checklist '<JSON>']
 ```
 
 The `--checklist` parameter accepts a JSON array of automation items. Each item can reference a script that the system executes automatically at the right time — no LLM needed at runtime.
@@ -87,19 +87,19 @@ The `--checklist` parameter accepts a JSON array of automation items. Each item 
 
 List events:
 ```
-python <scripts_dir>/organizer.py list-events --user-id <user_id> --session-dir "<session_dir>" [--limit <n>]
+python <scripts_dir>/organizer.py list-events [--limit <n>]
 ```
 
 Delete an event:
 ```
-python <scripts_dir>/organizer.py delete-event --user-id <user_id> --session-dir "<session_dir>" --event-id "<id>"
+python <scripts_dir>/organizer.py delete-event --event-id "<id>"
 ```
 
 ### Tasks
 
 Add a task:
 ```
-python <scripts_dir>/organizer.py add-task --user-id <user_id> --session-dir "<session_dir>" --title "<title>" [--due-date "YYYY-MM-DD"] [--priority high|medium|low] [--description "<desc>"] [--reminders '<JSON>']
+python <scripts_dir>/organizer.py add-task --title "<title>" [--due-date "YYYY-MM-DD"] [--priority high|medium|low] [--description "<desc>"] [--reminders '<JSON>']
 ```
 
 The `--reminders` parameter accepts a JSON array of reminder rules. The system fires them automatically based on the due date.
@@ -123,17 +123,17 @@ The `--reminders` parameter accepts a JSON array of reminder rules. The system f
 
 List tasks:
 ```
-python <scripts_dir>/organizer.py list-tasks --user-id <user_id> --session-dir "<session_dir>" [--status pending|completed|all] [--limit <n>]
+python <scripts_dir>/organizer.py list-tasks [--status pending|completed|all] [--limit <n>]
 ```
 
 Complete a task:
 ```
-python <scripts_dir>/organizer.py complete-task --user-id <user_id> --session-dir "<session_dir>" --task-id "<id>"
+python <scripts_dir>/organizer.py complete-task --task-id "<id>"
 ```
 
 Delete a task:
 ```
-python <scripts_dir>/organizer.py delete-task --user-id <user_id> --session-dir "<session_dir>" --task-id "<id>"
+python <scripts_dir>/organizer.py delete-task --task-id "<id>"
 ```
 
 ### Scheduled Jobs (Automation)
@@ -142,7 +142,7 @@ For recurring automated tasks ("every day at 16:00 create a report"), first writ
 
 Add a job:
 ```
-python <scripts_dir>/organizer.py add-job --user-id <user_id> --session-dir "<session_dir>" --name "<name>" --script "<script_path>" --schedule "<schedule>" [--params '<JSON>'] [--no-notify]
+python <scripts_dir>/organizer.py add-job --name "<name>" --script "<script_path>" --schedule "<schedule>" [--params '<JSON>'] [--no-notify]
 ```
 
 **Schedule formats:**
@@ -151,24 +151,24 @@ python <scripts_dir>/organizer.py add-job --user-id <user_id> --session-dir "<se
 - `"interval:2h"` — every 2 hours
 
 **Workflow for creating a scheduled job:**
-1. Write the automation script to `session/<user_id>/automations/<script_name>.py`
+1. Write the automation script to the user's automations directory
 2. The script receives params via `AUTOMATION_PARAMS` env var
 3. The script's stdout becomes the notification message
 4. Register the job with `add-job`
 
 List jobs:
 ```
-python <scripts_dir>/organizer.py list-jobs --user-id <user_id> --session-dir "<session_dir>"
+python <scripts_dir>/organizer.py list-jobs
 ```
 
 Delete a job:
 ```
-python <scripts_dir>/organizer.py delete-job --user-id <user_id> --session-dir "<session_dir>" --job-id "<id>"
+python <scripts_dir>/organizer.py delete-job --job-id "<id>"
 ```
 
 Toggle a job (enable/disable):
 ```
-python <scripts_dir>/organizer.py toggle-job --user-id <user_id> --session-dir "<session_dir>" --job-id "<id>"
+python <scripts_dir>/organizer.py toggle-job --job-id "<id>"
 ```
 
 ## Output

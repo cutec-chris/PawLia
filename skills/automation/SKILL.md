@@ -17,14 +17,12 @@ When the user wants something to happen automatically or on a schedule, follow t
 
 ### Step 1: Write the automation script
 
-Write a Python script to the user's automations directory:
+Write a Python script to the user's automations directory.
+Use the files skill or bash tool to write the script to the `automations/` subdirectory in the user's workspace.
 
-```
-session/<user_id>/automations/<script_name>.py
-```
-
-Use the bash tool to write the file. The script:
+The script:
 - Receives parameters via `AUTOMATION_PARAMS` env var (JSON string)
+- Receives user context via `PAWLIA_USER_ID` and `PAWLIA_SESSION_DIR` env vars
 - Should print its result to stdout (this becomes the notification message)
 - Exit code 0 = success, non-zero = failure
 - Keep output concise (1-5 lines)
@@ -34,9 +32,8 @@ Use the bash tool to write the file. The script:
 import json
 import os
 
-session_dir = os.environ.get("AUTOMATION_SESSION_DIR", "session")
-params = json.loads(os.environ.get("AUTOMATION_PARAMS", "{}"))
-user_id = params.get("user_id", "")
+session_dir = os.environ.get("PAWLIA_SESSION_DIR", "session")
+user_id = os.environ.get("PAWLIA_USER_ID", "")
 
 tasks_path = os.path.join(session_dir, user_id, "tasks", "tasks.json")
 if not os.path.exists(tasks_path):
@@ -58,9 +55,7 @@ else:
 ```
 
 **IMPORTANT:**
-- The session directory is available at: `<session_dir>`
-- The user ID is: `<user_id>`
-- Use these values directly in the script, not as placeholders
+- Always use `os.environ.get("PAWLIA_USER_ID")` and `os.environ.get("PAWLIA_SESSION_DIR")` in scripts
 - Scripts must be self-contained (no imports from pawlia)
 - Scripts can read JSON files from the session directory for data
 
@@ -70,8 +65,6 @@ Use the organizer script to register the job:
 
 ```bash
 python <scripts_dir>/../organizer/scripts/organizer.py add-job \
-  --user-id <user_id> \
-  --session-dir "<session_dir>" \
   --name "<descriptive name>" \
   --script "<script_filename>.py" \
   --schedule "<schedule>"
@@ -88,17 +81,17 @@ python <scripts_dir>/../organizer/scripts/organizer.py add-job \
 
 List jobs:
 ```bash
-python <scripts_dir>/../organizer/scripts/organizer.py list-jobs --user-id <user_id> --session-dir "<session_dir>"
+python <scripts_dir>/../organizer/scripts/organizer.py list-jobs
 ```
 
 Delete a job:
 ```bash
-python <scripts_dir>/../organizer/scripts/organizer.py delete-job --user-id <user_id> --session-dir "<session_dir>" --job-id "<id>"
+python <scripts_dir>/../organizer/scripts/organizer.py delete-job --job-id "<id>"
 ```
 
 Toggle a job (enable/disable):
 ```bash
-python <scripts_dir>/../organizer/scripts/organizer.py toggle-job --user-id <user_id> --session-dir "<session_dir>" --job-id "<id>"
+python <scripts_dir>/../organizer/scripts/organizer.py toggle-job --job-id "<id>"
 ```
 
 ## Output
