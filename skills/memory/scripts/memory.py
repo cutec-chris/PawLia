@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Memory skill — query long-term conversation memory via LightRAG.
+"""Memory skill — query long-term conversation memory via the configured RAG backend.
 
 Indexing is handled automatically by the scheduler. This script is the
 query interface and provides manual index/status commands for debugging.
@@ -30,6 +30,8 @@ _SESSION_DIR = pathlib.Path(os.environ["PAWLIA_SESSION_DIR"]) if "PAWLIA_SESSION
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 
+sys.path.insert(0, str(_PROJECT_ROOT))
+
 
 def _load_skill_config() -> dict:
     for candidate in (_PROJECT_ROOT / "config.yaml", _PROJECT_ROOT / "config.yml"):
@@ -44,8 +46,9 @@ def _load_chat_model() -> dict:
     """Return {provider, model, host} for the active chat model from main config.
 
     Resolves agents.chat (or agents.default) → models.* → providers.* so that
-    memory queries use whatever model is currently loaded in Ollama instead of
+    memory queries reuse whatever model is currently loaded in Ollama instead of
     forcing a separate rag_model to be loaded.
+    Only used by the LightRAG backend; mem0 uses its own LLM at insert time.
     """
     for candidate in (_PROJECT_ROOT / "config.yaml", _PROJECT_ROOT / "config.yml"):
         if candidate.is_file():
@@ -61,7 +64,6 @@ def _load_chat_model() -> dict:
             api_base = cfg.get("providers", {}).get(provider_name, {}).get(
                 "apiBase", "http://localhost:11434/v1"
             )
-            # LightRAG ollama funcs expect the bare host without /v1
             host = api_base.rstrip("/")
             if host.endswith("/v1"):
                 host = host[:-3]
@@ -73,122 +75,37 @@ CFG = _load_skill_config()
 _CHAT_MODEL = _load_chat_model()
 
 # ---------------------------------------------------------------------------
-# LightRAG (read-only — same index the scheduler writes to)
+# RAG backend (read-only — same index the scheduler writes to)
 # ---------------------------------------------------------------------------
 
-_rag_instance = None
+_backend_instance = None
 
 
-def _build_embedding_func(cfg: dict):
-    import lightrag.utils
-    import lightrag.llm.ollama
-    import lightrag.llm.openai
+async def _get_backend(user_id: str):
+    from pawlia.rag_backend import create_backend
 
-    provider = cfg.get("embedding_provider", "ollama")
-    model = cfg.get("embedding_model", "bge-m3:latest")
-    dim = int(cfg.get("embedding_dim", 1024))
-    host = cfg.get("embedding_host", "http://localhost:11434")
-
-    if provider == "ollama":
-        return lightrag.utils.EmbeddingFunc(
-            embedding_dim=dim,
-            func=lambda texts: lightrag.llm.ollama.ollama_embed(
-                texts, host=host, embed_model=model, max_token_size=8192,
-            ),
-        )
-    api_key = cfg.get("embedding_api_key")
-    base_url = cfg.get("embedding_base_url")
-
-    async def _embed(texts):
-        return await lightrag.llm.openai.openai_embed(
-            texts, embed_model=model, api_key=api_key, base_url=base_url,
-        )
-
-    return lightrag.utils.EmbeddingFunc(embedding_dim=dim, func=_embed)
-
-
-def _build_llm_func(cfg: dict):
-    """Build the LLM function for RAG queries.
-
-    For queries we want to reuse whatever model Ollama already has loaded
-    (the active chat model) to avoid an unload/reload cycle.  We therefore
-    auto-detect the chat model from the main config unless rag_model is
-    explicitly set in skill-config.memory.  We deliberately do NOT pass
-    think=False so thinking models can think freely during query synthesis.
-    Indexing (memory_indexer.py) still runs with think=False — that stays
-    unchanged.
-    """
-    import lightrag.llm.ollama
-    import lightrag.llm.openai
-
-    # Prefer explicit rag_model; fall back to active chat model
-    explicit_rag_model = cfg.get("rag_model", "")
-    if explicit_rag_model:
-        provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
-        model = explicit_rag_model
-        host = cfg.get("embedding_host", "http://localhost:11434")
-    elif _CHAT_MODEL:
-        provider = _CHAT_MODEL["provider"]
-        model = _CHAT_MODEL["model"]
-        host = _CHAT_MODEL["host"]
-    else:
-        provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
-        model = cfg.get("rag_model", "")
-        host = cfg.get("embedding_host", "http://localhost:11434")
-
-    if provider == "ollama":
-        async def _complete(prompt: str, system_prompt: str = "", **kw):
-            return await lightrag.llm.ollama.ollama_model_complete(
-                prompt, system_prompt=system_prompt,
-                host=host,
-                options={"num_ctx": int(cfg.get("rag_numctx", 4096))},
-                **kw,
-            )
-        return _complete
-
-    api_key = cfg.get("rag_api_key", cfg.get("embedding_api_key"))
-    base_url = cfg.get("rag_base_url", cfg.get("embedding_base_url"))
-
-    async def _complete(prompt, system_prompt=None, history_messages=[], **kw):
-        return await lightrag.llm.openai.openai_complete_if_cache(
-            model, prompt, system_prompt=system_prompt,
-            history_messages=history_messages,
-            api_key=api_key, base_url=base_url, **kw,
-        )
-    return _complete
-
-
-async def _get_rag(user_id: str):
-    import lightrag
-    import lightrag.kg.shared_storage
-
-    global _rag_instance
-    if _rag_instance is not None:
-        return _rag_instance
+    global _backend_instance
+    if _backend_instance is not None:
+        return _backend_instance
 
     index_path = _SESSION_DIR / user_id / "memory_index"
     if not index_path.exists():
         return None
 
-    # Resolve the effective model name for LightRAG's internal bookkeeping
-    _query_model_name = (
-        CFG.get("rag_model")
-        or _CHAT_MODEL.get("model", "")
-    )
-    _rag_instance = lightrag.LightRAG(
+    # For LightRAG queries: pass the chat model as override so we reuse the
+    # already-loaded model instead of loading a separate rag_model.
+    query_cfg = dict(CFG)
+    if _CHAT_MODEL and CFG.get("rag_backend", "lightrag") == "lightrag":
+        query_cfg["_query_model"] = _CHAT_MODEL
+
+    _backend_instance = create_backend(
         str(index_path),
-        llm_model_func=_build_llm_func(CFG),
-        llm_model_name=_query_model_name,
-        summary_max_tokens=8192,
-        enable_llm_cache=False,
-        llm_model_kwargs={},
-        embedding_func=_build_embedding_func(CFG),
-        llm_model_max_async=int(CFG.get("rag_max_async_llm", 2)),
-        embedding_func_max_async=int(CFG.get("rag_max_async_embedding", 4)),
+        query_cfg,
+        think=None,          # allow thinking during query synthesis
+        max_async_llm=2,
+        max_async_embedding=4,
     )
-    await _rag_instance.initialize_storages()
-    await lightrag.kg.shared_storage.initialize_pipeline_status()
-    return _rag_instance
+    return _backend_instance
 
 
 # ---------------------------------------------------------------------------
@@ -196,27 +113,19 @@ async def _get_rag(user_id: str):
 # ---------------------------------------------------------------------------
 
 async def cmd_search(user_id: str, question: str):
-    import lightrag
-
-    rag = await _get_rag(user_id)
-    if rag is None:
+    backend = await _get_backend(user_id)
+    if backend is None:
         print(json.dumps({
             "result": "Noch kein Langzeitgedächtnis vorhanden. Chatlogs werden automatisch im Hintergrund indiziert.",
         }, ensure_ascii=False))
         return
 
-    result = await rag.aquery(
-        question,
-        param=lightrag.QueryParam(mode="global", enable_rerank=False),
-    )
+    result = await backend.query(question)
     print(json.dumps({"result": result}, ensure_ascii=False))
 
 
 async def cmd_index(user_id: str):
     """Manual index trigger — imports and runs the scheduler's indexer."""
-    sys.path.insert(0, str(_PROJECT_ROOT))
-    from pawlia.memory_indexer import MemoryIndexer
-
     full_cfg = {}
     for candidate in (_PROJECT_ROOT / "config.yaml", _PROJECT_ROOT / "config.yml"):
         if candidate.is_file():
@@ -224,6 +133,7 @@ async def cmd_index(user_id: str):
                 full_cfg = yaml.safe_load(f) or {}
             break
 
+    from pawlia.memory_indexer import MemoryIndexer
     indexer = MemoryIndexer(str(_SESSION_DIR), full_cfg)
     if not indexer.enabled:
         print(json.dumps({"error": "Memory indexer not configured"}))
@@ -234,7 +144,8 @@ async def cmd_index(user_id: str):
 
 
 async def cmd_status(user_id: str):
-    tracker_path = _SESSION_DIR / user_id / "memory_index" / "indexed_files.json"
+    backend = CFG.get("rag_backend", "lightrag")
+    tracker_path = _SESSION_DIR / user_id / "memory_index" / f"indexed_files_{backend}.json"
     indexed = {}
     if tracker_path.exists():
         indexed = json.loads(tracker_path.read_text(encoding="utf-8"))
@@ -262,13 +173,11 @@ async def cmd_status(user_id: str):
 # ---------------------------------------------------------------------------
 
 async def main():
-    # Support env-var fallback for user_id to prevent LLM hallucination
     env_user_id = os.environ.get("PAWLIA_USER_ID")
 
     if env_user_id and len(sys.argv) >= 2 and sys.argv[1] in (
         "search", "index", "status"
     ):
-        # Called without user_id positional arg — use env var
         user_id = env_user_id
         command = sys.argv[1]
         args = sys.argv[2:]
