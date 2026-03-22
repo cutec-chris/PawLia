@@ -64,7 +64,8 @@ class BackgroundTaskQueue:
                         task = json.load(f)
                     if task.get("status") == "pending":
                         result.append((user_id, task))
-                except Exception:
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning("Skipping corrupt task file %s: %s", fname, e)
                     continue
         return result
 
@@ -80,7 +81,8 @@ class BackgroundTaskQueue:
             try:
                 with open(os.path.join(d, fname), encoding="utf-8") as f:
                     tasks.append(json.load(f))
-            except Exception:
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Skipping corrupt task file %s: %s", fname, e)
                 continue
         return tasks
 

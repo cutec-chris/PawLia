@@ -95,6 +95,9 @@ class ChatAgent(BaseAgent):
         system_prompt: Optional[str] = None,
         images: Optional[List[str]] = None,
         thread_id: Optional[str] = None,
+        on_skill_start: Optional[SkillStartCallback] = None,
+        on_skill_step: Optional[InterimCallback] = None,
+        on_skill_done: Optional[InterimCallback] = None,
     ) -> str:
         """Process user input and return a response.
 
@@ -107,7 +110,14 @@ class ChatAgent(BaseAgent):
 
         ``thread_id`` isolates the context window: the model only sees exchanges
         from that thread (seeded from the last 5 main-session exchanges on first use).
+
+        Optional per-call callbacks override instance-level attributes to avoid
+        race conditions when the same agent is shared across concurrent requests.
         """
+        # Resolve callbacks: per-call overrides > instance attributes
+        _on_skill_start = on_skill_start or self.on_skill_start
+        _on_skill_step = on_skill_step or self.on_skill_step
+        _on_skill_done = on_skill_done or self.on_skill_done
         if system_prompt:
             prompt = system_prompt
         elif self.memory and self.session:
@@ -172,17 +182,17 @@ class ChatAgent(BaseAgent):
 
             if skill:
                 self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
-                if self.on_skill_start:
+                if _on_skill_start:
                     try:
-                        await self.on_skill_start(skill_name, query)
+                        await _on_skill_start(skill_name, query)
                     except Exception as exc:
                         self.logger.debug("on_skill_start error: %s", exc)
                 runner = self.skill_runner_factory(skill)
-                runner.on_step = self.on_skill_step
+                runner.on_step = _on_skill_step
                 result = await runner.run(query=query)
-                if self.on_skill_done:
+                if _on_skill_done:
                     try:
-                        await self.on_skill_done(skill_name)
+                        await _on_skill_done(skill_name)
                     except Exception as exc:
                         self.logger.debug("on_skill_done error: %s", exc)
             else:

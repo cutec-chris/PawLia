@@ -279,12 +279,15 @@ class MemoryIndexer:
                 rag = await self._get_rag(user_id)
                 await rag.ainsert(markdown, ids=doc_id)
 
-                # Wait for processing (max 120s)
-                for _ in range(120):
+                # Wait for processing (max ~120s, yield if LLM becomes busy)
+                for _ in range(24):
+                    if self._llm_busy and self._llm_busy():
+                        logger.debug("LLM busy, stopping poll for %s", doc_id)
+                        break
                     status = await rag.doc_status.get_by_id(doc_id)
                     if status and status.get("status") == "processed":
                         break
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(5)
 
                 tracked[fname] = mtime
                 changed = True
