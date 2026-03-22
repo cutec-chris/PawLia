@@ -257,6 +257,50 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         logger.info("Telegram: photo from %s (%s), caption: %s", user.first_name, user_id, caption[:80])
         await _handle(update, user_id, caption, thread_id=thread_id, images=[data_uri])
 
+    async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message:
+            return
+        voice = update.message.voice or update.message.audio
+        if not voice:
+            return
+        user = update.message.from_user
+        if user is None:
+            return
+
+        user_id = f"tg_{user.id}"
+        chat_ids[user_id] = update.message.chat_id
+        thread_id: Optional[int] = update.message.message_thread_id
+
+        logger.info("Telegram: voice message from %s (%s)", user.first_name, user_id)
+
+        try:
+            file = await voice.get_file()
+            data = bytes(await file.download_as_bytearray())
+        except Exception as e:
+            logger.warning("Telegram: failed to download audio: %s", e)
+            await update.message.reply_text(
+                "<i>(Sprachnachricht konnte nicht heruntergeladen werden)</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        from pawlia.transcription import transcribe
+
+        text = await transcribe(data, app.config, mime="audio/ogg")
+        if not text:
+            logger.warning("Telegram: transcription returned nothing")
+            await update.message.reply_text(
+                "<i>(Sprachnachricht konnte nicht transkribiert werden)</i>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        logger.info("Telegram: voice transcribed: %s", text[:120])
+        # Show transcription in UI
+        await update.message.reply_text(f"🎙️ {text}")
+        # Route through normal handler (prefixed so agent knows it was voice)
+        await _handle(update, user_id, f"[Sprachnachricht]: {text}", thread_id=thread_id)
+
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("private", on_private_command))
     application.add_handler(CommandHandler("model", on_model_command))
@@ -267,6 +311,9 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     )
     application.add_handler(
         MessageHandler(filters.PHOTO, on_photo),
+    )
+    application.add_handler(
+        MessageHandler(filters.VOICE | filters.AUDIO, on_voice),
     )
 
     # Register scheduler callback for proactive notifications

@@ -418,6 +418,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         logger.info("Matrix: voice message transcribed: %s", text[:120])
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+        # Show transcription in UI (like phone calls)
+        if thread_id:
+            await _send_thread_reply(room.room_id, thread_id, f"🎙️ *{text}*")
+        else:
+            await _send_text(room.room_id, f"🎙️ *{text}*")
         # Route through normal handler (prefixed so agent knows it was voice)
         await _handle(room, f"[Sprachnachricht]: {text}", thread_id=thread_id)
 
