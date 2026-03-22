@@ -112,28 +112,30 @@ skill-config:
   # perplexica:
   #   url: http://localhost:3000
 
-  # researcher:                          # Research projects with LightRAG
+  # researcher:                          # Research projects
   #   embedding_provider: ollama
   #   embedding_model: bge-m3:latest
   #   embedding_dim: 1024
   #   embedding_host: http://localhost:11434
+  #   # rag_backend: lightrag            # lightrag (default) | simple (fast, no extra deps) | mem0 (requires mem0ai+chromadb)
   #   # rag_provider: ollama             # defaults to embedding_provider
-  #   # rag_model: qwen3.5:latest        # LLM for RAG queries
-  #   # rag_numctx: 4096
-  #   # rag_timeout: 600                 # LLM timeout in seconds (default: 600)
-  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (default: 120)
-  #   # rag_max_async_llm: 1             # max parallel LLM requests (default: 1)
-  #   # rag_max_async_embedding: 1       # max parallel embedding requests (default: 1)
+  #   # rag_model: qwen3.5:latest        # LLM for RAG queries (not used by simple)
+  #   # rag_numctx: 4096                 # (lightrag only)
+  #   # rag_timeout: 600                 # LLM timeout in seconds (lightrag only)
+  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (lightrag only)
+  #   # rag_max_async_llm: 1             # max parallel LLM requests (lightrag only)
+  #   # rag_max_async_embedding: 1       # max parallel embedding requests (lightrag only)
 
-  # memory:                              # Long-term conversation memory (LightRAG)
+  # memory:                              # Long-term conversation memory
   #   embedding_provider: ollama
   #   embedding_model: bge-m3:latest
   #   embedding_dim: 1024
   #   embedding_host: http://localhost:11434
-  #   # rag_provider: ollama
-  #   # rag_model: qwen3.5:latest
-  #   # rag_numctx: 4096
-  #   # rag_timeout: 600                 # LLM timeout in seconds (default: 600)
-  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (default: 120)
-  #   # rag_max_async_llm: 1             # max parallel LLM requests (default: 1)
-  #   # rag_max_async_embedding: 1       # max parallel embedding requests (default: 1)
+  #   # rag_backend: lightrag            # lightrag (default) | simple (fast, no extra deps) | mem0 (requires mem0ai+chromadb)
+  #   # rag_provider: ollama             # defaults to embedding_provider
+  #   # rag_model: qwen3.5:latest        # LLM for RAG indexing/queries (not used by simple)
+  #   # rag_numctx: 4096                 # (lightrag only)
+  #   # rag_timeout: 600                 # LLM timeout in seconds (lightrag only)
+  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (lightrag only)
+  #   # rag_max_async_llm: 1             # max parallel LLM requests (lightrag only)
+  #   # rag_max_async_embedding: 1       # max parallel embedding requests (lightrag only)

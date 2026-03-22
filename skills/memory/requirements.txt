@@ -1,1 +1,2 @@
 lightrag-hku
+# optional: pip install mem0ai chromadb  (only needed for rag_backend: mem0)

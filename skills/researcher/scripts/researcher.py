@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Researcher skill — manage LightRAG-backed research projects.
+"""Researcher skill — manage RAG-backed research projects.
 
 Usage:
     researcher.py <user_id> create <name> <description>
@@ -13,6 +13,7 @@ Usage:
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import shutil
@@ -35,6 +36,8 @@ _SKILL_DIR = _SCRIPT_DIR.parent
 _PROJECT_ROOT = _SKILL_DIR.parent.parent  # thalia/
 _SESSION_DIR = pathlib.Path(os.environ["PAWLIA_SESSION_DIR"]) if "PAWLIA_SESSION_DIR" in os.environ else _PROJECT_ROOT / "session"
 
+sys.path.insert(0, str(_PROJECT_ROOT))
+
 USER_AGENT = "pawlia-researcher/1.0"
 
 
@@ -54,111 +57,29 @@ def _load_skill_config() -> dict:
 CFG = _load_skill_config()
 
 # ---------------------------------------------------------------------------
-# LightRAG helpers
+# Per-project backend cache
 # ---------------------------------------------------------------------------
 
-_rags: dict[str, "lightrag.LightRAG"] = {}
+_backends: dict[str, "RagBackend"] = {}
 
 
-def _build_embedding_func(cfg: dict):
-    import lightrag.utils
-    import lightrag.llm.ollama
-    import lightrag.llm.openai
-
-    provider = cfg.get("embedding_provider", "ollama")
-    model = cfg.get("embedding_model", "bge-m3:latest")
-    dim = int(cfg.get("embedding_dim", 1024))
-    host = cfg.get("embedding_host", "http://localhost:11434")
-
-    if provider == "ollama":
-        async def _ollama_embed(texts):
-            import numpy as np
-            try:
-                result = await lightrag.llm.ollama.ollama_embed(
-                    texts, host=host, embed_model=model, max_token_size=8192,
-                )
-            except Exception as e:
-                if "NaN" in str(e):
-                    logging.warning("Ollama NaN embedding error, returning zero vectors")
-                    return np.zeros((len(texts), dim))
-                raise
-            arr = np.array(result)
-            if np.isnan(arr).any():
-                logging.warning("NaN in embeddings detected, replacing with 0.0")
-                arr = np.nan_to_num(arr, nan=0.0)
-            return arr
-        return lightrag.utils.EmbeddingFunc(
-            embedding_dim=dim,
-            func=_ollama_embed,
-        )
-    else:
-        api_key = cfg.get("embedding_api_key")
-        base_url = cfg.get("embedding_base_url")
-        async def _embed(texts):
-            return await lightrag.llm.openai.openai_embed(
-                texts, embed_model=model, api_key=api_key, base_url=base_url,
-            )
-        return lightrag.utils.EmbeddingFunc(embedding_dim=dim, func=_embed)
-
-
-def _build_llm_func(cfg: dict):
-    import lightrag.llm.ollama
-    import lightrag.llm.openai
-
-    provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
-    model = cfg.get("rag_model", "qwen3.5:latest")
-    host = cfg.get("embedding_host", "http://localhost:11434")
-
-    if provider == "ollama":
-        async def _complete(prompt: str, system_prompt: str = "", **kw):
-            return await lightrag.llm.ollama.ollama_model_complete(
-                prompt, system_prompt=system_prompt,
-                host=host,
-                options={"num_ctx": int(cfg.get("rag_numctx", 4096)), "think": False},
-                **kw,
-            )
-        return _complete
-    else:
-        api_key = cfg.get("rag_api_key", cfg.get("embedding_api_key"))
-        base_url = cfg.get("rag_base_url", cfg.get("embedding_base_url"))
-        async def _complete(prompt, system_prompt=None, history_messages=[], **kw):
-            return await lightrag.llm.openai.openai_complete_if_cache(
-                model, prompt, system_prompt=system_prompt,
-                history_messages=history_messages,
-                api_key=api_key, base_url=base_url, **kw,
-            )
-        return _complete
-
-
-async def _get_rag(project_path: pathlib.Path) -> "lightrag.LightRAG":
-    import lightrag
-    import lightrag.kg.shared_storage
+async def _get_backend(project_path: pathlib.Path):
+    from pawlia.rag_backend import create_backend
 
     key = str(project_path)
-    if key not in _rags:
-        index_path = project_path / ".lightrag"
+    if key not in _backends:
+        index_path = project_path / ".rag_index"
         index_path.mkdir(exist_ok=True)
-
-        _rags[key] = lightrag.LightRAG(
+        _backends[key] = create_backend(
             str(index_path),
-            llm_model_func=_build_llm_func(CFG),
-            llm_model_name=CFG.get("rag_model", "qwen3:4b"),
-            summary_max_tokens=8192,
-            enable_llm_cache=False,
-            llm_model_kwargs={},
-            embedding_func=_build_embedding_func(CFG),
-            default_llm_timeout=int(CFG.get("rag_timeout", 600)),
-            default_embedding_timeout=int(CFG.get("rag_embedding_timeout", 120)),
-            llm_model_max_async=int(CFG.get("rag_max_async_llm", 1)),
-            embedding_func_max_async=int(CFG.get("rag_max_async_embedding", 1)),
+            CFG,
+            think=False,
         )
-        await _rags[key].initialize_storages()
-        await lightrag.kg.shared_storage.initialize_pipeline_status()
-    return _rags[key]
+    return _backends[key]
 
 
 # ---------------------------------------------------------------------------
-# Content extraction (from research-mcp, without git)
+# Content extraction
 # ---------------------------------------------------------------------------
 
 def _get_video_id(url: str):
@@ -211,19 +132,17 @@ def _extract_links(html: str, base_url: str) -> list[str]:
 
 
 async def _scrape_and_index(project_path: pathlib.Path, url: str) -> dict:
-    """Scrape a single URL, convert to markdown, index in LightRAG."""
+    """Scrape a single URL, convert to markdown, index via RAG backend."""
     headers = {"User-Agent": USER_AGENT}
     url_hash = hashlib.sha1(url.encode()).hexdigest()
     filename = project_path / f"{url_hash}.md"
 
-    # Check for YouTube
     video_id = _get_video_id(url)
 
     if video_id:
         markdown_text = await _youtube_to_markdown(url)
         version = video_id
     else:
-        # HEAD to check type
         def head():
             return requests.head(url, headers=headers, timeout=10, allow_redirects=True)
         head_resp = await asyncio.to_thread(head)
@@ -237,13 +156,11 @@ async def _scrape_and_index(project_path: pathlib.Path, url: str) -> dict:
             version += f"--{last_mod.replace(' ', '_')}"
         content_type = head_resp.headers.get("Content-Type", "")
 
-        # Skip if same version
         if filename.exists():
             current = await asyncio.to_thread(filename.read_text, encoding="utf-8")
             if current.startswith(f"# Version: {version}"):
                 return {"status": "skipped", "message": "already indexed"}
 
-        # GET content
         def get():
             return requests.get(url, headers=headers, timeout=30)
         resp = await asyncio.to_thread(get)
@@ -270,18 +187,10 @@ async def _scrape_and_index(project_path: pathlib.Path, url: str) -> dict:
 
     markdown_text = f"# Version: {version}\n# URL: {url}\n\n{markdown_text}"
 
-    # Index in LightRAG
-    rag = await _get_rag(project_path)
-    await rag.ainsert(markdown_text, ids=url)
+    backend = await _get_backend(project_path)
+    await backend.insert(markdown_text, url)
+    await backend.wait_for_indexed(url, timeout=60, poll_interval=1.0)
 
-    # Wait for processing
-    for _ in range(60):
-        status = await rag.doc_status.get_by_id(url)
-        if status and status.get("status") == "processed":
-            break
-        await asyncio.sleep(1)
-
-    # Save markdown file
     await asyncio.to_thread(filename.write_text, markdown_text, encoding="utf-8")
     return {"status": "ok", "file": str(filename), "version": version}
 
@@ -333,7 +242,6 @@ async def cmd_create(user_dir: pathlib.Path, name: str, description: str):
         print(json.dumps({"error": f"Project '{name}' already exists"}))
         sys.exit(1)
     path.mkdir(parents=True)
-    # Save description
     (path / "README.md").write_text(f"# {name}\n\n{description}\n", encoding="utf-8")
     print(json.dumps({"status": "ok", "name": name}))
 
@@ -370,18 +278,13 @@ async def cmd_add(user_dir: pathlib.Path, project: str, url: str, depth: int = 1
 
 
 async def cmd_query(user_dir: pathlib.Path, project: str, question: str):
-    import lightrag
-
     path = user_dir / project
     if not path.exists():
         print(json.dumps({"error": f"Project '{project}' not found"}))
         sys.exit(1)
 
-    rag = await _get_rag(path)
-    result = await rag.aquery(
-        question,
-        param=lightrag.QueryParam(mode="global", enable_rerank=False),
-    )
+    backend = await _get_backend(path)
+    result = await backend.query(question)
     print(json.dumps({"result": result}, ensure_ascii=False))
 
 
@@ -390,8 +293,7 @@ async def cmd_delete(user_dir: pathlib.Path, project: str):
     if not path.exists():
         print(json.dumps({"error": f"Project '{project}' not found"}))
         sys.exit(1)
-    key = str(path)
-    _rags.pop(key, None)
+    _backends.pop(str(path), None)
     shutil.rmtree(path)
     print(json.dumps({"status": "ok", "message": f"Project '{project}' deleted"}))
 
@@ -414,13 +316,11 @@ async def cmd_rename(user_dir: pathlib.Path, old_name: str, new_name: str):
 # ---------------------------------------------------------------------------
 
 async def main():
-    # Support env-var fallback for user_id to prevent LLM hallucination
     env_user_id = os.environ.get("PAWLIA_USER_ID")
 
     if env_user_id and len(sys.argv) >= 2 and sys.argv[1] in (
         "create", "list", "add", "query", "delete", "rename"
     ):
-        # Called without user_id positional arg — use env var
         user_id = env_user_id
         command = sys.argv[1]
         args = sys.argv[2:]
