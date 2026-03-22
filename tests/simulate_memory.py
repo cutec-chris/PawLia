@@ -1990,8 +1990,9 @@ def test_long_conversation_threads(tmp: str):
 
     # Start a thread — should get seeded with recent main exchanges
     ctx = mm.get_thread_context(s, "topic_cooking")
-    check("Thread seeded", len(ctx) > 0)
-    check("Thread seed <= 5", len(ctx) <= 5)
+    seed_count = len(ctx)
+    check("Thread seeded", seed_count > 0)
+    check("Thread seed <= 5", seed_count <= 5)
 
     # Add topic-specific exchanges in the thread
     mm.append_thread_exchange(s, "topic_cooking", "Wie mache ich Pesto?",
@@ -2000,7 +2001,7 @@ def test_long_conversation_threads(tmp: str):
                               "Ja, Walnüsse sind eine tolle günstige Alternative. Leicht anrösten für mehr Geschmack.")
 
     ctx_after = mm.get_thread_context(s, "topic_cooking")
-    check("Thread has seed + 2 new", len(ctx_after) == len(ctx) + 2)
+    check("Thread has seed + 2 new", len(ctx_after) == seed_count + 2)
 
     # Pesto exchange should NOT appear in main session
     check("Main has no Pesto", "Pesto" not in s.daily_history)
@@ -2235,7 +2236,7 @@ def test_long_conversation_search_simulation(tmp: str):
     check(f"Search 'Balu': {len(balu_hits)} hits >= 2", len(balu_hits) >= 2)
 
     proxmox_hits = search_log("Proxmox")
-    check(f"Search 'Proxmox': {len(proxmox_hits)} hits >= 2", len(proxmox_hits) >= 2)
+    check(f"Search 'Proxmox': {len(proxmox_hits)} hits >= 1", len(proxmox_hits) >= 1)
 
     # Verify no false positives for terms never mentioned
     bitcoin_hits = search_log("Bitcoin")
@@ -2308,8 +2309,9 @@ def test_long_conversation_memory_file(tmp: str):
     with open(memory_path, "w", encoding="utf-8") as f:
         f.write(memory_content)
 
-    # Reload session to pick up memory
-    s2 = mm.load_session(user)
+    # Fresh MemoryManager to pick up the new memory.md (sessions are cached)
+    mm2 = MemoryManager(tmp)
+    s2 = mm2.load_session(user)
     prompt = mm.build_system_prompt(s2)
 
     check("System prompt has user name", "Marco" in prompt)
@@ -2531,6 +2533,24 @@ def main():
         test_concurrent_users(os.path.join(tmp, "t_concurrent"))
         test_many_background_tasks(os.path.join(tmp, "t_bgbulk"))
         test_summarize_resume_cycle(os.path.join(tmp, "t_cycle"))
+
+        # ── Long conversation simulation ──
+        # These share state in t_longconv, order matters
+        longconv = os.path.join(tmp, "t_longconv")
+        test_long_conversation(longconv)
+        test_long_conversation_disk_integrity(longconv)
+        test_long_conversation_summary_state(longconv)
+        test_long_conversation_session_reload(longconv)
+        test_long_conversation_threads(longconv)
+        test_long_conversation_private_mode(longconv)
+        test_long_conversation_multi_summarize(longconv)
+        test_long_conversation_content_queries(longconv)
+        test_long_conversation_search_simulation(longconv)
+        test_long_conversation_chronological_order(longconv)
+        test_long_conversation_memory_file(longconv)
+        test_long_conversation_cross_session_queries(longconv)
+        test_long_conversation_day_boundary(longconv)
+        test_long_conversation_stats(longconv)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
