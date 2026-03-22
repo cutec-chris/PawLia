@@ -81,6 +81,10 @@ class MemoryIndexer:
         if provider == "ollama":
             async def _ollama_embed(texts):
                 import numpy as np
+                # Abort immediately if a chat LLM request is in progress to
+                # avoid competing for Ollama VRAM and causing OOM kills.
+                if self._llm_busy and self._llm_busy():
+                    raise RuntimeError("LLM busy — deferring memory embedding to avoid resource contention")
                 try:
                     result = await lightrag.llm.ollama.ollama_embed(
                         texts, host=host, embed_model=model, max_token_size=8192,
@@ -276,24 +280,38 @@ class MemoryIndexer:
             doc_id = f"chat_{user_id}_{date_str}"
             markdown = f"# Conversation log from {date_str}\n\n{content}"
 
+            # Final guard: don't start ainsert if LLM just became busy
+            if self._llm_busy and self._llm_busy():
+                logger.debug("LLM busy before ainsert, deferring %s", fname)
+                break
+
             try:
                 rag = await self._get_rag(user_id)
                 await rag.ainsert(markdown, ids=doc_id)
 
                 # Wait for processing (max ~120s, yield if LLM becomes busy)
+                processed = False
                 for _ in range(24):
                     if self._llm_busy and self._llm_busy():
                         logger.debug("LLM busy, stopping poll for %s", doc_id)
                         break
                     status = await rag.doc_status.get_by_id(doc_id)
                     if status and status.get("status") == "processed":
+                        processed = True
+                        break
+                    if status and status.get("status") == "failed":
                         break
                     await asyncio.sleep(5)
 
-                tracked[fname] = mtime
-                changed = True
-                self._clear_failure(user_id, fname)
-                logger.info("Memory indexed: %s/%s", user_id, fname)
+                if processed:
+                    tracked[fname] = mtime
+                    changed = True
+                    self._clear_failure(user_id, fname)
+                    logger.info("Memory indexed: %s/%s", user_id, fname)
+                else:
+                    self._mark_failed(user_id, fname)
+                    logger.warning("Memory indexing incomplete for %s/%s (busy or failed), will retry",
+                                   user_id, fname)
             except Exception as e:
                 self._mark_failed(user_id, fname)
                 logger.error("Memory indexing failed for %s/%s (retry in %dh): %s",
