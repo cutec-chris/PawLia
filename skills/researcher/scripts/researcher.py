@@ -71,11 +71,25 @@ def _build_embedding_func(cfg: dict):
     host = cfg.get("embedding_host", "http://localhost:11434")
 
     if provider == "ollama":
+        async def _ollama_embed(texts):
+            import numpy as np
+            try:
+                result = await lightrag.llm.ollama.ollama_embed(
+                    texts, host=host, embed_model=model, max_token_size=8192,
+                )
+            except Exception as e:
+                if "NaN" in str(e):
+                    logging.warning("Ollama NaN embedding error, returning zero vectors")
+                    return np.zeros((len(texts), dim))
+                raise
+            arr = np.array(result)
+            if np.isnan(arr).any():
+                logging.warning("NaN in embeddings detected, replacing with 0.0")
+                arr = np.nan_to_num(arr, nan=0.0)
+            return arr
         return lightrag.utils.EmbeddingFunc(
             embedding_dim=dim,
-            func=lambda texts: lightrag.llm.ollama.ollama_embed(
-                texts, host=host, embed_model=model, max_token_size=8192,
-            ),
+            func=_ollama_embed,
         )
     else:
         api_key = cfg.get("embedding_api_key")
@@ -133,6 +147,8 @@ async def _get_rag(project_path: pathlib.Path) -> "lightrag.LightRAG":
             enable_llm_cache=False,
             llm_model_kwargs={},
             embedding_func=_build_embedding_func(CFG),
+            default_llm_timeout=int(CFG.get("rag_timeout", 600)),
+            default_embedding_timeout=int(CFG.get("rag_embedding_timeout", 120)),
             llm_model_max_async=int(CFG.get("rag_max_async_llm", 2)),
             embedding_func_max_async=int(CFG.get("rag_max_async_embedding", 4)),
         )
