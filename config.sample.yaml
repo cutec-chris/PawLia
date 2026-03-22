@@ -122,8 +122,8 @@ skill-config:
   #   # rag_numctx: 4096
   #   # rag_timeout: 600                 # LLM timeout in seconds (default: 600)
   #   # rag_embedding_timeout: 120       # embedding timeout in seconds (default: 120)
-  #   # rag_max_async_llm: 2             # max parallel LLM requests (default: 2)
-  #   # rag_max_async_embedding: 4       # max parallel embedding requests (default: 4)
+  #   # rag_max_async_llm: 1             # max parallel LLM requests (default: 1)
+  #   # rag_max_async_embedding: 1       # max parallel embedding requests (default: 1)
 
   # memory:                              # Long-term conversation memory (LightRAG)
   #   embedding_provider: ollama
@@ -135,5 +135,5 @@ skill-config:
   #   # rag_numctx: 4096
   #   # rag_timeout: 600                 # LLM timeout in seconds (default: 600)
   #   # rag_embedding_timeout: 120       # embedding timeout in seconds (default: 120)
-  #   # rag_max_async_llm: 2             # max parallel LLM requests (default: 2)
-  #   # rag_max_async_embedding: 4       # max parallel embedding requests (default: 4)
+  #   # rag_max_async_llm: 1             # max parallel LLM requests (default: 1)
+  #   # rag_max_async_embedding: 1       # max parallel embedding requests (default: 1)

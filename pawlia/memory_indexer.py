@@ -168,8 +168,8 @@ class MemoryIndexer:
             embedding_func=self._build_embedding_func(),
             default_llm_timeout=int(self._cfg.get("rag_timeout", 600)),
             default_embedding_timeout=int(self._cfg.get("rag_embedding_timeout", 120)),
-            llm_model_max_async=int(self._cfg.get("rag_max_async_llm", 2)),
-            embedding_func_max_async=int(self._cfg.get("rag_max_async_embedding", 4)),
+            llm_model_max_async=int(self._cfg.get("rag_max_async_llm", 1)),
+            embedding_func_max_async=int(self._cfg.get("rag_max_async_embedding", 1)),
         )
         await rag.initialize_storages()
         await lightrag.kg.shared_storage.initialize_pipeline_status()

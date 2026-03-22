@@ -27,8 +27,8 @@ metadata:
     - rag_numctx             # LLM context window (default: 4096)
     - rag_timeout            # LLM timeout in seconds (default: 600)
     - rag_embedding_timeout  # embedding timeout in seconds (default: 120)
-    - rag_max_async_llm      # max parallel LLM requests (default: 2)
-    - rag_max_async_embedding # max parallel embedding requests (default: 4)
+    - rag_max_async_llm      # max parallel LLM requests (default: 1)
+    - rag_max_async_embedding # max parallel embedding requests (default: 1)
 ---
 
 # Researcher Skill
