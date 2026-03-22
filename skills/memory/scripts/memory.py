@@ -90,7 +90,7 @@ def _build_llm_func(cfg: dict):
             return await lightrag.llm.ollama.ollama_model_complete(
                 prompt, system_prompt=system_prompt,
                 host=host,
-                options={"num_ctx": int(cfg.get("rag_numctx", 4096))},
+                options={"num_ctx": int(cfg.get("rag_numctx", 4096)), "think": False},
                 **kw,
             )
         return _complete
@@ -127,6 +127,8 @@ async def _get_rag(user_id: str):
         enable_llm_cache=False,
         llm_model_kwargs={},
         embedding_func=_build_embedding_func(CFG),
+        llm_model_max_async=int(CFG.get("rag_max_async_llm", 2)),
+        embedding_func_max_async=int(CFG.get("rag_max_async_embedding", 4)),
     )
     await _rag_instance.initialize_storages()
     await lightrag.kg.shared_storage.initialize_pipeline_status()
