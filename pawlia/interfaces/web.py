@@ -490,7 +490,23 @@ async def start_web(app: "App", cfg: Dict) -> None:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
-    # ── Memory graph ─────────────────────────────────────────────────────────
+    # ── Memory users / graph ────────────────────────────────────────────────
+
+    async def handle_memory_users(request: web.Request) -> web.Response:
+        """Return list of user IDs that have a memory index graph."""
+        if not _authed(request):
+            return _unauth()
+        session_dir = os.path.join(_PKG_ROOT, "session")
+        if not os.path.isdir(session_dir):
+            return web.json_response({"users": []})
+        users = sorted(
+            uid for uid in os.listdir(session_dir)
+            if os.path.isfile(os.path.join(
+                session_dir, uid, "memory_index",
+                "graph_chunk_entity_relation.graphml",
+            ))
+        )
+        return web.json_response({"users": users})
 
     async def handle_memory_graph(request: web.Request) -> web.Response:
         if not _authed(request):
@@ -644,6 +660,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
     webapp.router.add_post("/api/skill-config",   handle_save_skill_config)
     webapp.router.add_get("/api/setup-status",    handle_setup_status)
     webapp.router.add_post("/api/setup/auto",     handle_setup_auto)
+    webapp.router.add_get("/api/memory/users",    handle_memory_users)
     webapp.router.add_get("/api/memory/graph",    handle_memory_graph)
 
     runner = web.AppRunner(webapp)
