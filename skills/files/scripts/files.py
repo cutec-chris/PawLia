@@ -104,7 +104,9 @@ def cmd_write(args) -> None:
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
-    _out({"success": True, "message": f"File '{args.filename}' written.", "bytes_written": len(content)})
+    with open(filepath, "r", encoding="utf-8") as f:
+        written = f.read()
+    _out({"success": True, "message": f"File '{args.filename}' written.", "bytes_written": len(written), "content_written": written})
 
 
 # ---------------------------------------------------------------------------

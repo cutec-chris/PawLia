@@ -61,3 +61,8 @@ python <scripts_dir>/files.py delete --filename "<name>"
 
 All commands output JSON. On success: `{"success": true, ...}`. On error: `{"success": false, "error": "..."}`.
 Report results naturally to the user.
+
+## Verification after write
+
+After a `write` command, the response includes `"content_written"` — the content that was actually read back from disk.
+**Always compare `content_written` against what you intended to write.** If they differ, report the discrepancy to the user and rewrite the file.
