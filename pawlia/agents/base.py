@@ -11,6 +11,8 @@ from langchain_openai import ChatOpenAI
 
 
 _RE_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
+# Chat-template tokens that some models leak into their output
+_RE_CHAT_TOKENS = re.compile(r"<\|.*?\|>.*", re.DOTALL)
 
 
 class BaseAgent(ABC):
@@ -44,12 +46,14 @@ class BaseAgent(ABC):
 
     @staticmethod
     def strip_thinking(text: str) -> str:
-        """Remove <think>/<thinking> blocks from LLM output."""
+        """Remove <think>/<thinking> blocks and leaked chat-template tokens."""
         text = _RE_THINK.sub("", text)
         # Handle unclosed tags (model started thinking but response got cut)
         for tag in ("</think>", "</thinking>"):
             if tag in text:
                 text = text[text.find(tag) + len(tag):]
+        # Strip chat-template tokens like <|endoftext|><|im_start|>user ...
+        text = _RE_CHAT_TOKENS.sub("", text)
         return text.lstrip("\n").rstrip()
 
     @staticmethod

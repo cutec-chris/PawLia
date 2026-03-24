@@ -372,21 +372,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             if not message:
                 await _send_text(room.room_id, "_Verwendung: //thread <Nachricht>_")
                 return
-            thread_id = event.event_id
-            session_id = f"mx_{room.room_id}"
-            logger.info("Matrix: //thread in %s: %s", room.room_id, message[:80])
-            try:
-                await client.room_typing(room.room_id, typing_state=True)
-                agent = get_agent(room.room_id)
-                response = await agent.run(message, thread_id=thread_id)
-                await client.room_typing(room.room_id, typing_state=False)
-                await _send_thread_reply(room.room_id, thread_id, response)
-            except Exception as e:
-                logger.error("Matrix: //thread error: %s", e)
-                try:
-                    await client.room_typing(room.room_id, typing_state=False)
-                except Exception:
-                    pass
+            await _handle(room, message, thread_id=event.event_id)
             return
 
         await _handle(room, text, thread_id=_get_thread_id(event))
