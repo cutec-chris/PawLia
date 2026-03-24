@@ -139,3 +139,4 @@ skill-config:
   #   # rag_embedding_timeout: 120       # embedding timeout in seconds (lightrag only)
   #   # rag_max_async_llm: 1             # max parallel LLM requests (lightrag only)
   #   # rag_max_async_embedding: 1       # max parallel embedding requests (lightrag only)
+  #   # idle_minutes: 20                 # min idle time before indexing starts (0 = index ASAP)

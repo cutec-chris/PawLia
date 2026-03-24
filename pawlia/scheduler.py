@@ -223,8 +223,11 @@ class Scheduler:
                 if self.llm_busy:
                     return
 
-            # Prio 3: Memory indexing (20 min idle)
-            if idle >= IDLE_MEMORY_MIN:
+            # Prio 3: Memory indexing (configurable idle, default 20 min)
+            idle_memory_min = int(
+                self._config.get("skill-config", {}).get("memory", {}).get("idle_minutes", IDLE_MEMORY_MIN)
+            )
+            if idle >= idle_memory_min:
                 if self._memory_indexer and self._memory_indexer.enabled:
                     try:
                         await self._memory_indexer.process_user(user_id)
