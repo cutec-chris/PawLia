@@ -126,7 +126,8 @@ class LightRAGBackend(RagBackend):
                 if llm_busy and llm_busy():
                     raise RuntimeError("LLM busy — deferring memory embedding")
                 try:
-                    result = await lightrag.llm.ollama.ollama_embed(
+                    # Use .func to bypass lightrag's hardcoded embedding_dim=1024 wrapper
+                    result = await lightrag.llm.ollama.ollama_embed.func(
                         texts, host=host, embed_model=model, max_token_size=8192,
                     )
                 except Exception as e:
@@ -487,7 +488,7 @@ class SimpleVectorBackend(RagBackend):
         if provider == "ollama":
             import lightrag.llm.ollama
             try:
-                result = await lightrag.llm.ollama.ollama_embed(
+                result = await lightrag.llm.ollama.ollama_embed.func(
                     texts, host=host, embed_model=model, max_token_size=8192,
                 )
             except Exception as e:
