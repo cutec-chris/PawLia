@@ -127,6 +127,10 @@ async def _run(args) -> None:
 
     try:
         await asyncio.gather(*tasks)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         app.scheduler.stop()
 
