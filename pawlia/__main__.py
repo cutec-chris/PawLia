@@ -125,9 +125,24 @@ async def _run(args) -> None:
         app.scheduler.stop()
         return
 
+    import signal
+    loop = asyncio.get_running_loop()
+    shutdown = asyncio.Event()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, shutdown.set)
+        except NotImplementedError:
+            pass  # Windows
+
+    shutdown_task = asyncio.create_task(shutdown.wait())
     try:
-        await asyncio.gather(*tasks)
+        await asyncio.wait([*tasks, shutdown_task], return_when=asyncio.FIRST_COMPLETED)
     finally:
+        shutdown_task.cancel()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         app.scheduler.stop()
 
 
