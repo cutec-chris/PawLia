@@ -198,6 +198,20 @@ class Scheduler:
                 except Exception as e:
                     logger.error("Job processing failed for %s: %s", user_id, e)
 
+        # ── Force-summarize when exchange count exceeds hard limit ──
+        # This runs even when the user is active to prevent unbounded growth.
+        if not self.llm_busy and self._app:
+            from pawlia.memory import FORCE_SUMMARY_EXCHANGES
+            for user_id in user_ids:
+                session = self._app.memory.load_session(user_id)
+                if session.exchange_count >= FORCE_SUMMARY_EXCHANGES:
+                    try:
+                        await self._summarize_user(user_id)
+                    except Exception as e:
+                        logger.error("Forced summarization failed for %s: %s", user_id, e)
+                    if self.llm_busy:
+                        break
+
         # ── Low priority (idle-based, ordered by priority) ──
         if self.llm_busy:
             return

@@ -197,14 +197,7 @@ class SkillRunnerAgent(BaseAgent):
 
         self.logger.debug("Tool call: %s(%s)", tc_name, json.dumps(tc_args)[:200])
         if self.on_step:
-            if tc_name == "bash":
-                step = tc_args.get("command", "")
-                # Show only script basenames, not full paths
-                parts = step.split()
-                parts = [os.path.basename(p) if os.sep in p or "/" in p else p for p in parts]
-                step = " ".join(parts)
-            else:
-                step = tc_name
+            step = self._friendly_step(tc_name, tc_args)
             asyncio.ensure_future(self.on_step(step[:120]))
         result = self.tool_registry.execute(tc_name, tc_args, self.context)
         result_str = str(result)
@@ -257,6 +250,45 @@ class SkillRunnerAgent(BaseAgent):
                 return line
 
         return ""
+
+    # ------------------------------------------------------------------
+    # Step display
+    # ------------------------------------------------------------------
+
+    def _friendly_step(self, tc_name: str, tc_args: dict) -> str:
+        """Return a short, user-friendly description of a tool call."""
+        if tc_name != "bash":
+            return tc_name
+
+        cmd = tc_args.get("command", "")
+        # Extract the script basename (e.g. "memory.py", "researcher.py")
+        parts = cmd.split()
+        script = ""
+        for p in parts:
+            base = os.path.basename(p)
+            if base.endswith((".py", ".mjs", ".js", ".sh")):
+                script = base.removesuffix(".py").removesuffix(".mjs").removesuffix(".js").removesuffix(".sh")
+                break
+
+        # Extract the sub-command (e.g. "search", "index", "status")
+        action = ""
+        if script:
+            # Sub-command is typically the argument after the script path
+            found_script = False
+            for p in parts:
+                if found_script:
+                    if not p.startswith("-") and not p.startswith("/") and ":" not in p:
+                        action = p
+                        break
+                if os.path.basename(p).startswith(script):
+                    found_script = True
+
+        if script and action:
+            return f"{script} → {action}"
+        if script:
+            return script
+        # Fallback: show just the command name
+        return os.path.basename(parts[0]) if parts else tc_name
 
     # ------------------------------------------------------------------
     # Prompt builders
