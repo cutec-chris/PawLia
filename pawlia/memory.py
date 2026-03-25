@@ -19,7 +19,9 @@ from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Set, Tuple
 
 # Summarization trigger thresholds
-MAX_EXCHANGES_BEFORE_SUMMARY = 20
+MAX_EXCHANGES_BEFORE_SUMMARY = 10
+FORCE_SUMMARY_EXCHANGES = 30  # force summarize even if user is active
+KEEP_RECENT_EXCHANGES = 5  # exchanges to keep intact after summarization
 SIMILARITY_THRESHOLD = 0.6  # 0-1, how similar two bot responses must be
 SIMILARITY_WINDOW = 4  # compare last N bot responses
 IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
@@ -343,16 +345,17 @@ class MemoryManager:
         """Check whether conversation should be summarized.
 
         Returns the trigger reason (empty string = no summary needed).
+        The scheduler gates most triggers behind its own idle check
+        (IDLE_SUMMARIZE_MIN); only "force" bypasses that gate.
         """
+        if session.exchange_count >= FORCE_SUMMARY_EXCHANGES:
+            return "force"
+
         if session.exchange_count >= MAX_EXCHANGES_BEFORE_SUMMARY:
             return "exchange_limit"
 
         if self._detect_repetition(session.recent_bot_responses):
             return "repetition"
-
-        idle = (datetime.now() - session.last_activity).total_seconds()
-        if session.exchange_count > 0 and idle >= IDLE_TIMEOUT_SECONDS:
-            return "idle"
 
         return ""
 
@@ -375,11 +378,15 @@ class MemoryManager:
         ``summary_text`` is the LLM-generated summary of the conversation.
         The raw history is kept on disk (append-only daily log) but the
         in-memory history is replaced so the system prompt stays compact.
+        The last KEEP_RECENT_EXCHANGES exchanges are kept intact so the
+        LLM always has immediate conversational context.
         """
         session.summary = summary_text.strip()
         session.daily_history = ""
+        kept = session.exchanges[-KEEP_RECENT_EXCHANGES:]
         session.exchanges.clear()
-        session.exchange_count = 0
+        session.exchanges.extend(kept)
+        session.exchange_count = len(kept)
         session.recent_bot_responses.clear()
 
         # Persist summary to disk alongside the daily log
