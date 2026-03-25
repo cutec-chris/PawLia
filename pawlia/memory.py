@@ -295,9 +295,8 @@ class MemoryManager:
             "always use the skill to get real data.\n"
             "Only answer directly for simple conversation (greetings, opinions, "
             "general knowledge).\n"
-            "When you learn a persistent fact or preference about the user "
-            "(name, language, habits, preferences, etc.), "
-            "use the files skill to append it to memory/memory.md."
+            "The files skill is ONLY for when the user explicitly asks to "
+            "read or write files, or to edit soul.md, IDENTITY.md, or USER.md."
         )
 
         return "\n\n════════════════════\n\n".join(parts)
