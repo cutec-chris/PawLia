@@ -42,37 +42,7 @@ def _load_skill_config() -> dict:
     return {}
 
 
-def _load_chat_model() -> dict:
-    """Return {provider, model, host} for the active chat model from main config.
-
-    Resolves agents.chat (or agents.default) → models.* → providers.* so that
-    memory queries reuse whatever model is currently loaded in Ollama instead of
-    forcing a separate rag_model to be loaded.
-    Only used by the LightRAG backend; mem0 uses its own LLM at insert time.
-    """
-    for candidate in (_PROJECT_ROOT / "config.yaml", _PROJECT_ROOT / "config.yml"):
-        if candidate.is_file():
-            with open(candidate, encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            agents = cfg.get("agents", {})
-            alias = agents.get("chat") or agents.get("default", "")
-            model_cfg = cfg.get("models", {}).get(alias, {})
-            model = model_cfg.get("model", "")
-            if not model:
-                break
-            provider_name = model_cfg.get("provider", "ollama")
-            api_base = cfg.get("providers", {}).get(provider_name, {}).get(
-                "apiBase", "http://localhost:11434/v1"
-            )
-            host = api_base.rstrip("/")
-            if host.endswith("/v1"):
-                host = host[:-3]
-            return {"provider": provider_name, "model": model, "host": host}
-    return {}
-
-
 CFG = _load_skill_config()
-_CHAT_MODEL = _load_chat_model()
 
 # ---------------------------------------------------------------------------
 # RAG backend (read-only — same index the scheduler writes to)
@@ -92,17 +62,10 @@ async def _get_backend(user_id: str):
     if not index_path.exists():
         return None
 
-    # For LightRAG queries: pass the chat model as override so we reuse the
-    # already-loaded model instead of loading a separate rag_model.
-    query_cfg = dict(CFG)
-    if _CHAT_MODEL and CFG.get("rag_backend", "lightrag") == "lightrag":
-        query_cfg["_query_model"] = _CHAT_MODEL
-
+    # naive mode needs no LLM — only embeddings for similarity search
     _backend_instance = create_backend(
         str(index_path),
-        query_cfg,
-        think=None,          # allow thinking during query synthesis
-        max_async_llm=2,
+        CFG,
         max_async_embedding=4,
     )
     return _backend_instance
