@@ -271,7 +271,7 @@ class MemoryManager:
         for filename in ws_files:
             content = self._read(os.path.join(workspace, filename))
             if content.strip():
-                parts.append(content.strip())
+                parts.append(f"[Source: {filename}]\n{content.strip()}")
 
         if session.summary.strip():
             parts.append(
@@ -291,7 +291,6 @@ class MemoryManager:
         parts.append(
             "IMPORTANT: You have skills (tools) available. "
             "When a user asks for information that a skill can provide "
-            "(routes, train connections, searches, file operations, etc.), "
             "you MUST call the matching skill. NEVER guess or make up answers — "
             "always use the skill to get real data.\n"
             "Only answer directly for simple conversation (greetings, opinions, "
@@ -301,7 +300,7 @@ class MemoryManager:
             "use the files skill to append it to memory/memory.md."
         )
 
-        return "\n\n---\n\n".join(parts)
+        return "\n\n════════════════════\n\n".join(parts)
 
     def append_exchange(
         self,
