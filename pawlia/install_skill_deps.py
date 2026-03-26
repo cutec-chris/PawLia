@@ -1,18 +1,22 @@
-"""Install runtime dependencies for pre-bundled AgentSkills.
+"""Install runtime dependencies and compile workflows for AgentSkills.
 
-Called during Docker build to set up npm packages declared in SKILL.md
-under ``metadata.openclaw.install``.
+Handles both steps in one call: pip/npm deps first, then workflow compilation.
+Called during Docker build and when skills are uploaded at runtime.
 
 Usage::
 
     python -m pawlia.install_skill_deps [skills_dir]
+    python -m pawlia.install_skill_deps [skills_dir] --no-compile
+    python -m pawlia.install_skill_deps [skills_dir] --force
 """
 
+import asyncio
 import logging
 import os
 import shutil
 import subprocess
 import sys
+from typing import Any, Dict, Optional
 
 from pawlia.utils import collect_skill_dirs, parse_frontmatter
 
@@ -20,7 +24,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("install_skill_deps")
 
 
-def install_all_skill_deps(skills_dir: str) -> None:
+def _install_deps(skills_dir: str) -> None:
+    """Install pip and npm dependencies for all skills."""
     if not os.path.isdir(skills_dir):
         logger.info("No skills directory at %s", skills_dir)
         return
@@ -82,8 +87,54 @@ def install_all_skill_deps(skills_dir: str) -> None:
                 logger.debug("Unknown install kind '%s' for '%s' — skipping", kind, package)
 
 
+async def _compile_workflows(
+    skills_dir: str,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    force: bool = False,
+) -> None:
+    """Compile workflows for all skills that need it."""
+    if config is None:
+        from pawlia.config import load_config
+        config = load_config()
+
+    from pawlia.skills.compiler import compile_all
+    results = await compile_all(skills_dir, config, force=force)
+    if results:
+        logger.info("Compiled workflows: %s", ", ".join(results.keys()))
+
+
+async def install_skills(
+    skills_dir: str,
+    config: Optional[Dict[str, Any]] = None,
+    *,
+    compile: bool = True,
+    force: bool = False,
+) -> None:
+    """Install deps + compile workflows for all skills in a directory.
+
+    This is the single entry point — called from Docker build, app startup
+    (for workspace skills), and the web skill-upload handler.
+    """
+    _install_deps(skills_dir)
+    if compile:
+        await _compile_workflows(skills_dir, config, force=force)
+
+
 if __name__ == "__main__":
-    skills_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Install skill deps + compile workflows")
+    parser.add_argument("skills_dir", nargs="?", default=None)
+    parser.add_argument("--no-compile", action="store_true", help="Skip workflow compilation")
+    parser.add_argument("--force", action="store_true", help="Force recompilation of all workflows")
+    args = parser.parse_args()
+
+    skills_dir = args.skills_dir or os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills"
     )
-    install_all_skill_deps(skills_dir)
+    asyncio.run(install_skills(
+        skills_dir,
+        compile=not args.no_compile,
+        force=args.force,
+    ))

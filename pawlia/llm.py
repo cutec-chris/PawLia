@@ -47,13 +47,43 @@ provider is used.
 """
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
 
 logger = logging.getLogger(__name__)
+
+
+class _NoThinkWrapper:
+    """Wraps an LLM and prepends /no_think to the system prompt."""
+
+    def __init__(self, llm: Any):
+        self._llm = llm
+
+    def _inject(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+        if messages and isinstance(messages[0], SystemMessage):
+            messages = list(messages)
+            messages[0] = SystemMessage(
+                content="/no_think\n" + messages[0].content
+            )
+        else:
+            messages = [SystemMessage(content="/no_think")] + list(messages)
+        return messages
+
+    async def ainvoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        return await self._llm.ainvoke(self._inject(messages), **kwargs)
+
+    def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        return self._llm.invoke(self._inject(messages), **kwargs)
+
+    def bind_tools(self, *args: Any, **kwargs: Any) -> "_NoThinkWrapper":
+        return _NoThinkWrapper(self._llm.bind_tools(*args, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._llm, name)
 
 
 class LLMFactory:
@@ -163,6 +193,8 @@ class LLMFactory:
             return "chat"
         if agent_type == "chat":
             return "default"
+        if agent_type == "compiler":
+            return "default"
         return None
 
     # ------------------------------------------------------------------
@@ -185,6 +217,9 @@ class LLMFactory:
             model, provider_name, api_base, temperature,
         )
 
+        # Thinking / reasoning config
+        think = model_cfg.get("think")  # true | false | int (token budget)
+
         if self._is_ollama(provider_name, api_base):
             ollama_base = api_base.removesuffix("/v1") or "http://localhost:11434"
             kwargs: Dict[str, Any] = dict(model=model, temperature=temperature, base_url=ollama_base)
@@ -192,13 +227,28 @@ class LLMFactory:
                 kwargs["keep_alive"] = keep_alive
             return ChatOllama(**kwargs)
 
-        return ChatOpenAI(
+        extra_body: Dict[str, Any] = {}
+        if isinstance(think, int):
+            # Token budget for thinking
+            extra_body["reasoning_format"] = "parsed"
+            extra_body["reasoning_budget"] = think
+
+        max_tokens = model_cfg.get("max_tokens")
+
+        llm = ChatOpenAI(
             model=model,
             temperature=temperature,
             base_url=api_base,
             api_key=api_key,
             timeout=timeout,
+            **({"max_tokens": max_tokens} if max_tokens else {}),
+            **({"extra_body": extra_body} if extra_body else {}),
         )
+
+        if think is False:
+            llm = _NoThinkWrapper(llm)
+
+        return llm
 
     # ------------------------------------------------------------------
     # Helpers
