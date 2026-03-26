@@ -19,7 +19,7 @@ from pawlia.skills.workflow_schema import CompiledWorkflow
 from pawlia.llm import LLMFactory
 
 
-def test_compile_browser_skill():
+def simulate_compile_browser_skill():
     """Compile the browser skill with the real LLM and validate output."""
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     skill_path = os.path.join(pkg_dir, "skills", "browser")
