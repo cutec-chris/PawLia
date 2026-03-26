@@ -1,0 +1,55 @@
+skill: automation
+version: '1.0'
+compiled_at: '2026-03-26'
+compiled_by: workflow_compiler
+workflows:
+- id: create_automation
+  trigger: User wants to create a new automation script and schedule
+  max_steps: 10
+  building_blocks:
+  - id: write_script
+    command: files write {script_path} '{script_content}'
+    description: Write Python automation script to user's workspace
+    status_desc: Schreibe Automatisierungsskript {script_name}
+    verify:
+      exit_code: 0
+    on_error: script_write_failed
+  - id: register_job
+    command: python <scripts_dir>/../organizer/scripts/organizer.py add-job --name
+      "{job_name}" --script "{script_name}.py" --schedule "{schedule}"
+    description: Register script as scheduled job via organizer
+    status_desc: Registriere Job {job_name} mit Zeitplan {schedule}
+    verify:
+      exit_code: 0
+      output_contains:
+      - Job added successfully
+  - id: script_write_failed
+    command: 'notify ''Fehler beim Schreiben des Skripts: {error_message}'''
+    description: Notify user about script writing failure
+    status_desc: 'Fehler: {error_message}'
+- id: manage_jobs
+  trigger: User wants to list, delete, or toggle existing automation jobs
+  max_steps: 5
+  building_blocks:
+  - id: list_jobs
+    command: python <scripts_dir>/../organizer/scripts/organizer.py list-jobs
+    description: List all registered automation jobs
+    status_desc: Liste alle geplanten Jobs
+  - id: delete_job
+    command: python <scripts_dir>/../organizer/scripts/organizer.py delete-job --job-id
+      "{job_id}"
+    description: Delete specific automation job by ID
+    status_desc: Lösche Job {job_id}
+    verify:
+      exit_code: 0
+      output_contains:
+      - Job deleted successfully
+  - id: toggle_job
+    command: python <scripts_dir>/../organizer/scripts/organizer.py toggle-job --job-id
+      "{job_id}"
+    description: Toggle enabled/disabled status of job
+    status_desc: Wechsle Status von Job {job_id}
+    verify:
+      exit_code: 0
+      output_contains:
+      - Job status toggled

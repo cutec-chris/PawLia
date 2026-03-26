@@ -1,0 +1,19 @@
+skill: searxng
+version: '2.0'
+compiled_at: '2026-03-26'
+compiled_by: workflow_compiler
+workflows:
+- id: web_search
+  trigger: When performing a web search with specified query parameters
+  max_steps: 1
+  building_blocks:
+  - id: run_search
+    command: python {scripts_dir}/search.py --query "{query}" --limit {limit} --url
+      "{url}" --timeout {timeout}
+    description: Execute SearXNG web search with specified parameters
+    status_desc: Suche im Web nach {query}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - 'Error:'
+      - Traceback
