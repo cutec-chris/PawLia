@@ -246,31 +246,13 @@ class WorkflowExecutor:
         return result
 
     def _run_bash(self, command: str) -> StepResult:
-        """Execute a bash command via the tool registry.
-
-        Injects PAWLIA_USER_ID and PAWLIA_SESSION_DIR as environment
-        variables so scripts can read them without needing CLI args.
-        """
-        command = self._inject_env(command)
+        """Execute a bash command via the tool registry."""
         self.logger.debug("Executing: %s", command[:200])
         raw = self.tool_registry.execute("bash", {"command": command}, self.context)
         output = str(raw)
         exit_code = 1 if output.startswith("Error") else 0
         self.logger.debug("Result (exit=%d): %s", exit_code, output[:300])
         return StepResult(output=output, exit_code=exit_code)
-
-    def _inject_env(self, command: str) -> str:
-        """Prepend PAWLIA_USER_ID / PAWLIA_SESSION_DIR env vars."""
-        env_parts = []
-        user_id = self.context.get("user_id")
-        session_dir = self.context.get("session_dir")
-        if user_id:
-            env_parts.append(f'PAWLIA_USER_ID="{user_id}"')
-        if session_dir:
-            env_parts.append(f'PAWLIA_SESSION_DIR="{session_dir}"')
-        if not env_parts:
-            return command
-        return " ".join(env_parts) + " " + command
 
     def _verify(self, output: str, exit_code: int, spec: VerifySpec) -> bool:
         """Programmatic verification — no LLM needed."""
