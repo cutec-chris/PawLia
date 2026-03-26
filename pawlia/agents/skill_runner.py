@@ -23,6 +23,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from pawlia.agents.base import BaseAgent
+from pawlia.skills.executor import WorkflowExecutor
 from pawlia.skills.loader import AgentSkill
 from pawlia.tools.base import ToolRegistry
 
@@ -84,7 +85,14 @@ class SkillRunnerAgent(BaseAgent):
         return ""
 
     async def _attempt(self, query: str) -> str:
-        """Single attempt: tool-call mode, then optionally command mode."""
+        """Single attempt: workflow mode, then tool-call, then command mode."""
+        # Prefer compiled workflow if available
+        if self.skill.workflow:
+            result = await self._workflow_mode(query)
+            if result.strip():
+                return result
+            self.logger.info("Workflow mode produced no result, falling back")
+
         result = await self._tool_call_mode(query)
         if result.strip():
             return result
@@ -94,6 +102,31 @@ class SkillRunnerAgent(BaseAgent):
 
         self.logger.info("Falling back to command mode")
         return await self._command_mode(query)
+
+    # ------------------------------------------------------------------
+    # Mode 0: Workflow mode (compiled building blocks + dynamic planning)
+    # ------------------------------------------------------------------
+
+    async def _workflow_mode(self, query: str) -> str:
+        """Execute using the compiled workflow with building blocks."""
+        compiled = self.skill.workflow
+        if not compiled:
+            return ""
+
+        executor = WorkflowExecutor(
+            tool_registry=self.tool_registry,
+            context=self.context,
+            llm=self.llm,
+            logger=self.logger,
+        )
+        executor.on_step = self.on_step
+
+        workflow = await executor.select_workflow(compiled.workflows, query)
+        if not workflow:
+            return ""
+
+        self.logger.info("Executing workflow '%s' for skill '%s'", workflow.id, self.skill.name)
+        return await executor.execute(workflow, query)
 
     # ------------------------------------------------------------------
     # Mode 1: Tool-call mode (for models that support it)

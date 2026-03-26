@@ -2,7 +2,10 @@
 
 import logging
 import os
+from functools import cached_property
 from typing import Any, Dict, Optional
+
+import yaml
 
 from pawlia.utils import collect_skill_dirs, parse_frontmatter
 
@@ -34,6 +37,32 @@ class AgentSkill:
         parts = content.split("---", 2)
         return parts[2].strip() if len(parts) >= 3 else content.strip()
 
+    @cached_property
+    def workflow(self) -> Optional["CompiledWorkflow"]:
+        """Load workflow.yaml if present and version matches."""
+        from pawlia.skills.workflow_schema import CompiledWorkflow
+
+        path = os.path.join(self.skill_path, "workflow.yaml")
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            compiled = CompiledWorkflow(**data)
+            skill_version = str(
+                self.metadata.get("metadata", {}).get("version", "")
+            )
+            if skill_version and compiled.version != skill_version:
+                logger.info(
+                    "Workflow for '%s' is outdated (skill=%s, workflow=%s)",
+                    self.name, skill_version, compiled.version,
+                )
+                return None
+            return compiled
+        except Exception as exc:
+            logger.warning("Failed to load workflow for '%s': %s", self.name, exc)
+            return None
+
     def as_openai_spec(self) -> Dict[str, Any]:
         """OpenAI tool spec for the ChatAgent (only name + description + query param)."""
         return {
@@ -63,6 +92,7 @@ class SkillLoader:
         skills_dir: str,
         config: Optional[Dict[str, Any]] = None,
         workspace_dir: Optional[str] = None,
+        require_workflow: bool = False,
     ) -> Dict[str, AgentSkill]:
         """Discover all valid skills in the given directory.
 
@@ -101,6 +131,14 @@ class SkillLoader:
                         continue
 
                 skill = AgentSkill(skill_path, metadata, workspace_dir=workspace_dir)
+
+                if require_workflow and skill.workflow is None:
+                    logger.info(
+                        "Skipping skill '%s': no compiled workflow",
+                        skill_name,
+                    )
+                    continue
+
                 skills[skill.name] = skill
                 logger.debug("Loaded skill: %s", skill.name)
 
