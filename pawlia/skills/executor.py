@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import (
@@ -104,7 +105,9 @@ class WorkflowExecutor:
         bound_llm = self.llm.bind_tools(tools)
 
         # Build system prompt with config context
-        system = "Use the available tools to fulfill the user's request.\n"
+        now = datetime.now()
+        system = f"Today is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}). Current time: {now.strftime('%H:%M')}.\n"
+        system += "Use the available tools to fulfill the user's request.\n"
         skill_config = self.context.get("skill_config")
         if skill_config:
             system += f"Config values: {json.dumps(skill_config, ensure_ascii=False)}\n"
