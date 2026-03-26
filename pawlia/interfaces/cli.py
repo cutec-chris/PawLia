@@ -104,7 +104,7 @@ async def start_cli(app: "App") -> None:
                 continue
             thread_id = f"cli_{int(time.time())}"
             active_fut = asyncio.current_task()
-            app.scheduler.acquire_llm()
+            await app.scheduler.acquire_llm()
             try:
                 response = await agent.run(message, thread_id=thread_id)
                 print(f"{_CYAN}Bot [Thread]:{_RESET} {response}\n")
@@ -146,7 +146,7 @@ async def start_cli(app: "App") -> None:
             continue
 
         active_fut = asyncio.current_task()
-        app.scheduler.acquire_llm()
+        await app.scheduler.acquire_llm()
         try:
             response = await agent.run(user_input)
             print(f"{_CYAN}Bot:{_RESET} {response}\n")

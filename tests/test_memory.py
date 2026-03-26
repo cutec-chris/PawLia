@@ -5,7 +5,8 @@ import tempfile
 from datetime import datetime, timedelta
 
 from pawlia.memory import (
-    IDLE_TIMEOUT_SECONDS,
+    FORCE_SUMMARY_EXCHANGES,
+    KEEP_RECENT_EXCHANGES,
     MAX_EXCHANGES_BEFORE_SUMMARY,
     MemoryManager,
     Session,
@@ -126,7 +127,27 @@ class TestMemoryManager:
             # Window is 4
             assert len(session.recent_bot_responses) == 4
 
-    def test_summarize_clears_state(self):
+    def test_summarize_keeps_recent_exchanges(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            # Add more than KEEP_RECENT_EXCHANGES exchanges
+            for i in range(8):
+                mm.append_exchange(session, f"q{i}", f"a{i}")
+
+            mm.summarize(session, "- User asked eight questions")
+
+            assert session.summary == "- User asked eight questions"
+            assert session.daily_history == ""
+            assert len(session.exchanges) == KEEP_RECENT_EXCHANGES
+            assert session.exchange_count == KEEP_RECENT_EXCHANGES
+            # Should keep the LAST 5
+            assert session.exchanges[0] == ("q3", "a3")
+            assert session.exchanges[-1] == ("q7", "a7")
+            assert session.recent_bot_responses == []
+
+    def test_summarize_keeps_all_when_fewer_than_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = self._make_mm(tmpdir)
             session = mm.load_session("u1")
@@ -137,10 +158,9 @@ class TestMemoryManager:
             mm.summarize(session, "- User asked two questions")
 
             assert session.summary == "- User asked two questions"
-            assert session.daily_history == ""
-            assert session.exchanges == []
-            assert session.exchange_count == 0
-            assert session.recent_bot_responses == []
+            assert len(session.exchanges) == 2
+            assert session.exchange_count == 2
+            assert session.exchanges[0] == ("q1", "a1")
 
     def test_summarize_persists_to_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -192,22 +212,27 @@ class TestShouldSummarize:
             mm.append_exchange(session, "q2", "The answer is 42 and that is final!")
             assert mm.should_summarize(session) == "repetition"
 
-    def test_idle_trigger(self):
+    def test_no_trigger_below_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)
             session = mm.load_session("u1")
-            mm.append_exchange(session, "q1", "a1")
-            # Fake old last_activity
-            session.last_activity = datetime.now() - timedelta(seconds=IDLE_TIMEOUT_SECONDS + 10)
-            assert mm.should_summarize(session) == "idle"
-
-    def test_idle_needs_exchanges(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            mm = MemoryManager(tmpdir)
-            session = mm.load_session("u1")
-            session.last_activity = datetime.now() - timedelta(seconds=IDLE_TIMEOUT_SECONDS + 10)
-            # No exchanges -> no idle trigger
+            # Use very different answers to avoid repetition trigger
+            answers = [
+                "Python is great", "The sky is blue", "42 is the answer",
+                "Cats are fluffy", "Berlin is a city", "Coffee is good",
+                "Rain tomorrow", "Books are nice", "Music rocks",
+            ]
+            for i in range(MAX_EXCHANGES_BEFORE_SUMMARY - 1):
+                mm.append_exchange(session, f"q{i}", answers[i])
             assert mm.should_summarize(session) == ""
+
+    def test_force_trigger(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u1")
+            for i in range(FORCE_SUMMARY_EXCHANGES):
+                mm.append_exchange(session, f"q{i}", f"unique answer {i}")
+            assert mm.should_summarize(session) == "force"
 
 
 class TestDetectRepetition:
@@ -266,3 +291,171 @@ class TestBuildSystemPrompt:
             prompt = mm.build_system_prompt(session)
             assert "Chris" in prompt
             assert "## Memory" in prompt
+
+
+class TestSystemPromptIdentityFiles:
+    """Verify soul.md, IDENTITY.md, and USER.md are all present in the prompt."""
+
+    def test_contains_soul_md(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_soul")
+            # _ensure_identity_files copies the template; check its content appears
+            prompt = mm.build_system_prompt(session)
+            assert "SOUL.md" in prompt or "Core Truths" in prompt, \
+                "soul.md content should be in the system prompt"
+
+    def test_contains_identity_md(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_id")
+            ws = mm._workspace_dir("u_id")
+            # Write a recognisable IDENTITY.md
+            with open(os.path.join(ws, "IDENTITY.md"), "w") as f:
+                f.write("# IDENTITY.md\n- **Name:** TestBot\n- **Creature:** Cat")
+            prompt = mm.build_system_prompt(session)
+            assert "TestBot" in prompt
+            assert "IDENTITY.md" in prompt
+
+    def test_contains_user_md(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_usr")
+            ws = mm._workspace_dir("u_usr")
+            with open(os.path.join(ws, "USER.md"), "w") as f:
+                f.write("# USER.md\n- **Name:** Chris\n- **Language:** Deutsch")
+            prompt = mm.build_system_prompt(session)
+            assert "Chris" in prompt
+            assert "USER.md" in prompt
+
+    def test_all_three_identity_files_present(self):
+        """All three identity files must appear in a single prompt."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_all3")
+            ws = mm._workspace_dir("u_all3")
+            with open(os.path.join(ws, "soul.md"), "w") as f:
+                f.write("# SOUL\nI am kind and helpful.")
+            with open(os.path.join(ws, "IDENTITY.md"), "w") as f:
+                f.write("# IDENTITY\n- **Name:** PawLia")
+            with open(os.path.join(ws, "USER.md"), "w") as f:
+                f.write("# USER\n- **Name:** Chris")
+            prompt = mm.build_system_prompt(session)
+            assert "SOUL" in prompt, "soul.md missing from prompt"
+            assert "PawLia" in prompt, "IDENTITY.md missing from prompt"
+            assert "Chris" in prompt, "USER.md missing from prompt"
+
+    def test_identity_files_order(self):
+        """Files are sorted alphabetically: IDENTITY < USER < soul."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_order")
+            ws = mm._workspace_dir("u_order")
+            with open(os.path.join(ws, "soul.md"), "w") as f:
+                f.write("MARKER_SOUL")
+            with open(os.path.join(ws, "IDENTITY.md"), "w") as f:
+                f.write("MARKER_IDENTITY")
+            with open(os.path.join(ws, "USER.md"), "w") as f:
+                f.write("MARKER_USER")
+            prompt = mm.build_system_prompt(session)
+            pos_id = prompt.index("MARKER_IDENTITY")
+            pos_usr = prompt.index("MARKER_USER")
+            pos_soul = prompt.index("MARKER_SOUL")
+            assert pos_id < pos_usr < pos_soul, \
+                f"Expected IDENTITY < USER < soul, got {pos_id}, {pos_usr}, {pos_soul}"
+
+
+class TestExchangesInMessageHistory:
+    """Verify that recent exchanges end up as HumanMessage/AIMessage pairs."""
+
+    def test_exchanges_replayed_in_messages(self):
+        """Simulate what ChatAgent.run does: build messages from session.exchanges."""
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_hist")
+            # Add 5 exchanges
+            for i in range(1, 6):
+                session.exchanges.append((f"user_msg_{i}", f"bot_msg_{i}"))
+
+            # Replicate the message-building logic from ChatAgent.run
+            prompt = mm.build_system_prompt(session)
+            messages = [SystemMessage(content=prompt)]
+            for user_text, bot_text in session.exchanges:
+                messages.append(HumanMessage(content=user_text))
+                messages.append(AIMessage(content=bot_text))
+
+            # 1 system + 5*2 exchange messages = 11
+            assert len(messages) == 11
+            assert isinstance(messages[0], SystemMessage)
+            # Check all exchanges are present in order
+            for i in range(1, 6):
+                human = messages[2 * i - 1]
+                ai = messages[2 * i]
+                assert isinstance(human, HumanMessage)
+                assert isinstance(ai, AIMessage)
+                assert human.content == f"user_msg_{i}"
+                assert ai.content == f"bot_msg_{i}"
+
+    def test_exchanges_not_in_system_prompt(self):
+        """Exchanges must NOT appear in the system prompt text itself."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_noexch")
+            session.exchanges.append(("hello user", "hello bot"))
+            prompt = mm.build_system_prompt(session)
+            assert "hello user" not in prompt
+            assert "hello bot" not in prompt
+
+    def test_thread_seeded_with_last_5(self):
+        """A new thread should be seeded with the last 5 main exchanges."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_thread")
+            # Add 7 exchanges to main session
+            for i in range(1, 8):
+                session.exchanges.append((f"msg_{i}", f"reply_{i}"))
+
+            thread_ctx = mm.get_thread_context(session, "new_thread")
+            assert len(thread_ctx) == 5
+            # Should be the LAST 5 (3..7)
+            assert thread_ctx[0] == ("msg_3", "reply_3")
+            assert thread_ctx[-1] == ("msg_7", "reply_7")
+
+
+class TestSummaryFromExchanges:
+    """Verify that summary replaces exchanges and appears in the prompt."""
+
+    def test_summarize_keeps_recent_exchanges(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_summ")
+            for i in range(10):
+                session.exchanges.append((f"q{i}", f"a{i}"))
+            session.exchange_count = 10
+
+            mm.summarize(session, "User asked 10 questions about Python.")
+
+            assert session.summary == "User asked 10 questions about Python."
+            assert len(session.exchanges) == KEEP_RECENT_EXCHANGES
+            assert session.exchange_count == KEEP_RECENT_EXCHANGES
+            assert session.exchanges[0] == ("q5", "a5")
+            assert session.exchanges[-1] == ("q9", "a9")
+
+    def test_summary_in_system_prompt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_summ2")
+            session.summary = "User discussed weather and pizza."
+            prompt = mm.build_system_prompt(session)
+            assert "## Conversation Summary" in prompt
+            assert "weather and pizza" in prompt
+
+    def test_no_summary_section_when_empty(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_nosumm")
+            session.summary = ""
+            prompt = mm.build_system_prompt(session)
+            assert "Conversation Summary" not in prompt

@@ -20,8 +20,7 @@ COPY skills/ skills/
 # Ensure user skills directory exists (may be empty if gitignored)
 RUN mkdir -p skills/user
 
-# Install runtime dependencies for all pre-bundled skills
-# (e.g. npm packages declared in SKILL.md under metadata.openclaw.install)
+# Install deps + compile workflows for all pre-bundled skills
 RUN python -m pawlia.install_skill_deps
 
 # Session data lives in a volume

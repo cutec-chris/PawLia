@@ -1,0 +1,46 @@
+skill: researcher
+version: '1.0'
+compiled_at: '2026-03-26'
+compiled_by: workflow_compiler
+workflows:
+- id: researcher_workflow
+  trigger: The query contains a researcher command (create, list, add, query, delete,
+    rename)
+  max_steps: 1
+  building_blocks:
+  - id: create_project
+    command: python {scripts_dir}/researcher.py create "{name}" "{description}"
+    description: Create a new research project with name and description
+    status_desc: Erstelle Forschungsprojekt {name}
+    verify:
+      exit_code: 0
+  - id: list_projects
+    command: python {scripts_dir}/researcher.py list
+    description: List all research projects
+    status_desc: Liste alle Forschungsprojekte
+    verify:
+      exit_code: 0
+  - id: add_url
+    command: python {scripts_dir}/researcher.py add "{project}" "{url}" {depth}
+    description: Add and index a URL to a research project
+    status_desc: Indexiere URL {url} für Projekt {project}
+    verify:
+      exit_code: 0
+  - id: query_project
+    command: python {scripts_dir}/researcher.py query "{project}" "{question}"
+    description: Query a research project's knowledge base
+    status_desc: Suche in Projekt {project} nach "{question}"
+    verify:
+      exit_code: 0
+  - id: delete_project
+    command: python {scripts_dir}/researcher.py delete "{project}"
+    description: Delete a research project
+    status_desc: Lösche Projekt {project}
+    verify:
+      exit_code: 0
+  - id: rename_project
+    command: python {scripts_dir}/researcher.py rename "{old}" "{new}"
+    description: Rename a research project
+    status_desc: Benenne Projekt {old} in {new} um
+    verify:
+      exit_code: 0

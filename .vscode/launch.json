@@ -6,6 +6,7 @@
             "type": "debugpy",
             "request": "launch",
             "module": "pawlia",
+            "args": ["--debug"],
             "python": "${workspaceFolder}/.venv/bin/python",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal"

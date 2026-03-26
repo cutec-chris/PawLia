@@ -52,7 +52,7 @@ COPY pawlia/ pawlia/
 COPY skills/ skills/
 RUN mkdir -p skills/user
 
-# Install npm packages declared in bundled skills
+# Install deps + compile workflows for all pre-bundled skills
 RUN python -m pawlia.install_skill_deps
 
 # Default voice model: German Kerstin low (~15 MB, 16 kHz)
