@@ -346,6 +346,8 @@ class MemoryManager:
             s in skills for s in ("perplexica", "searxng", "researcher")
         )
 
+        has_memory = "memory" in skills
+
         lines.append("")
         lines.append(
             "RULES:\n"
@@ -353,6 +355,12 @@ class MemoryManager:
             "you MUST call the matching skill. NEVER guess or make up answers.\n"
             "- Only answer directly for simple conversation (greetings, opinions)."
         )
+        if has_memory:
+            lines.append(
+                "- If the user asks about ANYTHING from past conversations, "
+                "or you are unsure whether something was discussed before, "
+                "you MUST call the **memory** skill. Do NOT answer from your context window alone."
+            )
 
         return "\n".join(lines)
 

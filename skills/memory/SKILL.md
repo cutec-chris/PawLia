@@ -1,14 +1,14 @@
 ---
 name: memory
 description: >
-  Long-term memory powered by LightRAG. Indexes daily conversation logs
-  and allows semantic search across all past conversations.
-  Use when the user asks about something from past conversations,
-  wants to recall what was discussed days/weeks ago, or says things like
-  "we talked about...", "remember when...", "what did I say about...".
-  The query should be a natural language question about past conversations.
-  Special commands: "index" to manually trigger indexing of new chat logs,
-  "status" to show indexing status.
+  Long-term memory — search everything from past conversations.
+  ALWAYS use this skill when the user: asks what was said before,
+  references earlier conversations, wants to know or remember something
+  from the past, asks "what did I/we/you say about...", "do you remember...",
+  "have we talked about...", "what was that thing about...",
+  or any question that requires knowledge from previous days/sessions.
+  Also use when YOU are unsure whether a topic was discussed before.
+  Commands: "index" to reindex, "status" to check index state.
 license: MIT
 metadata:
   author: Christian Ulrich
