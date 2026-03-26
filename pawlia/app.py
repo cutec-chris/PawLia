@@ -140,7 +140,6 @@ class App:
             memory=self.memory,
             session=session,
             vision_llm=vision_llm,
-            memory_indexer=self.scheduler.memory_indexer,
             **kwargs,
         )
         # Let the agent resolve per-thread model overrides at run() time
