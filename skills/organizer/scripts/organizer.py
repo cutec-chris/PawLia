@@ -72,6 +72,8 @@ def _save(path: str, data) -> None:
 
 def _out(data) -> None:
     print(json.dumps(data, ensure_ascii=False))
+    if isinstance(data, dict) and data.get("success") is False:
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +85,7 @@ def cmd_add_event(args) -> None:
     checklist = []
     if args.checklist:
         try:
-            checklist = json.loads(args.checklist)
+            checklist = json.loads(_strip_quotes(args.checklist))
         except json.JSONDecodeError:
             _out({"success": False, "error": "Invalid checklist JSON."})
             return
@@ -142,12 +144,19 @@ def cmd_delete_event(args) -> None:
 # Task commands
 # ---------------------------------------------------------------------------
 
+def _strip_quotes(s: str) -> str:
+    """Strip surrounding single quotes that cmd.exe leaves intact."""
+    if s and len(s) >= 2 and s[0] == "'" and s[-1] == "'":
+        return s[1:-1]
+    return s
+
+
 def cmd_add_task(args) -> None:
     # Parse reminders from JSON string if provided
     reminders = []
     if args.reminders:
         try:
-            reminders = json.loads(args.reminders)
+            reminders = json.loads(_strip_quotes(args.reminders))
         except json.JSONDecodeError:
             _out({"success": False, "error": "Invalid reminders JSON."})
             return
@@ -311,7 +320,7 @@ def cmd_add_job(args) -> None:
         "name": args.name,
         "script": args.script,
         "schedule": args.schedule,
-        "params": json.loads(args.params) if args.params else {},
+        "params": json.loads(_strip_quotes(args.params)) if args.params else {},
         "notify": not args.no_notify,
         "enabled": True,
         "created_at": datetime.now().isoformat(),
