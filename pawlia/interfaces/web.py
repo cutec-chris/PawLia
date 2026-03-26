@@ -426,9 +426,9 @@ async def start_web(app: "App", cfg: Dict) -> None:
                 shutil.rmtree(dest)
             shutil.copytree(skill_root, dest)
 
-        # Install declared deps in background thread
-        from pawlia.install_skill_deps import install_all_skill_deps
-        await asyncio.to_thread(install_all_skill_deps, _USER_SKILLS_DIR)
+        # Install deps + compile workflows
+        from pawlia.install_skill_deps import install_skills
+        await install_skills(_USER_SKILLS_DIR)
 
         logger.info("Web: skill '%s' installed", skill_name)
         return web.json_response({
