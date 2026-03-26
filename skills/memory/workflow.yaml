@@ -1,0 +1,36 @@
+skill: memory
+version: '1.0'
+compiled_at: '2026-03-26'
+compiled_by: workflow_compiler
+workflows:
+- id: memory_workflow
+  trigger: User asks a search question or management command (index/status)
+  max_steps: 2
+  building_blocks:
+  - id: search_block
+    command: python <scripts_dir>/memory.py search "{question}"
+    description: Perform semantic search for {question} in conversation history
+    status_desc: Suche nach {question}
+    verify:
+      exit_code: 0
+    on_error: error_handler
+  - id: index_block
+    command: python <scripts_dir>/memory.py index
+    description: Index new/updated daily chat logs
+    status_desc: Aktualisiere Index
+    verify:
+      exit_code: 0
+    on_error: error_handler
+  - id: status_block
+    command: python <scripts_dir>/memory.py status
+    description: Show number of indexed days
+    status_desc: Zeige Index-Status
+    verify:
+      exit_code: 0
+    on_error: error_handler
+  - id: error_handler
+    command: echo 'Fehler bei Memory-Operation' >&2
+    description: Handle script execution errors
+    status_desc: 'Fehler: {error}'
+    verify:
+      exit_code: 0

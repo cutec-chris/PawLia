@@ -1,0 +1,48 @@
+skill: files
+version: '1.1'
+compiled_at: '2026-03-26'
+compiled_by: workflow_compiler
+workflows:
+- id: file_operations
+  trigger: When the user wants to list, read, write, or delete files in their sandboxed
+    workspace
+  max_steps: 10
+  goal_check:
+    prompt: Haben Sie alle erforderlichen Dateioperationen abgeschlossen?
+    max_retries: 2
+  building_blocks:
+  - id: list_files
+    command: python {scripts_dir}/files.py list
+    description: List all files in the workspace
+    status_desc: Liste Dateien im Workspace
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: read_file
+    command: python {scripts_dir}/files.py read --filename "{filename}"
+    description: Read content of a specific file
+    status_desc: Lese Datei {filename}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: write_short_content
+    command: python {scripts_dir}/files.py write --filename "{filename}" --content
+      "{content}"
+    description: Write short content to a file
+    status_desc: Schreibe Inhalt in Datei {filename}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: write_multiline_content
+    command: 'python {scripts_dir}/files.py write --filename "{filename}" << ''EOF''
+
+      {content}
+
+      EOF'
+    description: Write multiline content to a file using heredoc
+    status_desc: Schreibe mehrzeiligen Inhalt in Datei {filename}
+    verify:
+      exit_code: 0
