@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import warnings
 
 
@@ -59,6 +60,9 @@ def main() -> None:
     args = parser.parse_args()
 
     _configure_logging(args.debug)
+
+    if args.debug and "PAWLIA_PROMPT_LOG" not in os.environ:
+        os.environ["PAWLIA_PROMPT_LOG"] = "/tmp/pawlia_prompt.log"
 
     asyncio.run(_run(args))
 

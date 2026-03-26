@@ -1,0 +1,25 @@
+skill: perplexica
+version: '1.0'
+compiled_at: '2026-03-26'
+compiled_by: workflow_compiler
+workflows:
+- id: perplexica_search
+  trigger: When the user wants to perform an AI-powered search using Perplexica
+  max_steps: 1
+  building_blocks:
+  - id: run_search
+    command: python {scripts_dir}/search.py --query "{query}" --url "{url}" --focus
+      {focus_mode}
+    description: Execute Perplexica AI search with specified query, URL, and focus
+      mode
+    status_desc: Suche {query} mit Perplexica
+    verify:
+      exit_code: 0
+      output_contains:
+      - answer
+      - sources
+    on_error: report_error
+  - id: report_error
+    command: 'echo ''Search failed: {stderr_message}'''
+    description: Report search error to user
+    status_desc: 'Suchfehler: {error}'

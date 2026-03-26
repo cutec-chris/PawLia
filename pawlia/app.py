@@ -15,7 +15,6 @@ from pawlia.memory import MemoryManager
 from pawlia.tools.base import ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.skills.loader import AgentSkill, SkillLoader
-from pawlia.install_skill_deps import install_all_skill_deps
 from pawlia.agents.chat import ChatAgent
 from pawlia.agents.skill_runner import SkillRunnerAgent
 from pawlia.scheduler import Scheduler
@@ -44,22 +43,26 @@ class App:
         self.tools = ToolRegistry()
         self.tools.register(BashTool())
 
-        # Skills — built-in and user-provided (skills/user/)
+        # Skills — built-in (already installed+compiled during Docker build)
         skills_dir = os.path.join(pkg_dir, "skills")
-        install_all_skill_deps(skills_dir)
-        self.skills: Dict[str, AgentSkill] = SkillLoader.discover(skills_dir, config)
+        require_workflow = config.get("workflow", {}).get("require_compiled", False)
+        self.skills: Dict[str, AgentSkill] = SkillLoader.discover(
+            skills_dir, config, require_workflow=require_workflow,
+        )
 
         # Also discover skills placed in any session workspace (session/<user>/workspace/skills/)
         # Requires skill-install.allow_workspace: true in config (default: false)
+        # Deps + workflows are installed/compiled at upload time, not here.
         allow_workspace = config.get("skill-install", {}).get("allow_workspace", False)
         if allow_workspace and os.path.isdir(self.session_dir):
             for user_entry in os.listdir(self.session_dir):
                 workspace_dir = os.path.join(self.session_dir, user_entry, "workspace")
                 workspace_skills_dir = os.path.join(workspace_dir, "skills")
                 if os.path.isdir(workspace_skills_dir):
-                    install_all_skill_deps(workspace_skills_dir)
                     workspace_skills = SkillLoader.discover(
-                        workspace_skills_dir, config, workspace_dir=workspace_dir
+                        workspace_skills_dir, config,
+                        workspace_dir=workspace_dir,
+                        require_workflow=require_workflow,
                     )
                     self.skills.update(workspace_skills)
 

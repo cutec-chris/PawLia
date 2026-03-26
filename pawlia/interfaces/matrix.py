@@ -316,7 +316,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     )
 
             agent.on_interim = _on_interim
-            app.scheduler.acquire_llm()
+            await app.scheduler.acquire_llm()
             try:
                 response = await agent.run(
                     text, images=images or None, thread_id=thread_id,

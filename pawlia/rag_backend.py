@@ -259,7 +259,10 @@ class LightRAGBackend(RagBackend):
         rag = await self._get_rag()
         return await rag.aquery(
             question,
-            param=lightrag.QueryParam(mode="global", enable_rerank=False),
+            param=lightrag.QueryParam(
+                mode="hybrid",
+                only_need_context=True,
+            ),
         )
 
 

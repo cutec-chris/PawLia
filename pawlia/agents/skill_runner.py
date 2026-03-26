@@ -23,6 +23,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from pawlia.agents.base import BaseAgent
+from pawlia.skills.executor import WorkflowExecutor
 from pawlia.skills.loader import AgentSkill
 from pawlia.tools.base import ToolRegistry
 
@@ -84,7 +85,14 @@ class SkillRunnerAgent(BaseAgent):
         return ""
 
     async def _attempt(self, query: str) -> str:
-        """Single attempt: tool-call mode, then optionally command mode."""
+        """Single attempt: workflow mode, then tool-call, then command mode."""
+        # Prefer compiled workflow if available
+        if self.skill.workflow:
+            result = await self._workflow_mode(query)
+            if result.strip():
+                return result
+            self.logger.info("Workflow mode produced no result, falling back")
+
         result = await self._tool_call_mode(query)
         if result.strip():
             return result
@@ -94,6 +102,31 @@ class SkillRunnerAgent(BaseAgent):
 
         self.logger.info("Falling back to command mode")
         return await self._command_mode(query)
+
+    # ------------------------------------------------------------------
+    # Mode 0: Workflow mode (compiled building blocks + dynamic planning)
+    # ------------------------------------------------------------------
+
+    async def _workflow_mode(self, query: str) -> str:
+        """Execute using the compiled workflow with building blocks."""
+        compiled = self.skill.workflow
+        if not compiled:
+            return ""
+
+        executor = WorkflowExecutor(
+            tool_registry=self.tool_registry,
+            context=self.context,
+            llm=self.llm,
+            logger=self.logger,
+        )
+        executor.on_step = self.on_step
+
+        workflow = await executor.select_workflow(compiled.workflows, query)
+        if not workflow:
+            return ""
+
+        self.logger.info("Executing workflow '%s' for skill '%s'", workflow.id, self.skill.name)
+        return await executor.execute(workflow, query)
 
     # ------------------------------------------------------------------
     # Mode 1: Tool-call mode (for models that support it)
@@ -197,14 +230,7 @@ class SkillRunnerAgent(BaseAgent):
 
         self.logger.debug("Tool call: %s(%s)", tc_name, json.dumps(tc_args)[:200])
         if self.on_step:
-            if tc_name == "bash":
-                step = tc_args.get("command", "")
-                # Show only script basenames, not full paths
-                parts = step.split()
-                parts = [os.path.basename(p) if os.sep in p or "/" in p else p for p in parts]
-                step = " ".join(parts)
-            else:
-                step = tc_name
+            step = self._friendly_step(tc_name, tc_args)
             asyncio.ensure_future(self.on_step(step[:120]))
         result = self.tool_registry.execute(tc_name, tc_args, self.context)
         result_str = str(result)
@@ -257,6 +283,45 @@ class SkillRunnerAgent(BaseAgent):
                 return line
 
         return ""
+
+    # ------------------------------------------------------------------
+    # Step display
+    # ------------------------------------------------------------------
+
+    def _friendly_step(self, tc_name: str, tc_args: dict) -> str:
+        """Return a short, user-friendly description of a tool call."""
+        if tc_name != "bash":
+            return tc_name
+
+        cmd = tc_args.get("command", "")
+        # Extract the script basename (e.g. "memory.py", "researcher.py")
+        parts = cmd.split()
+        script = ""
+        for p in parts:
+            base = os.path.basename(p)
+            if base.endswith((".py", ".mjs", ".js", ".sh")):
+                script = base.removesuffix(".py").removesuffix(".mjs").removesuffix(".js").removesuffix(".sh")
+                break
+
+        # Extract the sub-command (e.g. "search", "index", "status")
+        action = ""
+        if script:
+            # Sub-command is typically the argument after the script path
+            found_script = False
+            for p in parts:
+                if found_script:
+                    if not p.startswith("-") and not p.startswith("/") and ":" not in p:
+                        action = p
+                        break
+                if os.path.basename(p).startswith(script):
+                    found_script = True
+
+        if script and action:
+            return f"{script} → {action}"
+        if script:
+            return script
+        # Fallback: show just the command name
+        return os.path.basename(parts[0]) if parts else tc_name
 
     # ------------------------------------------------------------------
     # Prompt builders

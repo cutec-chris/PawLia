@@ -31,20 +31,10 @@ if TYPE_CHECKING:
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are PawLia, a helpful AI assistant.\n\n"
-    "IMPORTANT: You have skills (tools) available. "
-    "When a user asks for information that a skill can provide "
-    "(routes, train connections, searches, file operations, etc.), "
-    "you MUST call the matching skill. NEVER guess or make up answers — "
-    "always use the skill to get real data.\n"
-    "Only answer directly for simple conversation (greetings, opinions, "
-    "general knowledge).\n\n"
-    "IMPORTANT: Appointments, events, reminders, and tasks ALWAYS go to "
-    "the organizer skill — NEVER to the files skill. "
-    "The files skill is ONLY for personal notes and preferences "
-    "(name, language, habits), NOT for anything time-related.\n\n"
-    "IMPORTANT: Questions about past conversations, things discussed "
-    "previously, or anything the user wants to recall from earlier chats "
-    "ALWAYS go to the memory skill — NEVER answer from your own knowledge."
+    "You have skills (tools) available. "
+    "When a user asks for something a skill can handle, "
+    "you MUST call the matching skill. NEVER guess or make up answers.\n"
+    "Only answer directly for simple conversation (greetings, opinions)."
 )
 
 
@@ -54,6 +44,7 @@ class ChatAgent(BaseAgent):
     For every task that requires tools, it delegates to a SkillRunnerAgent
     via the ``skill_runner_factory`` callback.
     """
+
 
     def __init__(
         self,
@@ -121,7 +112,9 @@ class ChatAgent(BaseAgent):
         if system_prompt:
             prompt = system_prompt
         elif self.memory and self.session:
-            prompt = self.memory.build_system_prompt(self.session)
+            prompt = self.memory.build_system_prompt(
+                self.session, skills=self.skills,
+            )
         else:
             prompt = DEFAULT_SYSTEM_PROMPT
 

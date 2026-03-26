@@ -242,7 +242,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
                 return web.json_response({"response": "_Verwendung: /thread <Nachricht>_"})
             new_thread = f"web_{int(time.time())}"
             agent = agent_cache.get(user_id)
-            app.scheduler.acquire_llm()
+            await app.scheduler.acquire_llm()
             try:
                 resp = await agent.run(thread_msg, thread_id=new_thread)
             finally:
@@ -283,7 +283,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
             async def _on_skill_done(skill_name: str) -> None:
                 await _sse("skill_done", {"skill": skill_name})
 
-            app.scheduler.acquire_llm()
+            await app.scheduler.acquire_llm()
             try:
                 response = await agent.run(
                     message, images=images, thread_id=thread_id,
@@ -426,9 +426,9 @@ async def start_web(app: "App", cfg: Dict) -> None:
                 shutil.rmtree(dest)
             shutil.copytree(skill_root, dest)
 
-        # Install declared deps in background thread
-        from pawlia.install_skill_deps import install_all_skill_deps
-        await asyncio.to_thread(install_all_skill_deps, _USER_SKILLS_DIR)
+        # Install deps + compile workflows
+        from pawlia.install_skill_deps import install_skills
+        await install_skills(_USER_SKILLS_DIR)
 
         logger.info("Web: skill '%s' installed", skill_name)
         return web.json_response({
