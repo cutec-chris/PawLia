@@ -129,6 +129,20 @@ class MemoryIndexer:
             if _DATE_RE.match(f) and f != today
         )
 
+    async def query(self, user_id: str, question: str) -> str:
+        """Query the memory index for a user. Returns relevant context or empty string."""
+        if not self._enabled:
+            return ""
+        try:
+            backend = await self._get_backend(user_id)
+            result = await backend.query(question)
+            if not result or result.startswith("Keine relevanten") or result.startswith("Noch keine"):
+                return ""
+            return result
+        except Exception as e:
+            logger.debug("Memory query failed for %s: %s", user_id, e)
+            return ""
+
     async def process_user(self, user_id: str) -> None:
         """Index new/updated daily logs for a single user."""
         if not self._enabled:
