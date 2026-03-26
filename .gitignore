@@ -11,3 +11,4 @@ config.*.json
 .claude/*
 skills/user/*
 tmp/*
+.venv/*

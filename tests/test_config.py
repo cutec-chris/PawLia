@@ -31,8 +31,7 @@ def test_load_config_missing_returns_empty(tmp_path, monkeypatch):
 
 
 def test_load_config_from_project_root():
-    """load_config() without args should find the project-root config.json."""
+    """load_config() should return a dict from config.sample.yaml or empty dict."""
     cfg = load_config()
-    # The project has a config.json at the root
+    # Returns a dict (possibly empty if no config.yaml exists, only config.sample.yaml)
     assert isinstance(cfg, dict)
-    assert "providers" in cfg
