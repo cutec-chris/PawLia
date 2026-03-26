@@ -28,6 +28,7 @@ from pawlia.skills.loader import AgentSkill
 
 if TYPE_CHECKING:
     from pawlia.memory import MemoryManager, Session
+    from pawlia.memory_indexer import MemoryIndexer
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are PawLia, a helpful AI assistant.\n\n"
@@ -56,6 +57,7 @@ class ChatAgent(BaseAgent):
         session: Optional["Session"] = None,
         on_interim: Optional[InterimCallback] = None,
         vision_llm: Optional[ChatOpenAI] = None,
+        memory_indexer: Optional["MemoryIndexer"] = None,
     ):
         super().__init__(llm, logger)
         self.skills = skills
@@ -63,6 +65,7 @@ class ChatAgent(BaseAgent):
         self.memory = memory
         self.session = session
         self.on_interim = on_interim
+        self.memory_indexer = memory_indexer
         self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self.on_skill_done: Optional[InterimCallback] = None      # (skill_name)
@@ -130,6 +133,16 @@ class ChatAgent(BaseAgent):
             for user_text, bot_text in exchanges:
                 messages.append(HumanMessage(content=user_text))
                 messages.append(AIMessage(content=bot_text))
+
+        # Auto-query long-term memory and inject as context
+        if self.memory_indexer and self.session and user_input:
+            memory_context = await self._query_memory(self.session.user_id, user_input)
+            if memory_context:
+                messages[0] = SystemMessage(
+                    content=messages[0].content
+                    + "\n\n## Long-term Memory (automatically retrieved)\n"
+                    + memory_context
+                )
 
         # Resolve the LLMs to use for this call.
         # A thread-specific model override takes priority over the session default.
@@ -223,6 +236,23 @@ class ChatAgent(BaseAgent):
                 return bound, llm
 
         return (self.vision_bound_llm if images else self.bound_llm), self.llm
+
+    async def _query_memory(self, user_id: str, user_input: str) -> str:
+        """Query long-term memory for context relevant to the user's message."""
+        try:
+            result = await asyncio.wait_for(
+                self.memory_indexer.query(user_id, user_input),
+                timeout=10.0,
+            )
+            if result:
+                self.logger.debug("Memory context retrieved (%d chars)", len(result))
+            return result
+        except asyncio.TimeoutError:
+            self.logger.debug("Memory query timed out")
+            return ""
+        except Exception as exc:
+            self.logger.debug("Memory query error: %s", exc)
+            return ""
 
     async def _persist(
         self,

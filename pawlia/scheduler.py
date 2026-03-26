@@ -66,6 +66,17 @@ class Scheduler:
         self._boot_time = time.monotonic()
         self._last_activity: Dict[str, float] = {}
 
+    @property
+    def memory_indexer(self):
+        """Lazily initialize and return the memory indexer."""
+        if self._memory_indexer is None:
+            from pawlia.memory_indexer import MemoryIndexer
+            self._memory_indexer = MemoryIndexer(
+                self.session_dir, self._config,
+                llm_busy_check=lambda: self.llm_busy,
+            )
+        return self._memory_indexer
+
     def set_app(self, app: Any) -> None:
         """Set reference to the App (needed for background task processing)."""
         self._app = app
@@ -147,12 +158,8 @@ class Scheduler:
             self._checklist = ChecklistProcessor(self.session_dir, self._notify)
             self._jobs = JobRunner(self.session_dir, self._notify)
             self._task_reminders = TaskReminderProcessor(self.session_dir, self._notify)
-        if self._memory_indexer is None:
-            from pawlia.memory_indexer import MemoryIndexer
-            self._memory_indexer = MemoryIndexer(
-                self.session_dir, self._config,
-                llm_busy_check=lambda: self.llm_busy,
-            )
+        # Ensure memory indexer via property
+        _ = self.memory_indexer
 
     def _user_idle_minutes(self, user_id: str) -> float:
         """Return how many minutes a user has been idle."""
