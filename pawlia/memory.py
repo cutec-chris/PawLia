@@ -357,9 +357,9 @@ class MemoryManager:
         )
         if has_memory:
             lines.append(
-                "- If the user asks about ANYTHING from past conversations, "
-                "or you are unsure whether something was discussed before, "
-                "you MUST call the **memory** skill. Do NOT answer from your context window alone."
+                "- MEMORY RULE: When the user asks what you remember, what you know about them, "
+                "or anything related to past conversations — ALWAYS call the **memory** skill FIRST. "
+                "The conversation summary above is incomplete. Only memory has the full history."
             )
 
         return "\n".join(lines)

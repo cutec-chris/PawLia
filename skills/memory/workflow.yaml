@@ -8,21 +8,21 @@ workflows:
   max_steps: 2
   building_blocks:
   - id: search_block
-    command: python <scripts_dir>/memory.py search "{question}"
+    command: python {scripts_dir}/memory.py search "{question}"
     description: Perform semantic search for {question} in conversation history
     status_desc: Suche nach {question}
     verify:
       exit_code: 0
     on_error: error_handler
   - id: index_block
-    command: python <scripts_dir>/memory.py index
+    command: python {scripts_dir}/memory.py index
     description: Index new/updated daily chat logs
     status_desc: Aktualisiere Index
     verify:
       exit_code: 0
     on_error: error_handler
   - id: status_block
-    command: python <scripts_dir>/memory.py status
+    command: python {scripts_dir}/memory.py status
     description: Show number of indexed days
     status_desc: Zeige Index-Status
     verify:
