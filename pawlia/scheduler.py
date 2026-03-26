@@ -348,6 +348,9 @@ class Scheduler:
 
             try:
                 fire_at = datetime.fromisoformat(reminder["fire_at"])
+                # Ensure naive comparison — strip timezone if present
+                if fire_at.tzinfo is not None:
+                    fire_at = fire_at.replace(tzinfo=None)
             except (ValueError, KeyError):
                 continue
 
@@ -384,6 +387,8 @@ class Scheduler:
 
             try:
                 start = datetime.fromisoformat(event["start"])
+                if start.tzinfo is not None:
+                    start = start.replace(tzinfo=None)
             except (ValueError, KeyError):
                 continue
 

@@ -16,7 +16,7 @@ import re
 import shutil
 from datetime import datetime
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Summarization trigger thresholds
 MAX_EXCHANGES_BEFORE_SUMMARY = 10
@@ -92,7 +92,9 @@ class MemoryManager:
 
     def _ensure_identity_files(self, workspace: str) -> None:
         """Copy missing identity templates + bootstrap.md into workspace.
-        When all three are filled (differ from their templates), delete bootstrap.md.
+
+        Once all three identity files have been customized (differ from
+        their templates), bootstrap.md is deleted automatically.
         """
         identity_map = {
             "soul.md": "soul.md",
@@ -100,11 +102,11 @@ class MemoryManager:
             "USER.md": "user.md",
         }
         prompts_dir = self._prompts_dir()
+        bootstrap_dst = os.path.join(workspace, "bootstrap.md")
 
         missing = [ws for ws in identity_map if not os.path.exists(os.path.join(workspace, ws))]
 
         if missing:
-            bootstrap_dst = os.path.join(workspace, "bootstrap.md")
             if not os.path.exists(bootstrap_dst):
                 bootstrap_src = os.path.join(prompts_dir, "bootstrap.md")
                 if os.path.exists(bootstrap_src):
@@ -115,6 +117,28 @@ class MemoryManager:
                 src = os.path.join(prompts_dir, identity_map[ws_name])
                 if os.path.exists(src):
                     shutil.copy2(src, dst)
+        elif os.path.exists(bootstrap_dst):
+            # All identity files exist — check if they've been customized
+            all_customized = True
+            for ws_name, tmpl_name in identity_map.items():
+                tmpl = os.path.join(prompts_dir, tmpl_name)
+                ws_file = os.path.join(workspace, ws_name)
+                if os.path.exists(tmpl) and self._read(ws_file) == self._read(tmpl):
+                    all_customized = False
+                    break
+            if all_customized:
+                os.remove(bootstrap_dst)
+                self.logger.info("Bootstrap complete — removed bootstrap.md")
+
+    @staticmethod
+    def _strip_frontmatter(text: str) -> str:
+        """Remove YAML frontmatter (--- ... ---) from markdown content."""
+        stripped = text.lstrip()
+        if stripped.startswith("---"):
+            parts = stripped.split("---", 2)
+            if len(parts) >= 3:
+                return parts[2]
+        return text
 
     # ------------------------------------------------------------------
     # Load / save
@@ -253,8 +277,16 @@ class MemoryManager:
         with open(path, "a", encoding="utf-8") as f:
             f.write(entry)
 
-    def build_system_prompt(self, session: Session) -> str:
-        """Build the system prompt from workspace identity files + memory."""
+    def build_system_prompt(
+        self,
+        session: Session,
+        skills: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Build the system prompt from workspace identity files + memory.
+
+        ``skills`` maps skill name → AgentSkill so the prompt can list
+        each skill with its description.
+        """
         workspace = self._workspace_dir(session.user_id)
         self._ensure_identity_files(workspace)
         parts: list[str] = []
@@ -269,7 +301,9 @@ class MemoryManager:
             ws_files = []
 
         for filename in ws_files:
-            content = self._read(os.path.join(workspace, filename))
+            content = self._strip_frontmatter(
+                self._read(os.path.join(workspace, filename))
+            )
             if content.strip():
                 parts.append(f"[Source: {filename}]\n{content.strip()}")
 
@@ -288,18 +322,39 @@ class MemoryManager:
             f"Current date and time: {datetime.now().strftime('%A, %d. %B %Y %H:%M')}"
         )
 
-        parts.append(
-            "IMPORTANT: You have skills (tools) available. "
-            "When a user asks for information that a skill can provide "
-            "you MUST call the matching skill. NEVER guess or make up answers — "
-            "always use the skill to get real data.\n"
-            "Only answer directly for simple conversation (greetings, opinions, "
-            "general knowledge).\n"
-            "The files skill is ONLY for when the user explicitly asks to "
-            "read or write files, or to edit soul.md, IDENTITY.md, or USER.md."
-        )
+        # Skill instructions
+        skill_block = self._build_skill_instructions(skills or {})
+        parts.append(skill_block)
 
         return "\n\n════════════════════\n\n".join(parts)
+
+    @staticmethod
+    def _build_skill_instructions(skills: Dict[str, Any]) -> str:
+        """Build explicit skill usage instructions for the system prompt."""
+        lines = [
+            "## Your capabilities",
+            "You have the following skills available as tools:",
+        ]
+        for name, skill in skills.items():
+            desc = getattr(skill, "description", "")
+            if desc:
+                lines.append(f"- **{name}**: {desc}")
+            else:
+                lines.append(f"- {name}")
+
+        has_search = any(
+            s in skills for s in ("perplexica", "searxng", "researcher")
+        )
+
+        lines.append("")
+        lines.append(
+            "RULES:\n"
+            "- When a user asks for something a skill can handle, "
+            "you MUST call the matching skill. NEVER guess or make up answers.\n"
+            "- Only answer directly for simple conversation (greetings, opinions)."
+        )
+
+        return "\n".join(lines)
 
     def append_exchange(
         self,
