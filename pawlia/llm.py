@@ -79,6 +79,9 @@ class _NoThinkWrapper:
     def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         return self._llm.invoke(self._inject(messages), **kwargs)
 
+    def bind_tools(self, *args: Any, **kwargs: Any) -> "_NoThinkWrapper":
+        return _NoThinkWrapper(self._llm.bind_tools(*args, **kwargs))
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._llm, name)
 

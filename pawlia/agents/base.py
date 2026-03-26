@@ -2,17 +2,39 @@
 
 import asyncio
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, List, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 
 _RE_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
 # Chat-template tokens that some models leak into their output
 _RE_CHAT_TOKENS = re.compile(r"<\|.*?\|>.*", re.DOTALL)
+
+_PROMPT_LOG = os.environ.get("PAWLIA_PROMPT_LOG")  # set via --debug
+
+
+def log_prompt(messages: List[BaseMessage]) -> None:
+    """Write the full message list to debug log file if PAWLIA_PROMPT_LOG is set.
+
+    Overwrites the file each time so it always contains the last context.
+    """
+    if not _PROMPT_LOG:
+        return
+    try:
+        with open(_PROMPT_LOG, "w", encoding="utf-8") as f:
+            f.write(f"--- {datetime.now().isoformat()} ---\n\n")
+            for msg in messages:
+                role = msg.__class__.__name__.replace("Message", "").upper()
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                f.write(f"[{role}]\n{content}\n\n")
+    except OSError:
+        pass
 
 
 class BaseAgent(ABC):
@@ -32,6 +54,7 @@ class BaseAgent(ABC):
 
         Runs synchronous ``llm.invoke`` in a thread to keep the event loop free.
         """
+        log_prompt(messages)
         target = llm or self.llm
 
         def _call() -> AIMessage:
