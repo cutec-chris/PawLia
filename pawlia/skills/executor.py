@@ -235,16 +235,20 @@ class WorkflowExecutor:
         return None
 
     def _substitute(self, template: str, params: Dict[str, str]) -> str:
-        """Replace {param} placeholders in a command template."""
+        """Replace {param} and <param> placeholders in a command template."""
         result = template
-        if "{scripts_dir}" in result:
-            scripts_dir = self.context.get("cwd", "")
-            if scripts_dir:
-                scripts_dir = os.path.join(os.path.abspath(scripts_dir), "scripts")
-            result = result.replace("{scripts_dir}", scripts_dir)
 
+        # Resolve scripts_dir from context
+        scripts_dir = self.context.get("cwd", "")
+        if scripts_dir:
+            scripts_dir = os.path.join(os.path.abspath(scripts_dir), "scripts")
+        result = result.replace("{scripts_dir}", scripts_dir)
+        result = result.replace("<scripts_dir>", scripts_dir)
+
+        # Replace both {key} and <key> for all params
         for key, value in params.items():
             result = result.replace(f"{{{key}}}", str(value))
+            result = result.replace(f"<{key}>", str(value))
 
         return result
 
