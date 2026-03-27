@@ -126,9 +126,38 @@ class ChatAgent(BaseAgent):
                 exchanges = self.memory.get_thread_context(self.session, thread_id)
             else:
                 exchanges = self.session.exchanges
-            for user_text, bot_text in exchanges:
+            for exchange in exchanges:
+                # Unpack 2-tuple or 3-tuple (old format compatibility)
+                if len(exchange) == 2:
+                    user_text, bot_text = exchange  # type: ignore
+                    tool_calls_info = None
+                else:
+                    user_text, bot_text, tool_calls_info = exchange  # type: ignore
+
                 messages.append(HumanMessage(content=user_text))
-                messages.append(AIMessage(content=bot_text))
+
+                # Restore tool calls if present
+                if tool_calls_info:
+                    # Create AIMessage with reconstructed tool_calls
+                    reconstructed_tool_calls = []
+                    for tc in tool_calls_info:
+                        reconstructed_tool_calls.append({
+                            "name": tc["name"],
+                            "args": tc["args"],
+                            "id": f"restored_{len(reconstructed_tool_calls)}",
+                        })
+                    messages.append(AIMessage(
+                        content=bot_text,
+                        tool_calls=reconstructed_tool_calls,
+                    ))
+                    # Add ToolMessage for each restored tool call with its result
+                    for i, tc in enumerate(tool_calls_info):
+                        messages.append(ToolMessage(
+                            content=tc["result"],
+                            tool_call_id=f"restored_{i}",
+                        ))
+                else:
+                    messages.append(AIMessage(content=bot_text))
 
         # Resolve the LLMs to use for this call.
         # A thread-specific model override takes priority over the session default.
@@ -167,6 +196,9 @@ class ChatAgent(BaseAgent):
         # Skill calls detected -> execute via SkillRunners
         messages.append(response)  # AIMessage with tool_calls
 
+        # Collect tool call information for persistent storage
+        tool_calls_info: List[Dict[str, Any]] = []
+
         for tool_call in response.tool_calls:
             skill_name = tool_call["name"]
             query = tool_call.get("args", {}).get("query", "")
@@ -191,6 +223,13 @@ class ChatAgent(BaseAgent):
                 self.logger.warning("Unknown skill called: %s", skill_name)
                 result = f"Error: Unknown skill '{skill_name}'."
 
+            # Store tool call info for persistent storage
+            tool_calls_info.append({
+                "name": skill_name,
+                "args": tool_call.get("args", {}),
+                "result": result,
+            })
+
             messages.append(ToolMessage(
                 content=result,
                 tool_call_id=tool_call.get("id", ""),
@@ -203,7 +242,12 @@ class ChatAgent(BaseAgent):
         self.logger.debug("Turn 2 response: content=%s",
                           repr(final.content[:200]) if final.content else "(empty)")
         result = self.extract_text(final)
-        await self._persist(user_input, result, track_similarity=False, thread_id=thread_id)
+        await self._persist(
+            user_input, result,
+            track_similarity=False,
+            thread_id=thread_id,
+            tool_calls_info=tool_calls_info,
+        )
         return result
 
     def _resolve_llms(
@@ -230,6 +274,7 @@ class ChatAgent(BaseAgent):
         *,
         track_similarity: bool = True,
         thread_id: Optional[str] = None,
+        tool_calls_info: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Save exchange to daily log and schedule summarization if needed."""
         if not (self.memory and self.session):
@@ -237,12 +282,15 @@ class ChatAgent(BaseAgent):
 
         if thread_id:
             # Thread exchanges go to a separate log; main session is unchanged.
-            self.memory.append_thread_exchange(self.session, thread_id, user_input, response)
+            self.memory.append_thread_exchange(
+                self.session, thread_id, user_input, response, tool_calls_info
+            )
             return
 
         self.memory.append_exchange(
             self.session, user_input, response,
             track_similarity=track_similarity,
+            tool_calls_info=tool_calls_info,
         )
 
         # Summarization is handled by the Scheduler based on idle time.

@@ -30,7 +30,8 @@ class TestParseExchanges:
     def test_single_exchange(self):
         history = "\n[12:30:45] User: hello\nAssistant: hi there"
         result = MemoryManager._parse_exchanges(history)
-        assert result == [("hello", "hi there")]
+        # New format: (user_text, bot_text, tool_calls_info)
+        assert result == [("hello", "hi there", None)]
 
     def test_multiple_exchanges(self):
         history = (
@@ -39,8 +40,8 @@ class TestParseExchanges:
         )
         result = MemoryManager._parse_exchanges(history)
         assert len(result) == 2
-        assert result[0] == ("first", "response1")
-        assert result[1] == ("second", "response2")
+        assert result[0] == ("first", "response1", None)
+        assert result[1] == ("second", "response2", None)
 
     def test_multiline_response(self):
         history = (
@@ -87,7 +88,7 @@ class TestMemoryManager:
 
             assert session.exchange_count == 1
             assert len(session.exchanges) == 1
-            assert session.exchanges[0] == ("hi", "hello")
+            assert session.exchanges[0] == ("hi", "hello", None)
             assert "hi" in session.daily_history
             assert "hello" in session.daily_history
             assert len(session.recent_bot_responses) == 1
@@ -113,8 +114,8 @@ class TestMemoryManager:
             # Load fresh session from disk
             session2 = mm.load_session("u1")
             assert session2.exchange_count == 2
-            assert session2.exchanges[0] == ("q1", "a1")
-            assert session2.exchanges[1] == ("q2", "a2")
+            assert session2.exchanges[0] == ("q1", "a1", None)
+            assert session2.exchanges[1] == ("q2", "a2", None)
 
     def test_similarity_window_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -143,8 +144,8 @@ class TestMemoryManager:
             assert len(session.exchanges) == KEEP_RECENT_EXCHANGES
             assert session.exchange_count == KEEP_RECENT_EXCHANGES
             # Should keep the LAST 5
-            assert session.exchanges[0] == ("q3", "a3")
-            assert session.exchanges[-1] == ("q7", "a7")
+            assert session.exchanges[0] == ("q3", "a3", None)
+            assert session.exchanges[-1] == ("q7", "a7", None)
             assert session.recent_bot_responses == []
 
     def test_summarize_keeps_all_when_fewer_than_limit(self):
@@ -160,7 +161,7 @@ class TestMemoryManager:
             assert session.summary == "- User asked two questions"
             assert len(session.exchanges) == 2
             assert session.exchange_count == 2
-            assert session.exchanges[0] == ("q1", "a1")
+            assert session.exchanges[0] == ("q1", "a1", None)
 
     def test_summarize_persists_to_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:
