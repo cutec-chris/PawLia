@@ -240,7 +240,7 @@ class TestChatAgentPersist:
             result = await agent.run("Hi")
             assert result == "Hello!"
             assert session.exchange_count == 1
-            assert session.exchanges[0] == ("Hi", "Hello!")
+            assert session.exchanges[0] == ("Hi", "Hello!", None)
 
     @pytest.mark.asyncio
     async def test_skill_response_persists_no_similarity(self):

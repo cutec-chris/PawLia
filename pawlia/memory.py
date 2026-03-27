@@ -10,6 +10,7 @@ Directory layout:
             ...                       skill working files
 """
 
+import json
 import logging
 import os
 import re
@@ -37,7 +38,9 @@ class Session:
         self.user_memory: str = ""
 
         # Structured exchange pairs for LLM message building
-        self.exchanges: List[Tuple[str, str]] = []  # (user_text, bot_text)
+        # (user_text, bot_text, tool_calls_info) where tool_calls_info is a list of
+        # dicts with 'name', 'args', and 'result' keys, or None if no tool calls
+        self.exchanges: List[Tuple[str, str, Optional[List[Dict[str, Any]]]]] = []  # type: ignore
 
         # Summarization state
         self.exchange_count: int = 0
@@ -164,14 +167,48 @@ class MemoryManager:
         return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_model.txt")
 
     @staticmethod
-    def _parse_exchanges(history: str) -> List[Tuple[str, str]]:
-        """Parse flat history text into (user, assistant) pairs."""
-        # Format: \n[HH:MM:SS] User: ...\nAssistant: ...
+    def _parse_exchanges(history: str) -> List[Tuple[str, str, Optional[List[Dict[str, Any]]]]]:
+        """Parse flat history text into (user, assistant, tool_calls_info) pairs.
+
+        Format:
+            [HH:MM:SS] User: ...
+            Assistant: ...
+            <!-- TOOL_CALL: {"name": "...", "args": {...}, "result": "..."} -->
+        """
         pattern = re.compile(
             r"\[[\d:]+\]\s*User:\s*(.*?)\nAssistant:\s*(.*?)(?=\n\[[\d:]+\]\s*User:|\Z)",
             re.DOTALL,
         )
-        return [(m.group(1).strip(), m.group(2).strip()) for m in pattern.finditer(history)]
+
+        exchanges: List[Tuple[str, str, Optional[List[Dict[str, Any]]]]] = []
+        for m in pattern.finditer(history):
+            user_text = m.group(1).strip()
+            bot_text = m.group(2).strip()
+
+            # Parse tool call comments from bot_text
+            tool_calls_info = None
+            tool_pattern = re.compile(r'<!--\s*TOOL_CALL:\s*(\{.*?\})\s*-->', re.DOTALL)
+            tool_matches = tool_pattern.findall(bot_text)
+
+            if tool_matches:
+                tool_calls_info = []
+                # Remove tool comments from visible bot_text
+                visible_bot_text = bot_text
+                for match in tool_matches:
+                    try:
+                        tool_calls_info.append(json.loads(match))
+                        # Remove the comment from visible text
+                        visible_bot_text = visible_bot_text.replace(
+                            f'<!-- TOOL_CALL: {match} -->', ''
+                        ).strip()
+                    except json.JSONDecodeError:
+                        pass
+                bot_text = visible_bot_text
+            else:
+                tool_calls_info = None
+
+            exchanges.append((user_text, bot_text, tool_calls_info))
+        return exchanges
 
     def load_session(self, user_id: str) -> Session:
         """Load or return cached session for a user.
@@ -263,14 +300,22 @@ class MemoryManager:
         thread_id: str,
         user_text: str,
         bot_text: str,
+        tool_calls_info: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Append an exchange to a thread's log (RAM; disk skipped if private)."""
         exchanges = self.get_thread_context(session, thread_id)
-        exchanges.append((user_text, bot_text))
+        exchanges.append((user_text, bot_text, tool_calls_info))
         if thread_id in session.private_threads:
             return
         timestamp = datetime.now().strftime("%H:%M:%S")
         entry = f"\n[{timestamp}] User: {user_text}\nAssistant: {bot_text}"
+
+        # Append tool call information as HTML comments (hidden from display)
+        if tool_calls_info:
+            for tc in tool_calls_info:
+                tool_json = json.dumps(tc, ensure_ascii=False)
+                entry += f"\n<!-- TOOL_CALL: {tool_json} -->"
+
         path = self._thread_daily_path(
             session.user_id, thread_id, session.current_date_str
         )
@@ -371,17 +416,27 @@ class MemoryManager:
         bot_text: str,
         *,
         track_similarity: bool = True,
+        tool_calls_info: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Append a user/assistant exchange to the daily log (RAM + disk).
 
         When ``track_similarity`` is False the response is NOT added to
         the similarity window.  Use this for skill-backed responses whose
         content is inherently repetitive (e.g. file listings).
+
+        ``tool_calls_info`` is a list of dicts with 'name', 'args', and 'result'
+        keys representing tool calls made during this exchange.
         """
         timestamp = datetime.now().strftime("%H:%M:%S")
         entry = f"\n[{timestamp}] User: {user_text}\nAssistant: {bot_text}"
 
-        session.exchanges.append((user_text, bot_text))
+        # Append tool call information as HTML comments (hidden from display)
+        if tool_calls_info:
+            for tc in tool_calls_info:
+                tool_json = json.dumps(tc, ensure_ascii=False)
+                entry += f"\n<!-- TOOL_CALL: {tool_json} -->"
+
+        session.exchanges.append((user_text, bot_text, tool_calls_info))
         session.exchange_count += 1
         session.last_activity = datetime.now()
 
