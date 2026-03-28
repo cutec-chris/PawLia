@@ -150,6 +150,14 @@ def md_to_text(text: str) -> str:
     return text
 
 
+def preview_text(text: Optional[str], limit: int = 120) -> str:
+    """Normalize text for single-line logs and truncate long output."""
+    normalized = " ".join((text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1] + "…"
+
+
 def md_to_tg_html(text: str) -> str:
     """Convert markdown to Telegram-compatible HTML subset."""
     # Fenced code blocks

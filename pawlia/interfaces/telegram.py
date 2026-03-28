@@ -34,7 +34,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     """
     token: str = cfg["token"]
 
-    from pawlia.interfaces.common import AgentCache, build_status, format_status, md_to_tg_html, handle_model_command
+    from pawlia.interfaces.common import AgentCache, build_status, format_status, md_to_tg_html, handle_model_command, preview_text
 
     # One agent per user; thread context is passed at run() time
     agent_cache = AgentCache(app)
@@ -107,6 +107,8 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                 )
             finally:
                 app.scheduler.release_llm()
+            ctx_label = f" [thread {thread_id}]" if thread_id else ""
+            logger.info("Telegram: response to %s%s: %s", user_id, ctx_label, preview_text(response))
             await update.message.reply_text(
                 md_to_tg_html(response), parse_mode=ParseMode.HTML,
             )

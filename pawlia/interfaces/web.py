@@ -132,7 +132,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
     if not config_path:
         logger.warning("Web: could not locate config file — provider/model edits disabled")
 
-    from pawlia.interfaces.common import AgentCache
+    from pawlia.interfaces.common import AgentCache, preview_text
 
     agent_cache = AgentCache(app)
     pending: Dict[str, List[str]] = defaultdict(list)
@@ -247,6 +247,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
                 resp = await agent.run(thread_msg, thread_id=new_thread)
             finally:
                 app.scheduler.release_llm()
+            logger.info("Web chat: %s [thread %s]: %s", user_id, new_thread, preview_text(resp))
             return web.json_response({"response": resp, "thread_id": new_thread})
 
         # ── Normal message (SSE stream) ──
@@ -293,6 +294,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
                 )
             finally:
                 app.scheduler.release_llm()
+            ctx = f" [thread {thread_id}]" if thread_id else ""
+            logger.info("Web chat: %s%s -> %s", user_id, ctx, preview_text(response))
             await _sse("done", {"response": response})
         except Exception as e:
             logger.error("Web chat error: %s", e, exc_info=True)
