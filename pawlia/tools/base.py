@@ -1,7 +1,47 @@
 """Tool base class and registry."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+import json
 from typing import Any, Dict, List, Optional
+
+
+@dataclass
+class ToolExecutionResult:
+    """Structured result for tool execution and tool-loop recovery."""
+
+    ok: bool
+    tool_name: str
+    normalized_args: Dict[str, Any]
+    output: Any = ""
+    error: str = ""
+    error_code: str = ""
+    retryable: bool = False
+    hint: str = ""
+
+    def to_tool_message(self) -> str:
+        """Serialize the result for a ToolMessage payload."""
+        if self.ok:
+            if isinstance(self.output, str):
+                return self.output
+            return json.dumps(self.output, ensure_ascii=False)
+
+        payload = {
+            "ok": False,
+            "tool": self.tool_name,
+            "error": self.error,
+            "error_code": self.error_code,
+            "retryable": self.retryable,
+            "hint": self.hint,
+            "args": self.normalized_args,
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    def legacy_text(self) -> str:
+        """Backward-compatible text representation for legacy callers/tests."""
+        if self.ok:
+            return self.to_tool_message()
+        return f"Error: {self.error}"
 
 
 class Tool(ABC):
@@ -140,21 +180,62 @@ class ToolRegistry:
     def get_specs(self) -> List[Dict[str, Any]]:
         return [t.as_openai_spec() for t in self.tools.values()]
 
-    def execute(self, name: str, args: Any,
-                context: Optional[Dict[str, Any]] = None) -> Any:
+    def execute_detailed(
+        self,
+        name: str,
+        args: Any,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> ToolExecutionResult:
         original_name = name
         name = self._resolve(name)
         tool = self.tools.get(name)
         if not tool:
-            return f"Error: Tool '{original_name}' not found."
+            return ToolExecutionResult(
+                ok=False,
+                tool_name=original_name,
+                normalized_args={},
+                error=f"Tool '{original_name}' not found.",
+                error_code="tool_not_found",
+                retryable=True,
+                hint="Use one of the available tool names exactly as exposed in the tool list.",
+            )
+
         normalized_args = tool.normalize_args(args)
         error = tool.validate_args(normalized_args)
         if error:
-            return f"Error: Invalid arguments for tool '{name}': {error}"
+            return ToolExecutionResult(
+                ok=False,
+                tool_name=name,
+                normalized_args=normalized_args,
+                error=f"Invalid arguments for tool '{name}': {error}",
+                error_code="invalid_arguments",
+                retryable=True,
+                hint="Adjust the arguments to match the tool schema and call the tool again.",
+            )
+
         try:
-            return tool.execute(normalized_args, context)
+            output = tool.execute(normalized_args, context)
+            return ToolExecutionResult(
+                ok=True,
+                tool_name=name,
+                normalized_args=normalized_args,
+                output=output,
+            )
         except Exception as e:
-            return f"Error: {e}"
+            return ToolExecutionResult(
+                ok=False,
+                tool_name=name,
+                normalized_args=normalized_args,
+                error=str(e),
+                error_code="execution_error",
+                retryable=True,
+                hint="Inspect the tool output, correct the command or parameters, and retry if needed.",
+            )
+
+    def execute(self, name: str, args: Any,
+                context: Optional[Dict[str, Any]] = None) -> Any:
+        result = self.execute_detailed(name, args, context)
+        return result.output if result.ok else result.legacy_text()
 
     def _resolve(self, name: str) -> str:
         """Fuzzy-match tool name (ignore dashes/underscores/case)."""

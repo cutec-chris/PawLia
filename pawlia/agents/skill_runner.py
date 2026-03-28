@@ -25,7 +25,7 @@ from langchain_openai import ChatOpenAI
 from pawlia.agents.base import BaseAgent
 from pawlia.skills.executor import WorkflowExecutor
 from pawlia.skills.loader import AgentSkill
-from pawlia.tools.base import ToolRegistry
+from pawlia.tools.base import ToolExecutionResult, ToolRegistry
 
 _RE_CODE_BLOCK = re.compile(r"```(?:bash|sh)?\s*\n(.+?)```", re.DOTALL)
 
@@ -170,10 +170,15 @@ class SkillRunnerAgent(BaseAgent):
         messages.append(response)
 
         has_error = False
+        retryable_error = False
         for tc in response.tool_calls:
             result = self._execute_tool_call(tc, messages)
-            if result.startswith("Error"):
+            if not result.ok:
                 has_error = True
+                retryable_error = retryable_error or result.retryable
+
+        if retryable_error:
+            messages.append(HumanMessage(content=self._retry_guidance()))
 
         nudge_count = 0
         total_tool_calls = len(first_response.tool_calls)
@@ -211,38 +216,57 @@ class SkillRunnerAgent(BaseAgent):
                 break
             messages.append(response)
             has_error = False
+            retryable_error = False
             total_tool_calls += len(response.tool_calls)
             for tc in response.tool_calls:
                 result = self._execute_tool_call(tc, messages)
-                if result.startswith("Error"):
+                if not result.ok:
                     has_error = True
+                    retryable_error = retryable_error or result.retryable
+            if retryable_error:
+                messages.append(HumanMessage(content=self._retry_guidance()))
         else:
             if response.tool_calls:
                 response = await self._invoke(messages, llm=self.llm)
 
         return self.extract_text(response)
 
-    def _execute_tool_call(self, tc: dict, messages: List[BaseMessage]) -> str:
+    def _execute_tool_call(self, tc: dict, messages: List[BaseMessage]) -> ToolExecutionResult:
         """Execute a single tool call, append result to messages, and return it."""
         tc_name = str(tc.get("name", "") or "").strip()
         tc_args = tc.get("args", {})
         tc_id = tc.get("id", "")
 
         if not tc_name:
-            result_str = "Error: Invalid tool call: missing tool name."
-            messages.append(ToolMessage(content=result_str, tool_call_id=tc_id))
-            return result_str
+            result = ToolExecutionResult(
+                ok=False,
+                tool_name="",
+                normalized_args={},
+                error="Invalid tool call: missing tool name.",
+                error_code="tool_call_missing_name",
+                retryable=True,
+                hint="Call one of the available tools and include its exact name.",
+            )
+            messages.append(ToolMessage(content=result.to_tool_message(), tool_call_id=tc_id))
+            return result
 
         self.logger.debug("Tool call: %s(%s)", tc_name, json.dumps(tc_args)[:200])
         if self.on_step:
             step = self._friendly_step(tc_name, tc_args)
             asyncio.ensure_future(self.on_step(step[:120]))
-        result = self.tool_registry.execute(tc_name, tc_args, self.context)
-        result_str = str(result)
+        result = self.tool_registry.execute_detailed(tc_name, tc_args, self.context)
+        result_str = result.to_tool_message()
         self.logger.debug("Tool result: %s", result_str[:200])
 
         messages.append(ToolMessage(content=result_str, tool_call_id=tc_id))
-        return result_str
+        return result
+
+    @staticmethod
+    def _retry_guidance() -> str:
+        return (
+            "The last tool call failed. Read the tool result carefully. "
+            "If it contains error_code or hint fields, fix the tool name or arguments and try again with a corrected tool call."
+        )
 
     # ------------------------------------------------------------------
     # Mode 2: Command mode (for small models that can't do tool calls)
