@@ -482,11 +482,15 @@ class CallSession:
         await self._send_text(self.room_id, response)
 
         # TTS: synthesise and feed to outgoing audio track
-        if self._tts_track and self._app.config.get("tts"):
+        if self._tts_track:
             try:
                 tts_pcm = await synthesize_pcm(response, self._app.config, sample_rate=48000)
                 if tts_pcm is not None and len(tts_pcm):
+                    logger.info("call %s: TTS ok, enqueueing %d samples",
+                                self.call_id[:8], len(tts_pcm))
                     self._tts_track.enqueue_pcm_float32(tts_pcm)
+                else:
+                    logger.warning("call %s: TTS returned no audio", self.call_id[:8])
             except Exception as e:
                 logger.warning("call %s: TTS failed: %s", self.call_id[:8], e)
 
