@@ -99,6 +99,8 @@ interfaces:
 #   # provider: edge               # Microsoft Edge TTS (requires internet)
 #   # edge:
 #   #   voice: de-DE-KatjaNeural   # run `edge-tts --list-voices` for options
+#
+#   # hold_audio: /app/assets/keyboard.m4a   # background sound while waiting for agent (default: assets/keyboard.m4a)
 
 skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload
