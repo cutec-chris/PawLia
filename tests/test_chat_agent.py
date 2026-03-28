@@ -520,6 +520,34 @@ class TestSkillRunnerAgent:
         result = await runner.run("find data")
         assert "data here" in result
 
+    @pytest.mark.asyncio
+    async def test_invalid_tool_args_add_retry_guidance(self):
+        """Malformed tool args should produce structured error feedback and retry guidance."""
+        turn1 = _make_ai_message("", tool_calls=[
+            {"id": "tc1", "name": "bash", "args": {"cmd": ""}}
+        ])
+        turn2 = _make_ai_message("The corrected result is ready.")
+        turn3 = _make_ai_message("The corrected result is ready.")
+        turn4 = _make_ai_message("The corrected result is ready.")
+
+        llm = _mock_llm([turn1, turn2, turn3, turn4])
+        skill = _make_skill()
+        tools = ToolRegistry()
+        tools.register(BashTool())
+
+        runner = SkillRunnerAgent(llm=llm, skill=skill, tool_registry=tools)
+        result = await runner.run("run the test")
+
+        assert "corrected result" in result
+        second_call_messages = llm.invoke.call_args_list[1][0][0]
+        tool_message = next(msg for msg in second_call_messages if msg.__class__.__name__ == "ToolMessage")
+        assert '"error_code": "invalid_arguments"' in tool_message.content
+        assert any(
+            msg.__class__.__name__ == "HumanMessage"
+            and "error_code or hint fields" in msg.content
+            for msg in second_call_messages
+        )
+
 
 class TestExtractCommand:
     def test_bash_block(self):

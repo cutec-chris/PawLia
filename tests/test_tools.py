@@ -5,7 +5,7 @@ import os
 import tempfile
 from datetime import datetime, timedelta
 
-from pawlia.tools.base import Tool, ToolRegistry
+from pawlia.tools.base import Tool, ToolExecutionResult, ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.tools.reminder import ReminderTool
 
@@ -221,6 +221,37 @@ class TestToolRegistry:
         registry = ToolRegistry()
         result = registry.execute("nonexistent", {})
         assert "Error" in result
+
+    def test_unknown_tool_returns_structured_result(self):
+        registry = ToolRegistry()
+        result = registry.execute_detailed("nonexistent", {})
+        assert isinstance(result, ToolExecutionResult)
+        assert result.ok is False
+        assert result.error_code == "tool_not_found"
+        assert result.retryable is True
+
+    def test_invalid_args_return_structured_result(self):
+        registry = ToolRegistry()
+        registry.register(BashTool())
+        result = registry.execute_detailed("bash", {})
+        assert result.ok is False
+        assert result.error_code == "invalid_arguments"
+        assert result.retryable is True
+        assert "Missing required" in result.error
+
+    def test_structured_error_serializes_to_json(self):
+        result = ToolExecutionResult(
+            ok=False,
+            tool_name="bash",
+            normalized_args={"command": ""},
+            error="boom",
+            error_code="invalid_arguments",
+            retryable=True,
+            hint="fix it",
+        )
+        payload = result.to_tool_message()
+        assert '"ok": false' in payload.lower()
+        assert '"error_code": "invalid_arguments"' in payload
 
     def test_string_args_are_normalized_for_single_param_tools(self):
         registry = ToolRegistry()

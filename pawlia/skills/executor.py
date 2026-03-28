@@ -290,9 +290,9 @@ class WorkflowExecutor:
         ctx = self.context
         if env_extra:
             ctx = {**self.context, "env_extra": env_extra}
-        raw = self.tool_registry.execute("bash", {"command": command}, ctx)
-        output = str(raw)
-        exit_code = 1 if output.startswith("Error") else 0
+        raw = self.tool_registry.execute_detailed("bash", {"command": command}, ctx)
+        output = raw.to_tool_message() if not raw.ok else str(raw.output)
+        exit_code = 0 if raw.ok else 1
         self.logger.debug("Result (exit=%d): %s", exit_code, output[:300])
         return StepResult(output=output, exit_code=exit_code)
 
