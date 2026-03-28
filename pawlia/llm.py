@@ -82,6 +82,10 @@ class _NoThinkWrapper:
     def bind_tools(self, *args: Any, **kwargs: Any) -> "_NoThinkWrapper":
         return _NoThinkWrapper(self._llm.bind_tools(*args, **kwargs))
 
+    async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        async for chunk in self._llm.astream(self._inject(messages), **kwargs):
+            yield chunk
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._llm, name)
 

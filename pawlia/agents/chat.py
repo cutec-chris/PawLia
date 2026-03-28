@@ -7,6 +7,7 @@ incorporates the result into its final response.
 """
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Callback types
@@ -22,11 +23,31 @@ from langchain_core.messages import (
 )
 from langchain_openai import ChatOpenAI
 
-from pawlia.agents.base import BaseAgent
+from pawlia.agents.base import BaseAgent, log_prompt
 from pawlia.skills.loader import AgentSkill
 
 if TYPE_CHECKING:
     from pawlia.memory import MemoryManager, Session
+
+_SENTENCE_RE = re.compile(r'[.!?…]\s')
+
+
+def _split_sentences(text: str) -> Tuple[List[str], str]:
+    """Split *text* into complete sentences and a remainder.
+
+    A sentence boundary is punctuation (. ! ? …) followed by whitespace.
+    Returns ``(complete_sentences, remaining_text)``.
+    """
+    sentences: List[str] = []
+    while True:
+        m = _SENTENCE_RE.search(text)
+        if not m:
+            break
+        end = m.start() + 1  # include the punctuation char
+        sentences.append(text[:end].strip())
+        text = text[end:].lstrip()
+    return sentences, text
+
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are PawLia, a helpful AI assistant.\n\n"
@@ -249,6 +270,192 @@ class ChatAgent(BaseAgent):
             tool_calls_info=tool_calls_info,
         )
         return result
+
+    # ------------------------------------------------------------------
+    # Streamed variant (sentence-by-sentence TTS for calls)
+    # ------------------------------------------------------------------
+
+    async def run_streamed(
+        self,
+        user_input: str,
+        *,
+        system_prompt: Optional[str] = None,
+        images: Optional[List[str]] = None,
+        thread_id: Optional[str] = None,
+        on_sentence: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_skill_start: Optional[SkillStartCallback] = None,
+        on_skill_step: Optional[InterimCallback] = None,
+        on_skill_done: Optional[InterimCallback] = None,
+    ) -> str:
+        """Like :meth:`run` but streams the LLM and calls *on_sentence* per sentence.
+
+        Each complete sentence (delimited by ``.``, ``!``, ``?``, ``…`` +
+        whitespace) is emitted as soon as it is detected in the token stream,
+        enabling incremental TTS playback.  Falls back to non-streamed skill
+        execution when tool calls are detected; the final-answer turn is also
+        streamed.
+        """
+        _on_skill_start = on_skill_start or self.on_skill_start
+        _on_skill_step = on_skill_step or self.on_skill_step
+        _on_skill_done = on_skill_done or self.on_skill_done
+
+        if system_prompt:
+            prompt = system_prompt
+        elif self.memory and self.session:
+            prompt = self.memory.build_system_prompt(self.session, skills=self.skills)
+        else:
+            prompt = DEFAULT_SYSTEM_PROMPT
+
+        messages: List[BaseMessage] = [SystemMessage(content=prompt)]
+
+        # Replay recent exchanges (identical to run())
+        if self.session and self.memory:
+            if thread_id:
+                exchanges = self.memory.get_thread_context(self.session, thread_id)
+            else:
+                exchanges = self.session.exchanges
+            for exchange in exchanges:
+                if len(exchange) == 2:
+                    user_text, bot_text = exchange  # type: ignore
+                    tc_info = None
+                else:
+                    user_text, bot_text, tc_info = exchange  # type: ignore
+                messages.append(HumanMessage(content=user_text))
+                if tc_info:
+                    reconstructed = [
+                        {"name": tc["name"], "args": tc["args"], "id": f"restored_{i}"}
+                        for i, tc in enumerate(tc_info)
+                    ]
+                    messages.append(AIMessage(content=bot_text, tool_calls=reconstructed))
+                    for i, tc in enumerate(tc_info):
+                        messages.append(ToolMessage(content=tc["result"], tool_call_id=f"restored_{i}"))
+                else:
+                    messages.append(AIMessage(content=bot_text))
+
+        bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
+
+        if images:
+            content: List[Dict[str, Any]] = [{"type": "text", "text": user_input or "What's in this image?"}]
+            for data_uri in images:
+                content.append({"type": "image_url", "image_url": {"url": data_uri}})
+            messages.append(HumanMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=user_input))
+
+        # ---- Stream turn 1 ----
+        accumulated, raw_text = await self._stream_with_sentences(
+            messages, bound_llm, on_sentence,
+        )
+        self.logger.debug("Streamed turn 1: tool_calls=%s, len=%d",
+                          bool(getattr(accumulated, "tool_calls", None)), len(raw_text))
+
+        if not accumulated or not getattr(accumulated, "tool_calls", None):
+            result = self.strip_thinking(raw_text)
+            await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
+            return result
+
+        # ---- Skill calls detected → execute (non-streamed) ----
+        messages.append(accumulated)
+        tool_calls_info: List[Dict[str, Any]] = []
+
+        for tool_call in accumulated.tool_calls:
+            skill_name = tool_call["name"]
+            query = tool_call.get("args", {}).get("query", "")
+            skill = self.skills.get(skill_name)
+
+            if skill:
+                self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
+                if _on_skill_start:
+                    try:
+                        await _on_skill_start(skill_name, query)
+                    except Exception:
+                        pass
+                runner = self.skill_runner_factory(skill)
+                runner.on_step = _on_skill_step
+                skill_result = await runner.run(query=query)
+                if _on_skill_done:
+                    try:
+                        await _on_skill_done(skill_name)
+                    except Exception:
+                        pass
+            else:
+                self.logger.warning("Unknown skill called: %s", skill_name)
+                skill_result = f"Error: Unknown skill '{skill_name}'."
+
+            tool_calls_info.append({
+                "name": skill_name,
+                "args": tool_call.get("args", {}),
+                "result": skill_result,
+            })
+            messages.append(ToolMessage(
+                content=skill_result,
+                tool_call_id=tool_call.get("id", ""),
+            ))
+
+        # ---- Stream turn 2 (final answer) ----
+        accumulated2, raw_text2 = await self._stream_with_sentences(
+            messages, unbound_llm, on_sentence,
+        )
+
+        result = self.strip_thinking(raw_text2)
+        await self._persist(
+            user_input, result,
+            track_similarity=False,
+            thread_id=thread_id,
+            tool_calls_info=tool_calls_info,
+        )
+        return result
+
+    async def _stream_with_sentences(
+        self,
+        messages: List[BaseMessage],
+        llm: Any,
+        on_sentence: Optional[Callable[[str], Awaitable[None]]],
+    ) -> Tuple[Any, str]:
+        """Stream an LLM call, emitting complete sentences via *on_sentence*.
+
+        Returns ``(accumulated_message, raw_text)``.
+        """
+        accumulated = None
+        raw_text = ""
+        emitted_len = 0  # how much of the clean text has been emitted
+
+        log_prompt(messages)
+
+        async for chunk in llm.astream(messages):
+            accumulated = chunk if accumulated is None else accumulated + chunk
+
+            delta = chunk.content or ""
+            if not delta:
+                continue
+            raw_text += delta
+
+            if not on_sentence:
+                continue
+
+            # Don't emit while inside an unclosed <think>/<thinking> block
+            n_open = len(re.findall(r"<think(?:ing)?>", raw_text))
+            n_close = len(re.findall(r"</think(?:ing)?>", raw_text))
+            if n_open > n_close:
+                continue
+
+            clean = self.strip_thinking(raw_text)
+            new_content = clean[emitted_len:]
+            if new_content:
+                sentences, remainder = _split_sentences(new_content)
+                for s in sentences:
+                    if s.strip():
+                        await on_sentence(s)
+                emitted_len = len(clean) - len(remainder)
+
+        # Flush remaining buffer
+        if on_sentence:
+            clean = self.strip_thinking(raw_text)
+            remainder = clean[emitted_len:]
+            if remainder.strip():
+                await on_sentence(remainder.strip())
+
+        return accumulated, raw_text
 
     def _resolve_llms(
         self, thread_id: Optional[str], *, images: bool = False
