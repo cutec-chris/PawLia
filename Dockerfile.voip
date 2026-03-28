@@ -26,8 +26,8 @@ FROM python:3.13-alpine
 #   espeak-ng    — phonemisation for Piper
 #   ffmpeg       — audio codec support for aiortc/av
 #   openssl/libffi — runtime for cryptography (compiled in stage 1)
-#   gcompat      — glibc compatibility layer for Piper binary
 #   libstdc++    — C++ runtime for Piper
+#   piper-tts    — local TTS engine (Alpine edge/testing, musl-native)
 RUN apk add --no-cache \
         nodejs \
         npm \
@@ -39,8 +39,7 @@ RUN apk add --no-cache \
         libstdc++ \
         crc32c \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
-        piper-tts \
-    || echo "WARN: piper-tts package not available — TTS will not work"
+        piper-tts
 
 WORKDIR /app
 
@@ -60,8 +59,7 @@ RUN mkdir -p /app/piper && \
     wget -q -O /app/piper/de_DE-kerstin-low.onnx \
         "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx" && \
     wget -q -O /app/piper/de_DE-kerstin-low.onnx.json \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json" \
-    || echo "WARN: Piper voice model download failed — TTS will not be available"
+        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json"
 
 
 # Session data lives in a volume
