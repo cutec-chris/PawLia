@@ -50,7 +50,8 @@ def _load_skill_config() -> dict:
         if candidate.is_file():
             with open(candidate, encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
-            return cfg.get("skill-config", {}).get("researcher", {})
+            skill_config_root = cfg.get("skill-config") or {}
+            return skill_config_root.get("researcher", {})
     return {}
 
 

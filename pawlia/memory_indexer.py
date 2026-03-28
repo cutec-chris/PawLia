@@ -30,7 +30,8 @@ class MemoryIndexer:
     def __init__(self, session_dir: str, config: dict, llm_busy_check=None):
         self._session_dir = session_dir
         self._llm_busy = llm_busy_check  # callable: () -> bool
-        self._cfg = config.get("skill-config", {}).get("memory", {})
+        skill_config_root = config.get("skill-config") or {}
+        self._cfg = skill_config_root.get("memory", {})
         self._enabled = bool(
             self._cfg.get("embedding_provider")
             and self._cfg.get("embedding_model")

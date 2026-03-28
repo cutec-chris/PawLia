@@ -121,7 +121,8 @@ class App:
             vision_llm = self.llm.get("vision")
 
         def make_runner(skill: AgentSkill) -> SkillRunnerAgent:
-            skill_cfg = self.config.get("skill-config", {}).get(skill.name, {})
+            skill_config_root = self.config.get("skill-config") or {}
+            skill_cfg = skill_config_root.get(skill.name, {})
             return SkillRunnerAgent(
                 llm=self.llm.get(f"skill.{skill.name}"),
                 skill=skill,

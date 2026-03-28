@@ -102,7 +102,7 @@ def _read_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
         if path.endswith((".yaml", ".yml")):
             return yaml.safe_load(f) or {}
-        return json.load(f)
+        return json.load(f) or {}
 
 
 def _write_config(path: str, cfg: dict) -> None:
@@ -374,7 +374,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
             return _unauth()
         try:
             cfg_data = _read_config(config_path) if config_path else {}
-            skills = _scan_skills(cfg_data.get("skill-config", {}))
+            skill_config_root = (cfg_data or {}).get("skill-config") or {}
+            skills = _scan_skills(skill_config_root)
             return web.json_response({"skills": skills})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
@@ -458,7 +459,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
             return web.json_response({"skill_config": {}})
         try:
             data = _read_config(config_path)
-            return web.json_response({"skill_config": data.get("skill-config", {})})
+            skill_config_root = (data or {}).get("skill-config") or {}
+            return web.json_response({"skill_config": skill_config_root})
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 

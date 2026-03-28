@@ -217,7 +217,7 @@ class Scheduler:
 
         # ── Force-summarize when exchange count exceeds hard limit ──
         # This runs even when the user is active to prevent unbounded growth.
-        if not self.llm_busy and self._app:
+        if not self.llm_busy and self._app and self._app.memory:
             from pawlia.memory import FORCE_SUMMARY_EXCHANGES
             for user_id in user_ids:
                 session = self._app.memory.load_session(user_id)
@@ -255,9 +255,9 @@ class Scheduler:
                     return
 
             # Prio 3: Memory indexing (configurable idle, default 20 min)
-            idle_memory_min = int(
-                self._config.get("skill-config", {}).get("memory", {}).get("idle_minutes", IDLE_MEMORY_MIN)
-            )
+            skill_config = self._config.get("skill-config") or {}
+            memory_config = skill_config.get("memory") or {}
+            idle_memory_min = int(memory_config.get("idle_minutes", IDLE_MEMORY_MIN))
             if idle >= idle_memory_min:
                 if self._memory_indexer and self._memory_indexer.enabled:
                     try:
@@ -274,6 +274,8 @@ class Scheduler:
         (exchange limit, repetition, or idle) and runs it through the
         chat LLM.
         """
+        if not self._app or not self._app.memory:
+            return
         from langchain_core.messages import HumanMessage, SystemMessage
 
         memory = self._app.memory
@@ -310,7 +312,13 @@ class Scheduler:
             )),
         ]
 
+        if not self._app or not self._app.llm:
+            logger.warning("Cannot summarize %s: app or llm not available", user_id)
+            return
         llm = self._app.llm.get("chat")
+        if not llm:
+            logger.warning("Cannot summarize %s: chat LLM not configured", user_id)
+            return
 
         async with self._llm_lock:
             try:
@@ -327,8 +335,10 @@ class Scheduler:
 
     async def _process_background_tasks(self, user_id: str) -> None:
         """Run one pending background task for a user."""
+        if not self._app:
+            return
         tasks = self.bg_tasks.list_tasks(user_id)
-        pending = [t for t in tasks if t.get("status") == "pending"]
+        pending = [t for t in tasks if t and t.get("status") == "pending"]
         if not pending:
             return
 
@@ -361,6 +371,8 @@ class Scheduler:
         changed = False
 
         for reminder in reminders:
+            if not reminder:
+                continue
             if reminder.get("fired"):
                 continue
 
@@ -400,6 +412,8 @@ class Scheduler:
         window = now + timedelta(minutes=EVENT_REMINDER_MINUTES)
 
         for event in events:
+            if not event:
+                continue
             if event.get("_notified"):
                 continue
 
@@ -423,7 +437,7 @@ class Scheduler:
                 event["_notified"] = True
 
         # Persist the _notified flags
-        if any(e.get("_notified") for e in events):
+        if any(e and e.get("_notified") for e in events):
             save_json(path, events)
 
     async def _notify(self, user_id: str, message: str) -> None:
