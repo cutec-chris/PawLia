@@ -62,9 +62,23 @@ if _AIORTC_AVAILABLE:
             self._queue: asyncio.Queue[Optional[np.ndarray]] = asyncio.Queue()
             self._pts = 0
             self._time_base = fractions.Fraction(1, self.SAMPLE_RATE)
+            self._start_time: Optional[float] = None
+
+        @property
+        def is_playing(self) -> bool:
+            """True while TTS audio is queued for playback."""
+            return not self._queue.empty()
 
         async def recv(self):  # noqa: D401
             from av import AudioFrame  # type: ignore
+
+            # Pace output at real-time (20 ms per frame)
+            if self._start_time is None:
+                self._start_time = time.time()
+            target = self._start_time + (self._pts / self.SAMPLE_RATE)
+            delay = target - time.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
 
             try:
                 samples = self._queue.get_nowait()
@@ -409,6 +423,15 @@ class CallSession:
                     logger.info("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
                                 self.call_id[:8], frames_received, rms,
                                 len(speech_buffer), silence_count, h)
+
+                # Suppress echo: discard mic input while TTS is playing
+                if self._tts_track and self._tts_track.is_playing:
+                    if speech_buffer:
+                        logger.info("call %s: dropping speech buffer (TTS playing)",
+                                    self.call_id[:8])
+                        speech_buffer = []
+                        silence_count = 0
+                    continue
 
                 if rms > self.SILENCE_THRESHOLD:
                     if not speech_buffer and silence_count == 0:
