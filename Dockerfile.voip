@@ -54,12 +54,13 @@ RUN mkdir -p skills/user
 # Install deps + compile workflows for all pre-bundled skills
 RUN python -m pawlia.install_skill_deps
 
-# Default voice model: German Kerstin low (~15 MB, 16 kHz)
+# Default voice model: German Kerstin low (~63 MB, 16 kHz)
 RUN mkdir -p /app/piper && \
-    wget -q -O /app/piper/de_DE-kerstin-low.onnx \
+    wget -O /app/piper/de_DE-kerstin-low.onnx \
         "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx" && \
-    wget -q -O /app/piper/de_DE-kerstin-low.onnx.json \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json"
+    wget -O /app/piper/de_DE-kerstin-low.onnx.json \
+        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json" && \
+    test -s /app/piper/de_DE-kerstin-low.onnx || { echo "ERROR: voice model download failed"; exit 1; }
 
 
 # Session data lives in a volume
