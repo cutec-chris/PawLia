@@ -96,8 +96,14 @@ interfaces:
     user_id: "@yourbot:matrix.org"
     password: YOUR_PASSWORD
     # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
+    # always_thread: true                  # always reply in a new thread (default: false)
     # stun_servers:
     #   - stun:stun.l.google.com:19302   # for VoIP calls
+
+| Key | Description |
+|-----|-------------|
+| `always_thread` | When `true`, every message is answered in its own Matrix thread (default: `false`) |
+| `stun_servers` | STUN/TURN server URIs for VoIP calls |
 
   webhook:
     port: 8080

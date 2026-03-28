@@ -477,6 +477,41 @@ async def start_web(app: "App", cfg: Dict) -> None:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
+    # ── Settings (interfaces, tts, transcription) ─────────────────────────
+
+    # Sections exposed for editing via the web UI.
+    _SETTINGS_SECTIONS = ("interfaces", "tts", "transcription")
+
+    async def handle_get_settings(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        if not config_path:
+            return web.json_response({"settings": {}})
+        try:
+            data = _read_config(config_path)
+            settings = {k: data.get(k, {}) for k in _SETTINGS_SECTIONS}
+            return web.json_response({"settings": settings})
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_save_settings(request: web.Request) -> web.Response:
+        if not _authed(request):
+            return _unauth()
+        if not config_path:
+            return web.json_response({"error": "no config file"}, status=500)
+        try:
+            body = await request.json()
+            data = _read_config(config_path)
+            for section in _SETTINGS_SECTIONS:
+                if section in body.get("settings", {}):
+                    data[section] = body["settings"][section]
+            _write_config(config_path, data)
+            logger.info("Web: settings updated")
+            return web.json_response({"ok": True})
+        except Exception as e:
+            logger.error("Web: error saving settings: %s", e)
+            return web.json_response({"error": str(e)}, status=500)
+
     # ── Memory users / graph ────────────────────────────────────────────────
 
     async def handle_memory_users(request: web.Request) -> web.Response:
@@ -645,6 +680,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
     webapp.router.add_delete("/api/skills/{name}", handle_skill_delete)
     webapp.router.add_get("/api/skill-config",    handle_get_skill_config)
     webapp.router.add_post("/api/skill-config",   handle_save_skill_config)
+    webapp.router.add_get("/api/settings",        handle_get_settings)
+    webapp.router.add_post("/api/settings",       handle_save_settings)
     webapp.router.add_get("/api/setup-status",    handle_setup_status)
     webapp.router.add_post("/api/setup/auto",     handle_setup_auto)
     webapp.router.add_get("/api/memory/users",    handle_memory_users)

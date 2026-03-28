@@ -1,0 +1,47 @@
+skill: config
+version: '1.0'
+compiled_at: '2026-03-28'
+compiled_by: manual
+workflows:
+- id: config_operations
+  trigger: When the user wants to read, show, or change a pawlia configuration setting
+    (interfaces, TTS, transcription, agents, skill-config)
+  max_steps: 6
+  goal_check:
+    prompt: Has the configuration been read or updated as requested?
+    max_retries: 2
+  building_blocks:
+  - id: show_config
+    command: python {scripts_dir}/config.py show
+    description: Show all settable configuration sections (interfaces, tts, transcription,
+      agents, skill-config)
+    status_desc: Lese Konfiguration
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: show_section
+    command: python {scripts_dir}/config.py show --section {section}
+    description: Show a specific configuration section
+    status_desc: Lese Sektion {section}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: get_value
+    command: python {scripts_dir}/config.py get --path {path}
+    description: Get a specific configuration value by dot-notation path
+    status_desc: Lese {path}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: set_value
+    command: python {scripts_dir}/config.py set --path {path} --value {value}
+    description: Set a configuration value by dot-notation path (value is parsed as
+      YAML scalar — true/false/numbers/strings)
+    status_desc: Setze {path} = {value}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'

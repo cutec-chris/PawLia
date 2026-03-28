@@ -244,21 +244,18 @@ class MemoryManager:
             os.remove(path)
 
     def get_thread_context(
-        self, session: Session, thread_id: str, seed_n: int = 5
+        self, session: Session, thread_id: str,
     ) -> List[Tuple[str, str]]:
         """Return the exchange list for a thread, loading from disk on first access.
 
-        A brand-new thread (no log yet) is seeded with the last *seed_n* exchanges
-        from the main session so the model has immediate context.  The seed is
-        kept in-memory only — it is NOT written to the thread log.
+        New threads start with an empty context — only the initial question
+        (passed as ``user_input`` to the agent) provides context.
         """
         if thread_id not in session.thread_contexts:
             path = self._thread_daily_path(
                 session.user_id, thread_id, session.current_date_str
             )
             exchanges = self._parse_exchanges(self._read(path))
-            if not exchanges and session.exchanges and seed_n > 0:
-                exchanges = list(session.exchanges[-seed_n:])
             session.thread_contexts[thread_id] = exchanges
         return session.thread_contexts[thread_id]
 
