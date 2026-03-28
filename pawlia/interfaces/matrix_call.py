@@ -63,11 +63,29 @@ if _AIORTC_AVAILABLE:
             self._pts = 0
             self._time_base = fractions.Fraction(1, self.SAMPLE_RATE)
             self._start_time: Optional[float] = None
+            # Hold audio: looping background sound while waiting for agent
+            self._hold_pcm: Optional[np.ndarray] = None  # int16 mono @ 48 kHz
+            self._hold_pos: int = 0
+            self._hold_active: bool = False
 
         @property
         def is_playing(self) -> bool:
-            """True while TTS audio is queued for playback."""
-            return not self._queue.empty()
+            """True while TTS or hold audio is playing."""
+            return not self._queue.empty() or self._hold_active
+
+        def set_hold_audio(self, pcm_int16: np.ndarray) -> None:
+            """Set the hold audio loop (int16 mono PCM at 48 kHz)."""
+            self._hold_pcm = pcm_int16
+            self._hold_pos = 0
+
+        def start_hold(self) -> None:
+            """Start looping hold audio (until :meth:`stop_hold`)."""
+            self._hold_active = True
+            self._hold_pos = 0
+
+        def stop_hold(self) -> None:
+            """Stop hold audio playback."""
+            self._hold_active = False
 
         async def recv(self):  # noqa: D401
             from av import AudioFrame  # type: ignore
@@ -86,7 +104,20 @@ if _AIORTC_AVAILABLE:
                 samples = None
 
             if samples is None or len(samples) == 0:
-                samples = np.zeros(self.SAMPLES_PER_FRAME, dtype=np.int16)
+                if (self._hold_active
+                        and self._hold_pcm is not None
+                        and len(self._hold_pcm) > 0):
+                    # Loop hold audio
+                    end = self._hold_pos + self.SAMPLES_PER_FRAME
+                    if end <= len(self._hold_pcm):
+                        samples = self._hold_pcm[self._hold_pos:end]
+                    else:
+                        tail = self._hold_pcm[self._hold_pos:]
+                        head = self._hold_pcm[:self.SAMPLES_PER_FRAME - len(tail)]
+                        samples = np.concatenate([tail, head])
+                    self._hold_pos = (self._hold_pos + self.SAMPLES_PER_FRAME) % len(self._hold_pcm)
+                else:
+                    samples = np.zeros(self.SAMPLES_PER_FRAME, dtype=np.int16)
             else:
                 samples = samples[:self.SAMPLES_PER_FRAME]
                 if len(samples) < self.SAMPLES_PER_FRAME:
@@ -317,6 +348,13 @@ class CallSession:
         logger.info("call %s: SDP answer:\n%s", self.call_id[:8],
                     self._pc.localDescription.sdp)
 
+        # Load hold audio (background sound while waiting for agent response)
+        hold_pcm = self._load_hold_audio()
+        if hold_pcm is not None:
+            self._tts_track.set_hold_audio(hold_pcm)
+            logger.info("call %s: hold audio loaded (%d samples, %.1fs)",
+                        self.call_id[:8], len(hold_pcm), len(hold_pcm) / self._tts_track.SAMPLE_RATE)
+
         # Auto-hangup watchdog
         asyncio.ensure_future(self._watchdog())
         # Send our ICE candidates once gathering completes (parsed from local SDP)
@@ -470,7 +508,7 @@ class CallSession:
             logger.info("call %s: audio pipeline ended", self.call_id[:8])
 
     async def _process_speech(self, pcm: "np.ndarray", sample_rate: int) -> None:
-        """Transcribe a speech chunk and query the agent."""
+        """Transcribe a speech chunk, stream the agent response with sentence-by-sentence TTS."""
         try:
             from pawlia.transcription import transcribe_pcm
             from pawlia.tts import synthesize_pcm
@@ -488,18 +526,44 @@ class CallSession:
         # Send transcription immediately so it appears before the response
         await self._send_cb(f"🎙️ *{text}*")
 
-        # Show typing indicator while agent thinks
-        try:
-            await self._client.room_typing(self.room_id, typing_state=True)
-        except Exception:
-            pass
+        # Start hold audio while waiting for agent response
+        if self._tts_track:
+            self._tts_track.start_hold()
+
+        # Keep typing indicator alive (Matrix times it out after ~30s)
+        typing_task = asyncio.ensure_future(self._keep_typing())
 
         try:
-            response = await self._agent.run(text, thread_id=self.thread_id)
+            first_sentence_received = False
+
+            async def _on_sentence(sentence: str) -> None:
+                """Synthesize and enqueue one sentence for immediate TTS playback."""
+                nonlocal first_sentence_received
+                if not self._tts_track:
+                    return
+                # Stop hold audio as soon as first real TTS arrives
+                if not first_sentence_received:
+                    first_sentence_received = True
+                    self._tts_track.stop_hold()
+                try:
+                    tts_pcm = await synthesize_pcm(sentence, self._app.config, sample_rate=48000)
+                    if tts_pcm is not None and len(tts_pcm):
+                        logger.info("call %s: TTS sentence (%d samples): %s",
+                                    self.call_id[:8], len(tts_pcm), sentence[:60])
+                        self._tts_track.enqueue_pcm_float32(tts_pcm)
+                except Exception as e:
+                    logger.warning("call %s: TTS sentence failed: %s", self.call_id[:8], e)
+
+            response = await self._agent.run_streamed(
+                text, thread_id=self.thread_id, on_sentence=_on_sentence,
+            )
         except Exception as e:
             logger.error("call %s: agent error: %s", self.call_id[:8], e)
             return
         finally:
+            typing_task.cancel()
+            if self._tts_track:
+                self._tts_track.stop_hold()
             try:
                 await self._client.room_typing(self.room_id, typing_state=False)
             except Exception:
@@ -507,18 +571,56 @@ class CallSession:
 
         await self._send_cb(response)
 
-        # TTS: synthesise and feed to outgoing audio track
-        if self._tts_track:
-            try:
-                tts_pcm = await synthesize_pcm(response, self._app.config, sample_rate=48000)
-                if tts_pcm is not None and len(tts_pcm):
-                    logger.info("call %s: TTS ok, enqueueing %d samples",
-                                self.call_id[:8], len(tts_pcm))
-                    self._tts_track.enqueue_pcm_float32(tts_pcm)
-                else:
-                    logger.warning("call %s: TTS returned no audio", self.call_id[:8])
-            except Exception as e:
-                logger.warning("call %s: TTS failed: %s", self.call_id[:8], e)
+    def _load_hold_audio(self) -> Optional["np.ndarray"]:
+        """Load hold audio from config and decode to int16 mono PCM at 48 kHz.
+
+        Config: ``tts.hold_audio`` — path to a wav/mp3 file.
+        Returns ``None`` if not configured or the file cannot be loaded.
+        """
+        import os
+        path = self._app.config.get("tts", {}).get("hold_audio")
+        if not path:
+            # Default: assets/keyboard.m4a relative to project root
+            default = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                                   "assets", "keyboard.m4a")
+            if os.path.exists(default):
+                path = default
+        if not path:
+            return None
+        if not os.path.exists(path):
+            logger.warning("call %s: hold audio file not found: %s", self.call_id[:8], path)
+            return None
+        try:
+            import io
+            import av  # type: ignore
+            with open(path, "rb") as f:
+                data = f.read()
+            container = av.open(io.BytesIO(data))
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=48000)
+            chunks: List["np.ndarray"] = []
+            for frame in container.decode(audio=0):
+                for out in resampler.resample(frame):
+                    chunks.append(np.frombuffer(bytes(out.planes[0]), dtype=np.int16))
+            for out in resampler.resample(None):
+                chunks.append(np.frombuffer(bytes(out.planes[0]), dtype=np.int16))
+            if not chunks:
+                return None
+            return np.concatenate(chunks)
+        except Exception as e:
+            logger.warning("call %s: failed to load hold audio: %s", self.call_id[:8], e)
+            return None
+
+    async def _keep_typing(self) -> None:
+        """Periodically refresh the Matrix typing indicator."""
+        try:
+            while True:
+                try:
+                    await self._client.room_typing(self.room_id, typing_state=True)
+                except Exception:
+                    pass
+                await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            pass
 
     async def _log_receiver_stats(self) -> None:
         """Periodically log RTP receiver stats to diagnose audio delivery."""
