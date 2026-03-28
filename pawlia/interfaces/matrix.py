@@ -225,8 +225,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         ctx = f" [thread {thread_id[:8]}…]" if thread_id else ""
         logger.info("Matrix: message in %s%s: %s (images=%d)", room.room_id, ctx, text[:80], len(images or []))
 
-        # Commands
-        if text.strip() == "//status":
+        # Commands (// or / — Element strips one / from //)
+        if _cmd(text, "status") is not None:
             agent = get_agent(room.room_id)
             status = build_status(app, session_id, agent, thread_id=thread_id)
             text_out = format_status(status)
@@ -236,7 +236,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 await _send_text(room.room_id, text_out)
             return
 
-        if text.startswith("//private"):
+        if _cmd(text, "private") is not None:
             if not thread_id:
                 await _send_text(room.room_id, "_//private funktioniert nur in Threads._")
                 return
@@ -247,17 +247,18 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             await _send_text(room.room_id, f"{icon} Private Mode {state} — Nachrichten werden {'**nicht** ' if active else ''}gespeichert.")
             return
 
-        if text.startswith("//model"):
-            await _handle_model_cmd(room, session_id, text[len("//model"):], thread_id)
+        model_args = _cmd(text, "model")
+        if model_args is not None:
+            await _handle_model_cmd(room, session_id, model_args, thread_id)
             return
 
-        if text.startswith("//background"):
-            bg_message = text[len("//background"):].strip()
-            if not bg_message:
+        bg_args = _cmd(text, "background")
+        if bg_args is not None:
+            if not bg_args:
                 await _send_text(room.room_id, "_Verwendung: //background <Nachricht>_")
                 return
-            task = app.scheduler.bg_tasks.enqueue(session_id, bg_message)
-            await _send_text(room.room_id, f"⏳ Aufgabe in Warteschlange: **{bg_message[:60]}**\nWird im Hintergrund verarbeitet wenn idle.")
+            task = app.scheduler.bg_tasks.enqueue(session_id, bg_args)
+            await _send_text(room.room_id, f"⏳ Aufgabe in Warteschlange: **{bg_args[:60]}**\nWird im Hintergrund verarbeitet wenn idle.")
             return
 
         async def _send(text: str) -> None:
@@ -362,6 +363,18 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     # Event handlers
     # ------------------------------------------------------------------
 
+    def _cmd(text: str, command: str) -> Optional[str]:
+        """Check if *text* is a ``//command`` (or ``/command`` — Element strips one ``/``).
+
+        Returns the arguments after the command, or ``None`` if no match.
+        """
+        for prefix in (f"//{command}", f"/{command}"):
+            if text == prefix:
+                return ""
+            if text.startswith(prefix) and text[len(prefix)] in (" ", "\t", "\n"):
+                return text[len(prefix):].strip()
+        return None
+
     async def on_message(room: MatrixRoom, event: RoomMessageText) -> None:
         if event.sender == client.user_id:
             return
@@ -369,12 +382,12 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         if not text:
             return
 
-        if text.startswith("//thread"):
-            message = text[len("//thread"):].strip()
-            if not message:
+        thread_args = _cmd(text, "thread")
+        if thread_args is not None:
+            if not thread_args:
                 await _send_text(room.room_id, "_Verwendung: //thread <Nachricht>_")
                 return
-            await _handle(room, message, thread_id=event.event_id)
+            await _handle(room, thread_args, thread_id=event.event_id)
             return
 
         await _handle(room, text, thread_id=_get_thread_id(event))
