@@ -38,6 +38,9 @@ class BashTool(Tool):
                 env["PAWLIA_USER_ID"] = context["user_id"]
             if context.get("session_dir"):
                 env["PAWLIA_SESSION_DIR"] = context["session_dir"]
+            # Extra env vars from workflow executor (e.g. multiline content)
+            for k, v in context.get("env_extra", {}).items():
+                env[k] = v
 
         run_kwargs: Dict[str, Any] = dict(
             capture_output=True, text=True, timeout=timeout,

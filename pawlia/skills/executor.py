@@ -159,9 +159,23 @@ class WorkflowExecutor:
                     )
                     asyncio.ensure_future(self.on_step(status))
 
-                # Execute command
-                command = self._substitute(block.command, params)
-                result = self._run_bash(command)
+                # Execute command — env_params are passed as env vars,
+                # not substituted into the command string (avoids
+                # shell escaping issues with multiline content).
+                env_extra = {}
+                cmd_params = params
+                if block.env_params:
+                    env_extra = {
+                        p.upper(): str(params[p])
+                        for p in block.env_params
+                        if p in params
+                    }
+                    cmd_params = {
+                        k: v for k, v in params.items()
+                        if k not in block.env_params
+                    }
+                command = self._substitute(block.command, cmd_params)
+                result = self._run_bash(command, env_extra=env_extra)
                 outputs.append(result.output)
 
                 # Programmatic verification
@@ -200,10 +214,12 @@ class WorkflowExecutor:
         """Convert building blocks to OpenAI tool specs."""
         tools = []
         for block in workflow.building_blocks:
-            # Extract {param} placeholders, excluding context vars
+            # Extract {param} placeholders, excluding context vars,
+            # plus any env_params (passed as env vars, not in command)
             param_names = list(dict.fromkeys(
-                p for p in re.findall(r"\{(\w+)\}", block.command)
-                if p not in ("scripts_dir",)
+                [p for p in re.findall(r"\{(\w+)\}", block.command)
+                 if p not in ("scripts_dir",)]
+                + block.env_params
             ))
 
             properties = {p: {"type": "string"} for p in param_names}
@@ -252,10 +268,15 @@ class WorkflowExecutor:
 
         return result
 
-    def _run_bash(self, command: str) -> StepResult:
+    def _run_bash(
+        self, command: str, env_extra: Optional[Dict[str, str]] = None
+    ) -> StepResult:
         """Execute a bash command via the tool registry."""
         self.logger.debug("Executing: %s", command[:200])
-        raw = self.tool_registry.execute("bash", {"command": command}, self.context)
+        ctx = self.context
+        if env_extra:
+            ctx = {**self.context, "env_extra": env_extra}
+        raw = self.tool_registry.execute("bash", {"command": command}, ctx)
         output = str(raw)
         exit_code = 1 if output.startswith("Error") else 0
         self.logger.debug("Result (exit=%d): %s", exit_code, output[:300])

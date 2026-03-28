@@ -25,6 +25,7 @@ class BuildingBlock(BaseModel):
     status_desc: str = ""   # short status template with {param} placeholders, e.g. "Öffne {url}"
     verify: Optional[VerifySpec] = None
     on_error: Optional[str] = None  # block id to run on failure
+    env_params: list[str] = []  # params passed as env vars (uppercased) instead of inline
 
 
 class GoalCheck(BaseModel):

@@ -33,21 +33,13 @@ python <scripts_dir>/files.py read --filename "<name>"
 
 ## Write a file
 
-**Option A — short content (single line or simple text):** use `--content`:
+Content is passed via the `CONTENT` environment variable (set automatically by the workflow executor):
 
 ```
-python <scripts_dir>/files.py write --filename "<name>" --content "content here"
+python <scripts_dir>/files.py write --filename "<name>"
 ```
 
-**Option B — multiline content:** pipe content via stdin using a heredoc (works on all platforms):
-
-```
-python <scripts_dir>/files.py write --filename "<name>" << 'EOF'
-line 1
-line 2
-line 3
-EOF
-```
+For direct CLI use, content can also be passed via `--content` (single line only) or stdin.
 
 Subdirectories are supported in filenames (e.g. `notes/today.txt`).
 
