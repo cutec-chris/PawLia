@@ -397,7 +397,11 @@ class MemoryManager:
         lines.append(
             "RULES:\n"
             "- When a user asks for something a skill can handle, "
-            "you MUST call the matching skill. NEVER guess or make up answers.\n"
+            "you MUST use the tool call mechanism to invoke the skill. "
+            "NEVER just describe or mention the skill in text — actually CALL it.\n"
+            "- NEVER say things like 'I will search...' or 'Let me look that up...' "
+            "without making an actual tool call. If a skill is needed, call it immediately.\n"
+            "- NEVER guess or make up answers when a skill can provide real data.\n"
             "- Only answer directly for simple conversation (greetings, opinions)."
         )
         if has_memory:
