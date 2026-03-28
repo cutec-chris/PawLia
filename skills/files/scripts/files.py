@@ -33,6 +33,9 @@ def _safe_path(workdir: str, filename: str) -> str:
 
 
 def _out(data) -> None:
+    # Force UTF-8 output on Windows to avoid charmap codec errors with emoji/unicode
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print(json.dumps(data, ensure_ascii=False))
 
 

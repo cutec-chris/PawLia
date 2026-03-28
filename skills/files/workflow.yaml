@@ -27,22 +27,13 @@ workflows:
       exit_code: 0
       output_not_contains:
       - '"success": false'
-  - id: write_short_content
-    command: python {scripts_dir}/files.py write --filename "{filename}" --content
-      "{content}"
-    description: Write short content to a file
+  - id: write_file
+    command: python {scripts_dir}/files.py write --filename "{filename}"
+    description: Write content to a file (short or multiline)
     status_desc: Schreibe Inhalt in Datei {filename}
+    env_params:
+    - content
     verify:
       exit_code: 0
       output_not_contains:
       - '"success": false'
-  - id: write_multiline_content
-    command: 'python {scripts_dir}/files.py write --filename "{filename}" << ''EOF''
-
-      {content}
-
-      EOF'
-    description: Write multiline content to a file using heredoc
-    status_desc: Schreibe mehrzeiligen Inhalt in Datei {filename}
-    verify:
-      exit_code: 0
