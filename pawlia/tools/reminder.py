@@ -48,6 +48,46 @@ class ReminderTool(Tool):
             },
         }
 
+    def input_schema(self) -> Dict[str, Any]:
+        properties = self.parameters()
+        return {
+            "type": "object",
+            "properties": properties,
+            "additionalProperties": False,
+            "oneOf": [
+                {
+                    "required": ["action"],
+                    "properties": {
+                        "action": {**properties["action"], "enum": ["list"]},
+                    },
+                },
+                {
+                    "required": ["action", "reminder_id"],
+                    "properties": {
+                        "action": {**properties["action"], "enum": ["delete"]},
+                    },
+                },
+                {
+                    "required": ["fire_at", "message"],
+                    "properties": {
+                        "action": {**properties["action"], "enum": ["add"]},
+                    },
+                },
+            ],
+        }
+
+    def normalize_args(self, args: Any) -> Dict[str, Any]:
+        normalized = super().normalize_args(args)
+        alias_map = {
+            "id": "reminder_id",
+            "when": "fire_at",
+            "text": "message",
+        }
+        for src, dst in alias_map.items():
+            if dst not in normalized and src in normalized:
+                normalized[dst] = normalized[src]
+        return normalized
+
     def execute(self, args: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Any:
         action = args.get("action", "add")
         ctx = context or {}

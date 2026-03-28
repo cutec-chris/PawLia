@@ -10,8 +10,10 @@ from pawlia.agents.chat import ChatAgent
 from pawlia.agents.skill_runner import SkillRunnerAgent
 from pawlia.agents.base import BaseAgent
 from pawlia.skills.loader import AgentSkill
-from pawlia.tools.base import ToolRegistry
+from pawlia.tools.base import Tool, ToolRegistry
 from pawlia.tools.bash import BashTool
+from pawlia.skills.executor import WorkflowExecutor
+from pawlia.skills.workflow_schema import BuildingBlock, Workflow
 
 
 def _make_ai_message(content: str, tool_calls=None) -> AIMessage:
@@ -40,6 +42,7 @@ def _make_skill(name="test_skill", description="A test skill",
     skill.skill_path = "/nonexistent"
     skill.scripts_dir = "/nonexistent"
     skill.base_dir = "/nonexistent"
+    skill.workflow = None
     skill.as_openai_spec.return_value = {
         "type": "function",
         "function": {
@@ -111,6 +114,75 @@ class TestChatAgent:
         mock_runner.run.assert_called_once_with(query="Python tutorials")
         # Final response from Turn 2
         assert "Python tutorials" in result
+
+    @pytest.mark.asyncio
+    async def test_skill_delegation_repairs_string_args(self):
+        """String tool args should be normalized into query."""
+        skill = _make_skill("searxng", "Web search")
+
+        turn1 = _make_ai_message("Let me search for that.", tool_calls=[
+            {"id": "call_1", "name": "searxng", "args": "Python tutorials"}
+        ])
+        turn2 = _make_ai_message("Here are some Python tutorials: ...")
+
+        llm = _mock_llm([turn1, turn2])
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value="1. Tutorial A\n2. Tutorial B")
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"searxng": skill},
+            skill_runner_factory=lambda s: mock_runner,
+        )
+
+        await agent.run("Search for Python tutorials")
+        mock_runner.run.assert_called_once_with(query="Python tutorials")
+
+    @pytest.mark.asyncio
+    async def test_skill_delegation_repairs_alias_args(self):
+        """Common alias keys should be normalized into query."""
+        skill = _make_skill("searxng", "Web search")
+
+        turn1 = _make_ai_message("Let me search for that.", tool_calls=[
+            {"id": "call_1", "name": "searxng", "args": {"request": "Python tutorials"}}
+        ])
+        turn2 = _make_ai_message("Here are some Python tutorials: ...")
+
+        llm = _mock_llm([turn1, turn2])
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value="1. Tutorial A\n2. Tutorial B")
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"searxng": skill},
+            skill_runner_factory=lambda s: mock_runner,
+        )
+
+        await agent.run("Search for Python tutorials")
+        mock_runner.run.assert_called_once_with(query="Python tutorials")
+
+    @pytest.mark.asyncio
+    async def test_skill_name_is_fuzzy_resolved(self):
+        """Minor name variations should still resolve to the correct skill."""
+        skill = _make_skill("web_search", "Web search")
+
+        turn1 = _make_ai_message("Let me search for that.", tool_calls=[
+            {"id": "call_1", "name": "web-search", "args": {"query": "Python tutorials"}}
+        ])
+        turn2 = _make_ai_message("Here are some Python tutorials: ...")
+
+        llm = _mock_llm([turn1, turn2])
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value="1. Tutorial A\n2. Tutorial B")
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"web_search": skill},
+            skill_runner_factory=lambda s: mock_runner,
+        )
+
+        await agent.run("Search for Python tutorials")
+        mock_runner.run.assert_called_once_with(query="Python tutorials")
 
     @pytest.mark.asyncio
     async def test_unknown_skill(self):
@@ -396,6 +468,8 @@ class TestSkillRunnerAgent:
         tools = ToolRegistry()
         mock_bash = MagicMock(spec=BashTool)
         mock_bash.name = "bash"
+        mock_bash.normalize_args.side_effect = lambda args: {"command": args} if isinstance(args, str) else args
+        mock_bash.validate_args.return_value = None
         mock_bash.execute.return_value = "fallback_output"
         mock_bash.as_openai_spec.return_value = BashTool().as_openai_spec()
         tools.register(mock_bash)
@@ -475,3 +549,56 @@ class TestExtractCommand:
     def test_relative_path(self):
         text = "Run this:\n./scripts/run.sh"
         assert SkillRunnerAgent._extract_command(text) == "./scripts/run.sh"
+
+
+class DummyTool(Tool):
+    name = "dummy"
+    description = "Dummy tool"
+
+    def parameters(self):
+        return {}
+
+    def execute(self, args, context=None):
+        return "ok"
+
+
+class TestWorkflowExecutor:
+    @pytest.mark.asyncio
+    async def test_select_workflow_returns_none_when_model_does_not_call_tool(self):
+        llm = MagicMock()
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=[
+            _make_ai_message("workflow_a"),
+            _make_ai_message("still text"),
+        ])
+        llm.bind_tools = MagicMock(return_value=bound)
+
+        executor = WorkflowExecutor(
+            tool_registry=ToolRegistry(),
+            context={},
+            llm=llm,
+        )
+        workflows = [
+            Workflow(id="workflow_a", trigger="A", building_blocks=[
+                BuildingBlock(id="step_a", command="echo a", description="A")
+            ]),
+            Workflow(id="workflow_b", trigger="B", building_blocks=[
+                BuildingBlock(id="step_b", command="echo b", description="B")
+            ]),
+        ]
+
+        chosen = await executor.select_workflow(workflows, "do B")
+        assert chosen is None
+
+    def test_block_tools_disallow_extra_arguments(self):
+        executor = WorkflowExecutor(
+            tool_registry=ToolRegistry(),
+            context={},
+            llm=MagicMock(),
+        )
+        workflow = Workflow(id="workflow_a", trigger="A", building_blocks=[
+            BuildingBlock(id="step_a", command="echo {term}", description="A")
+        ])
+
+        tools = executor._blocks_to_tools(workflow)
+        assert tools[0]["function"]["parameters"]["additionalProperties"] is False

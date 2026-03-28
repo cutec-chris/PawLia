@@ -74,30 +74,43 @@ class WorkflowExecutor:
                 "function": {
                     "name": w.id,
                     "description": w.trigger,
-                    "parameters": {"type": "object", "properties": {}},
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
                 },
             }
             for w in workflows
         ]
 
-        bound = self.llm.bind_tools(tools)
+        bound = self.llm.bind_tools(tools, tool_choice="required")
         messages = [
             SystemMessage(content="Pick the workflow that matches the user's request by calling it."),
             HumanMessage(content=query),
         ]
         log_prompt(messages)
 
-        try:
-            response = await bound.ainvoke(messages)
+        for attempt in range(2):
+            try:
+                response = await bound.ainvoke(messages)
+            except Exception as exc:
+                self.logger.error("LLM error selecting workflow: %s", exc)
+                return None
+
             if response.tool_calls:
                 chosen_id = response.tool_calls[0]["name"]
                 for w in workflows:
                     if w.id == chosen_id:
                         return w
-        except Exception as exc:
-            self.logger.error("LLM error selecting workflow: %s", exc)
 
-        return workflows[0]
+            self.logger.warning("Workflow selection failed on attempt %d", attempt + 1)
+            messages.append(response)
+            messages.append(HumanMessage(
+                content="Call exactly one workflow tool. Do not answer with text."
+            ))
+
+        return None
 
     async def execute(self, workflow: Workflow, query: str) -> str:
         """Execute a workflow via tool-call loop."""
@@ -233,6 +246,7 @@ class WorkflowExecutor:
                         "type": "object",
                         "properties": properties,
                         "required": param_names,
+                        "additionalProperties": False,
                     },
                 },
             })
