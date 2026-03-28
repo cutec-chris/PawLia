@@ -112,15 +112,27 @@ def _resolve_thread_root(
     plain reply back to its thread root when we have already seen the replied-to
     event inside a known thread.
     """
+    if not isinstance(source, dict):
+        return None
+
     content = source.get("content", {})
+    if not isinstance(content, dict):
+        return None
+
     relates_to = content.get("m.relates_to", {})
+    if not isinstance(relates_to, dict):
+        return None
 
     if relates_to.get("rel_type") == "m.thread":
         thread_id = relates_to.get("event_id")
         if isinstance(thread_id, str) and thread_id:
             return thread_id
 
-    reply_to = relates_to.get("m.in_reply_to", {}).get("event_id")
+    reply_meta = relates_to.get("m.in_reply_to", {})
+    if not isinstance(reply_meta, dict):
+        reply_meta = {}
+
+    reply_to = reply_meta.get("event_id")
     if isinstance(reply_to, str) and reply_to and known_thread_events:
         return known_thread_events.get(reply_to)
 
@@ -217,7 +229,13 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     def _get_thread_id(event: RoomMessageText) -> Optional[str]:
         """Return the thread root event_id for direct or inferred thread replies."""
-        return _resolve_thread_root(event.source, thread_events)
+        thread_id = _resolve_thread_root(getattr(event, "source", None), thread_events)
+        logger.debug(
+            "Matrix: resolved thread root for %s -> %s",
+            getattr(event, "event_id", None),
+            thread_id,
+        )
+        return thread_id
 
     async def _handle_model_cmd(
         room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
@@ -445,7 +463,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         if not data_uri:
             return
         caption = event.body if event.body and event.body != "image" else ""
-        thread_id = _resolve_thread_root(event.source, thread_events)
+        thread_id = _resolve_thread_root(getattr(event, "source", None), thread_events)
         thread_id = _auto_thread(event.event_id, thread_id)
         _remember_thread_event(event.event_id, thread_id)
         await _handle(room, caption, images=[data_uri], thread_id=thread_id)
@@ -476,7 +494,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
 
         logger.info("Matrix: voice message transcribed: %s", text[:120])
-        thread_id = _resolve_thread_root(event.source, thread_events)
+        thread_id = _resolve_thread_root(getattr(event, "source", None), thread_events)
         thread_id = _auto_thread(event.event_id, thread_id)
         _remember_thread_event(event.event_id, thread_id)
         # Show transcription in UI
