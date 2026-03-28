@@ -100,6 +100,64 @@ class ChatAgent(BaseAgent):
         # Set by App.make_agent after construction.
         self._llm_resolver: Optional[Callable[[str], Any]] = None
 
+    def _resolve_skill_name(self, name: str) -> str:
+        """Resolve minor skill-name variations from model tool calls."""
+        normalized = name.replace("_", "").replace("-", "").lower()
+        for skill_name in self.skills:
+            candidate = skill_name.replace("_", "").replace("-", "").lower()
+            if candidate == normalized:
+                return skill_name
+        return name
+
+    @staticmethod
+    def _normalize_skill_args(args: Any) -> Dict[str, str]:
+        """Repair common malformed skill-call payloads from smaller models."""
+        if args is None:
+            return {}
+        if isinstance(args, str):
+            query = args.strip()
+            return {"query": query} if query else {}
+        if not isinstance(args, dict):
+            return {}
+
+        normalized = dict(args)
+        query = normalized.get("query")
+        if not isinstance(query, str) or not query.strip():
+            for alias in ("task", "request", "prompt", "input", "text"):
+                value = normalized.get(alias)
+                if isinstance(value, str) and value.strip():
+                    query = value
+                    break
+
+        if (not isinstance(query, str) or not query.strip()) and len(normalized) == 1:
+            only_value = next(iter(normalized.values()))
+            if isinstance(only_value, str) and only_value.strip():
+                query = only_value
+
+        if not isinstance(query, str):
+            return {}
+
+        query = query.strip()
+        return {"query": query} if query else {}
+
+    def _decode_skill_call(self, tool_call: Dict[str, Any]) -> tuple[str, Dict[str, str], str]:
+        """Return (resolved_skill_name, normalized_args, error_message)."""
+        raw_name = str(tool_call.get("name", "") or "").strip()
+        if not raw_name:
+            return "", {}, "Error: Invalid skill call: missing skill name."
+
+        skill_name = self._resolve_skill_name(raw_name)
+        args = self._normalize_skill_args(tool_call.get("args", {}))
+
+        if skill_name not in self.skills:
+            return skill_name, args, f"Error: Unknown skill '{raw_name}'."
+        if "query" not in args:
+            return skill_name, args, (
+                f"Error: Invalid arguments for skill '{skill_name}'. "
+                "Expected {'query': '<task>'}."
+            )
+        return skill_name, args, ""
+
     async def run(
         self,
         user_input: str,
@@ -221,11 +279,14 @@ class ChatAgent(BaseAgent):
         tool_calls_info: List[Dict[str, Any]] = []
 
         for tool_call in response.tool_calls:
-            skill_name = tool_call["name"]
-            query = tool_call.get("args", {}).get("query", "")
+            skill_name, normalized_args, error = self._decode_skill_call(tool_call)
+            query = normalized_args.get("query", "")
             skill = self.skills.get(skill_name)
 
-            if skill:
+            if error:
+                self.logger.warning("Skill call rejected: %s", error)
+                result = error
+            elif skill:
                 self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
                 if _on_skill_start:
                     try:
@@ -247,7 +308,7 @@ class ChatAgent(BaseAgent):
             # Store tool call info for persistent storage
             tool_calls_info.append({
                 "name": skill_name,
-                "args": tool_call.get("args", {}),
+                "args": normalized_args,
                 "result": result,
             })
 
@@ -359,11 +420,14 @@ class ChatAgent(BaseAgent):
         tool_calls_info: List[Dict[str, Any]] = []
 
         for tool_call in accumulated.tool_calls:
-            skill_name = tool_call["name"]
-            query = tool_call.get("args", {}).get("query", "")
+            skill_name, normalized_args, error = self._decode_skill_call(tool_call)
+            query = normalized_args.get("query", "")
             skill = self.skills.get(skill_name)
 
-            if skill:
+            if error:
+                self.logger.warning("Skill call rejected: %s", error)
+                skill_result = error
+            elif skill:
                 self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
                 if _on_skill_start:
                     try:
@@ -384,7 +448,7 @@ class ChatAgent(BaseAgent):
 
             tool_calls_info.append({
                 "name": skill_name,
-                "args": tool_call.get("args", {}),
+                "args": normalized_args,
                 "result": skill_result,
             })
             messages.append(ToolMessage(

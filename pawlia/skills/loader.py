@@ -76,9 +76,11 @@ class AgentSkill:
                         "query": {
                             "type": "string",
                             "description": "The task or query for this skill",
+                            "minLength": 1,
                         }
                     },
                     "required": ["query"],
+                    "additionalProperties": False,
                 },
             },
         }

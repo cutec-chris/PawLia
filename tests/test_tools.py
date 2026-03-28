@@ -222,6 +222,24 @@ class TestToolRegistry:
         result = registry.execute("nonexistent", {})
         assert "Error" in result
 
+    def test_string_args_are_normalized_for_single_param_tools(self):
+        registry = ToolRegistry()
+        registry.register(BashTool())
+        result = registry.execute("bash", "echo normalized")
+        assert "normalized" in result
+
+    def test_rejects_unexpected_arguments(self):
+        registry = ToolRegistry()
+        registry.register(BashTool())
+        result = registry.execute("bash", {"command": "echo ok", "extra": "nope"})
+        assert "Invalid arguments" in result
+
+    def test_rejects_missing_required_arguments(self):
+        registry = ToolRegistry()
+        registry.register(BashTool())
+        result = registry.execute("bash", {})
+        assert "Missing required" in result
+
     def test_get_specs(self):
         registry = ToolRegistry()
         registry.register(BashTool())
