@@ -39,3 +39,13 @@ def test_resolve_thread_root_returns_none_without_thread_context():
     }
 
     assert _resolve_thread_root(source, {}) is None
+
+
+def test_resolve_thread_root_handles_malformed_payloads():
+    assert _resolve_thread_root(None, {}) is None
+    assert _resolve_thread_root({"content": None}, {}) is None
+    assert _resolve_thread_root({"content": {"m.relates_to": None}}, {}) is None
+    assert _resolve_thread_root(
+        {"content": {"m.relates_to": {"m.in_reply_to": None}}},
+        {},
+    ) is None
