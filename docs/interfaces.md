@@ -103,7 +103,18 @@ tts:
     model: /app/piper/de_DE-kerstin-low.onnx
     config: /app/piper/de_DE-kerstin-low.onnx.json
     sample_rate: 16000
+  # hold_audio: /app/assets/keyboard.m4a   # background sound while waiting (default: assets/keyboard.m4a)
 ```
+
+Each call gets its own isolated thread context (like `//thread`) — all transcriptions and responses appear in a dedicated Matrix thread rooted at a "📞 Eingehender Anruf" message. Conversation history from different calls does not leak into each other.
+
+#### Streamed TTS
+
+LLM responses are streamed token-by-token. As soon as a complete sentence is detected in the stream, it is synthesised and enqueued for playback immediately. This reduces the delay before the caller hears the first word of the response.
+
+#### Hold audio
+
+While the agent is processing (thinking / skill execution), a hold audio loop is played to the caller so they don't sit in silence. The default is `assets/keyboard.m4a`. Override it via `tts.hold_audio` in the config, or remove the file to disable it. A Matrix typing indicator is also kept alive during processing.
 
 ## Web Interface
 
