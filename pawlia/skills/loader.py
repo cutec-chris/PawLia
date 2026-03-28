@@ -121,7 +121,8 @@ class SkillLoader:
                 # Check required config
                 required = metadata.get("metadata", {}).get("requires_config", [])
                 if required:
-                    skill_cfg = config.get("skill-config", {}).get(skill_name, {})
+                    skill_config_root = config.get("skill-config") or {}
+                    skill_cfg = skill_config_root.get(skill_name, {})
                     missing = [k for k in required if k not in skill_cfg]
                     if missing:
                         logger.info(
