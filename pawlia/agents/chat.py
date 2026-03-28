@@ -178,7 +178,7 @@ class ChatAgent(BaseAgent):
         (e.g. ``data:image/png;base64,…``).
 
         ``thread_id`` isolates the context window: the model only sees exchanges
-        from that thread (seeded from the last 5 main-session exchanges on first use).
+        from that thread.
 
         Optional per-call callbacks override instance-level attributes to avoid
         race conditions when the same agent is shared across concurrent requests.
