@@ -348,6 +348,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         app=app,
         cfg=cfg,
         send_text_cb=_send_text,
+        send_thread_reply_cb=_send_thread_reply,
+        get_agent_cb=get_agent,
     )
 
     if not call_manager.available():
