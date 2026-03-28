@@ -204,7 +204,7 @@ class SkillRunnerAgent(BaseAgent):
                     messages.append(HumanMessage(
                         content="Do NOT generate code, HTML, or explanations. "
                         "The task is NOT complete. "
-                        "Use the bash tool NOW to run the next command."
+                        "Use one of the available tools NOW to continue."
                     ))
                     self.logger.info("Nudging LLM to continue (turn %d, nudge %d)", _turn, nudge_count)
                     continue
@@ -224,9 +224,14 @@ class SkillRunnerAgent(BaseAgent):
 
     def _execute_tool_call(self, tc: dict, messages: List[BaseMessage]) -> str:
         """Execute a single tool call, append result to messages, and return it."""
-        tc_name = tc["name"]
+        tc_name = str(tc.get("name", "") or "").strip()
         tc_args = tc.get("args", {})
         tc_id = tc.get("id", "")
+
+        if not tc_name:
+            result_str = "Error: Invalid tool call: missing tool name."
+            messages.append(ToolMessage(content=result_str, tool_call_id=tc_id))
+            return result_str
 
         self.logger.debug("Tool call: %s(%s)", tc_name, json.dumps(tc_args)[:200])
         if self.on_step:
