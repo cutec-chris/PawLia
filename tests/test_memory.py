@@ -409,8 +409,8 @@ class TestExchangesInMessageHistory:
             assert "hello user" not in prompt
             assert "hello bot" not in prompt
 
-    def test_thread_seeded_with_last_5(self):
-        """A new thread should be seeded with the last 5 main exchanges."""
+    def test_new_thread_starts_empty(self):
+        """A new thread should start empty and stay isolated from the main session."""
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)
             session = mm.load_session("u_thread")
@@ -419,10 +419,7 @@ class TestExchangesInMessageHistory:
                 session.exchanges.append((f"msg_{i}", f"reply_{i}"))
 
             thread_ctx = mm.get_thread_context(session, "new_thread")
-            assert len(thread_ctx) == 5
-            # Should be the LAST 5 (3..7)
-            assert thread_ctx[0] == ("msg_3", "reply_3")
-            assert thread_ctx[-1] == ("msg_7", "reply_7")
+            assert thread_ctx == []
 
 
 class TestSummaryFromExchanges:
