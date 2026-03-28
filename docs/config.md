@@ -130,7 +130,7 @@ transcription:
 
 ## Text-to-Speech (VoIP)
 
-Used to speak responses during Matrix VoIP calls.
+Used to speak responses during Matrix VoIP calls. Responses are streamed sentence-by-sentence for lower latency.
 
 ```yaml
 tts:
@@ -144,7 +144,14 @@ tts:
 
   # edge:                 # Microsoft Edge TTS (requires internet)
   #   voice: de-DE-KatjaNeural
+
+  # hold_audio: /app/assets/keyboard.m4a   # background sound while waiting for agent (default: assets/keyboard.m4a)
 ```
+
+| Key | Description |
+|-----|-------------|
+| `provider` | `piper` (local) or `edge` (Microsoft Edge TTS, requires internet) |
+| `hold_audio` | Path to audio file (wav/mp3/m4a) played to caller while waiting. Default: `assets/keyboard.m4a` |
 
 ## Skill Configuration
 
