@@ -79,6 +79,21 @@ main { flex:1; overflow:hidden; }
   border-bottom:1px solid var(--border); background:var(--bg2); flex-shrink:0;
 }
 #chat-toolbar label { font-size:12px; color:var(--muted); }
+#thread-indicator {
+  display:none; align-items:center; gap:8px; margin-left:8px;
+  font-size:12px; color:var(--accent2);
+}
+#thread-indicator.active { display:flex; }
+#thread-pill {
+  background:var(--bg3); border:1px solid var(--border); color:var(--accent2);
+  padding:4px 8px; border-radius:999px; max-width:220px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+#thread-clear {
+  background:none; border:1px solid var(--border); color:var(--muted);
+  padding:4px 8px; border-radius:6px; cursor:pointer; font-size:12px;
+}
+#thread-clear:hover { border-color:var(--warn); color:var(--warn); }
 #chat-uid {
   background:var(--bg3); border:1px solid var(--border); color:var(--text);
   padding:5px 10px; border-radius:6px; width:160px; outline:none;
@@ -296,6 +311,11 @@ tr:hover td { background:var(--bg2); }
       <div id="chat-toolbar">
         <label>User-ID:</label>
         <input type="text" id="chat-uid" value="web_user" spellcheck="false">
+        <div id="thread-indicator">
+          <span>Aktiver Thread</span>
+          <span id="thread-pill"></span>
+          <button id="thread-clear" type="button">Verlassen</button>
+        </div>
       </div>
       <div id="chat-messages"></div>
       <div id="chat-input-row">
@@ -547,6 +567,33 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 const chatInput = $('chat-input');
 const sendBtn   = $('send-btn');
 const messages  = $('chat-messages');
+const chatUid   = $('chat-uid');
+const threadIndicator = $('thread-indicator');
+const threadPill = $('thread-pill');
+const threadClear = $('thread-clear');
+
+let activeThreadId = null;
+
+function renderThreadState() {
+  if (activeThreadId) {
+    threadIndicator.classList.add('active');
+    threadPill.textContent = activeThreadId;
+    chatInput.placeholder = 'Nachricht im Thread …';
+    return;
+  }
+  threadIndicator.classList.remove('active');
+  threadPill.textContent = '';
+  chatInput.placeholder = 'Nachricht …';
+}
+
+function setActiveThread(threadId) {
+  activeThreadId = threadId || null;
+  renderThreadState();
+}
+
+threadClear.addEventListener('click', () => setActiveThread(null));
+chatUid.addEventListener('change', () => setActiveThread(null));
+renderThreadState();
 
 chatInput.addEventListener('input', () => {
   chatInput.style.height = 'auto';
@@ -573,7 +620,7 @@ function appendMsg(role, html) {
 async function sendMessage() {
   const msg = chatInput.value.trim();
   if (!msg) return;
-  const uid = $('chat-uid').value.trim() || 'web_user';
+  const uid = chatUid.value.trim() || 'web_user';
 
   appendMsg('user', renderMd(msg));
   chatInput.value = '';
@@ -584,10 +631,13 @@ async function sendMessage() {
   const body = typing.querySelector('.msg-body');
 
   try {
+    const requestBody = {message: msg, user_id: uid};
+    if (activeThreadId) requestBody.thread_id = activeThreadId;
+
     const r = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: msg, user_id: uid}),
+      body: JSON.stringify(requestBody),
       credentials: 'include',
     });
     if (r.status === 401) { location.reload(); return; }
@@ -596,6 +646,7 @@ async function sendMessage() {
     const ct = r.headers.get('content-type') || '';
     if (ct.includes('application/json')) {
       const data = await r.json();
+      if (data.thread_id) setActiveThread(data.thread_id);
       body.innerHTML = renderMd(data.response || data.error || '(leer)');
       sendBtn.disabled = false;
       messages.scrollTop = messages.scrollHeight;

@@ -102,6 +102,31 @@ def _make_status_done(event_id: str, skill_name: str, steps: int) -> dict:
     return _status_edit(event_id, body, html)
 
 
+def _resolve_thread_root(
+    source: dict,
+    known_thread_events: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Resolve the thread root from a Matrix event payload.
+
+    Preferred path is a proper ``m.thread`` relation. As a fallback, map a
+    plain reply back to its thread root when we have already seen the replied-to
+    event inside a known thread.
+    """
+    content = source.get("content", {})
+    relates_to = content.get("m.relates_to", {})
+
+    if relates_to.get("rel_type") == "m.thread":
+        thread_id = relates_to.get("event_id")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+
+    reply_to = relates_to.get("m.in_reply_to", {}).get("event_id")
+    if isinstance(reply_to, str) and reply_to and known_thread_events:
+        return known_thread_events.get(reply_to)
+
+    return None
+
+
 async def start_matrix(app: "App", cfg: Dict) -> None:
     """Connect to Matrix and start handling messages.
 
@@ -136,9 +161,16 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     # One agent per Matrix room (shared context for everyone in the room)
     agent_cache = AgentCache(app)
+    thread_events: Dict[str, str] = {}
 
     def get_agent(room_id: str):
         return agent_cache.get(f"mx_{room_id}")
+
+    def _remember_thread_event(event_id: Optional[str], thread_root_id: Optional[str]) -> None:
+        if not event_id or not thread_root_id:
+            return
+        thread_events[thread_root_id] = thread_root_id
+        thread_events[event_id] = thread_root_id
 
     # ------------------------------------------------------------------
     # Helpers
@@ -174,20 +206,18 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             "m.in_reply_to": {"event_id": root_event_id},
         }
         try:
-            await client.room_send(
+            resp = await client.room_send(
                 room_id=room_id,
                 message_type="m.room.message",
                 content=content,
             )
+            _remember_thread_event(getattr(resp, "event_id", None), root_event_id)
         except Exception as e:
             logger.error("Matrix: send_thread_reply failed for %s: %s", room_id, e)
 
     def _get_thread_id(event: RoomMessageText) -> Optional[str]:
-        """Return the thread root event_id if this message is a Matrix thread reply."""
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        if relates_to.get("rel_type") == "m.thread":
-            return relates_to.get("event_id")
-        return None
+        """Return the thread root event_id for direct or inferred thread replies."""
+        return _resolve_thread_root(event.source, thread_events)
 
     async def _handle_model_cmd(
         room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
@@ -297,6 +327,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     content=content,
                 )
                 status_event_id = getattr(resp, "event_id", None)
+                _remember_thread_event(status_event_id, thread_id)
 
             async def _on_skill_step(step_text: str) -> None:
                 nonlocal step_count
@@ -395,10 +426,12 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             if not thread_args:
                 await _send_text(room.room_id, "_Verwendung: //thread <Nachricht>_")
                 return
+            _remember_thread_event(event.event_id, event.event_id)
             await _handle(room, thread_args, thread_id=event.event_id)
             return
 
         thread_id = _auto_thread(event.event_id, _get_thread_id(event))
+        _remember_thread_event(event.event_id, thread_id)
         await _handle(room, text, thread_id=thread_id)
 
     async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
@@ -412,9 +445,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         if not data_uri:
             return
         caption = event.body if event.body and event.body != "image" else ""
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+        thread_id = _resolve_thread_root(event.source, thread_events)
         thread_id = _auto_thread(event.event_id, thread_id)
+        _remember_thread_event(event.event_id, thread_id)
         await _handle(room, caption, images=[data_uri], thread_id=thread_id)
 
     async def on_audio(room: MatrixRoom, event: RoomMessageAudio) -> None:
@@ -443,9 +476,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
 
         logger.info("Matrix: voice message transcribed: %s", text[:120])
-        relates_to = event.source.get("content", {}).get("m.relates_to", {})
-        thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+        thread_id = _resolve_thread_root(event.source, thread_events)
         thread_id = _auto_thread(event.event_id, thread_id)
+        _remember_thread_event(event.event_id, thread_id)
         # Show transcription in UI
         if thread_id:
             await _send_thread_reply(room.room_id, thread_id, f"🎙️ *{text}*")
