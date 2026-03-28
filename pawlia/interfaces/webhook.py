@@ -47,7 +47,7 @@ async def start_webhook(app: "App", cfg: Dict) -> None:
     port: int = cfg.get("port", 8080)
     token: str = cfg.get("token", "")
 
-    from pawlia.interfaces.common import AgentCache
+    from pawlia.interfaces.common import AgentCache, preview_text
 
     agent_cache = AgentCache(app)
     # Buffer for proactive notifications (polled via GET /notifications)
@@ -83,6 +83,7 @@ async def start_webhook(app: "App", cfg: Dict) -> None:
 
             agent.on_interim = _on_interim
             response = await agent.run(message, images=images)
+            logger.info("Webhook: response to %s: %s", user_id, preview_text(response))
             return web.json_response({"response": response})
         except Exception as e:
             logger.error("Webhook: error processing message: %s", e)

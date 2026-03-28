@@ -169,7 +169,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         await client.close()
         return
 
-    from pawlia.interfaces.common import AgentCache, build_status, format_status, handle_model_command
+    from pawlia.interfaces.common import AgentCache, build_status, format_status, handle_model_command, preview_text
 
     # One agent per Matrix room (shared context for everyone in the room)
     agent_cache = AgentCache(app)
@@ -378,6 +378,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 app.scheduler.release_llm()
 
             await client.room_typing(room.room_id, typing_state=False)
+            logger.info("Matrix: response in %s%s: %s", room.room_id, ctx, preview_text(response))
             await _send(response)
         except Exception as e:
             logger.error("Matrix: error processing message: %s", e)
