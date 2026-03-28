@@ -248,16 +248,14 @@ class MemoryManager:
     ) -> List[Tuple[str, str]]:
         """Return the exchange list for a thread, loading from disk on first access.
 
-        New threads are seeded with the last KEEP_RECENT_EXCHANGES from the
-        main session when no thread history exists on disk yet.
+        New threads start empty. Only exchanges from that thread are replayed
+        into the model context.
         """
         if thread_id not in session.thread_contexts:
             path = self._thread_daily_path(
                 session.user_id, thread_id, session.current_date_str
             )
             exchanges = self._parse_exchanges(self._read(path))
-            if not exchanges:
-                exchanges = list(session.exchanges[-KEEP_RECENT_EXCHANGES:])
             session.thread_contexts[thread_id] = exchanges
         return session.thread_contexts[thread_id]
 
