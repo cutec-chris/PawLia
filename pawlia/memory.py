@@ -248,14 +248,16 @@ class MemoryManager:
     ) -> List[Tuple[str, str]]:
         """Return the exchange list for a thread, loading from disk on first access.
 
-        New threads start with an empty context — only the initial question
-        (passed as ``user_input`` to the agent) provides context.
+        New threads are seeded with the last KEEP_RECENT_EXCHANGES from the
+        main session when no thread history exists on disk yet.
         """
         if thread_id not in session.thread_contexts:
             path = self._thread_daily_path(
                 session.user_id, thread_id, session.current_date_str
             )
             exchanges = self._parse_exchanges(self._read(path))
+            if not exchanges:
+                exchanges = list(session.exchanges[-KEEP_RECENT_EXCHANGES:])
             session.thread_contexts[thread_id] = exchanges
         return session.thread_contexts[thread_id]
 
@@ -393,6 +395,7 @@ class MemoryManager:
         lines.append("")
         lines.append(
             "RULES:\n"
+            "- If a user's request matches one of the skills below, you MUST call the matching skill. NEVER guess or make up answers.\n"
             "- When a user asks for something a skill can handle, "
             "you MUST use the tool call mechanism to invoke the skill. "
             "NEVER just describe or mention the skill in text — actually CALL it.\n"
