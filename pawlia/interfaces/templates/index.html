@@ -285,6 +285,7 @@ tr:hover td { background:var(--bg2); }
       <button class="tab-btn active" data-tab="chat">💬 Chat</button>
       <button class="tab-btn" data-tab="config">⚙️ Konfiguration</button>
       <button class="tab-btn" data-tab="skills">🧩 Skills</button>
+      <button class="tab-btn" data-tab="settings">🔧 Settings</button>
       <button class="tab-btn" data-tab="graph">🕸 Memory</button>
     </nav>
     <button id="logout-btn">Abmelden</button>
@@ -361,6 +362,21 @@ tr:hover td { background:var(--bg2); }
           <thead><tr><th>Skill</th><th>Version</th><th>Status</th><th>Konfiguration</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
+      </div>
+    </section>
+    <!-- Settings -->
+    <section class="tab" id="tab-settings">
+      <div class="cfg-tab">
+        <div class="cfg-header">
+          <div>
+            <h2>Settings</h2>
+            <div class="cfg-notice">Interface-, TTS- und Transkriptions-Einstellungen. Neustart erforderlich.</div>
+          </div>
+          <button class="add-btn" id="save-settings-btn">💾 Speichern</button>
+        </div>
+        <div id="settings-editor" style="margin-top:16px;">
+          <p style="color:var(--muted)">Lade …</p>
+        </div>
       </div>
     </section>
     <!-- Knowledge Graph -->
@@ -521,6 +537,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     $('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'config') { loadProviders(); loadModels(); }
     if (btn.dataset.tab === 'skills') loadSkills();
+    if (btn.dataset.tab === 'settings') loadSettings();
     if (btn.dataset.tab === 'graph') loadGraph();
   });
 });
@@ -1023,6 +1040,88 @@ $('modal-save').addEventListener('click', async () => {
 $('modal').addEventListener('keydown', e => {
   if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA') $('modal-save').click();
   if (e.key === 'Escape') closeModal();
+});
+
+// ── Settings ──────────────────────────────────────────────────────────────
+
+let _settingsData = {};
+
+async function loadSettings() {
+  const r = await api('/api/settings');
+  _settingsData = r.settings || {};
+  renderSettings();
+}
+
+function renderSettings() {
+  const el = $('settings-editor');
+  if (!Object.keys(_settingsData).length) {
+    el.innerHTML = '<p style="color:var(--muted)">Keine Settings in der Config gefunden.</p>';
+    return;
+  }
+  let html = '';
+  for (const [section, values] of Object.entries(_settingsData)) {
+    html += `<h3 style="color:var(--accent);margin:20px 0 10px;text-transform:capitalize">${section}</h3>`;
+    if (typeof values === 'object' && values !== null) {
+      html += renderSettingsObj(section, values, '');
+    }
+  }
+  el.innerHTML = html;
+}
+
+function renderSettingsObj(section, obj, prefix) {
+  let html = '<table style="width:100%;margin-bottom:8px"><tbody>';
+  for (const [key, val] of Object.entries(obj)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    const id = `setting-${section}-${path}`.replace(/\./g, '-');
+    if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
+      html += `<tr><td colspan="2" style="padding:8px 0 2px"><strong style="color:var(--fg)">${key}</strong></td></tr>`;
+      html += '</tbody></table>';
+      html += `<div style="margin-left:20px">${renderSettingsObj(section, val, path)}</div>`;
+      html += '<table style="width:100%"><tbody>';
+    } else if (typeof val === 'boolean') {
+      html += `<tr>
+        <td style="width:200px;padding:4px 8px;color:var(--fg)">${key}</td>
+        <td><label style="cursor:pointer"><input type="checkbox" data-section="${section}" data-path="${path}" id="${id}" ${val ? 'checked' : ''}> ${val ? 'Aktiv' : 'Inaktiv'}</label></td>
+      </tr>`;
+    } else {
+      html += `<tr>
+        <td style="width:200px;padding:4px 8px;color:var(--fg)">${key}</td>
+        <td><input type="text" data-section="${section}" data-path="${path}" id="${id}" value="${Array.isArray(val) ? val.join(', ') : (val ?? '')}" style="width:100%;background:var(--bg2);color:var(--fg);border:1px solid var(--border);padding:4px 8px;border-radius:4px"></td>
+      </tr>`;
+    }
+  }
+  html += '</tbody></table>';
+  return html;
+}
+
+$('save-settings-btn').addEventListener('click', async () => {
+  // Collect values from inputs back into _settingsData
+  document.querySelectorAll('#settings-editor input[data-section]').forEach(input => {
+    const section = input.dataset.section;
+    const path = input.dataset.path;
+    const keys = path.split('.');
+    let target = _settingsData[section];
+    for (let i = 0; i < keys.length - 1; i++) {
+      target = target[keys[i]];
+    }
+    const lastKey = keys[keys.length - 1];
+    const origVal = target[lastKey];
+    if (input.type === 'checkbox') {
+      target[lastKey] = input.checked;
+    } else if (typeof origVal === 'number') {
+      target[lastKey] = Number(input.value) || 0;
+    } else if (Array.isArray(origVal)) {
+      target[lastKey] = input.value.split(',').map(s => s.trim()).filter(Boolean);
+    } else {
+      target[lastKey] = input.value;
+    }
+  });
+  const r = await fetch('/api/settings', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({settings: _settingsData}),
+  });
+  if (r.ok) toast('Settings gespeichert (Neustart erforderlich)');
+  else toast('Fehler beim Speichern', true);
 });
 
 // ── Knowledge Graph (D3.js force layout) ─────────────────────────────────

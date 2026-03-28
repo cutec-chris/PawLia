@@ -375,6 +375,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 return text[len(prefix):].strip()
         return None
 
+    always_thread: bool = cfg.get("always_thread", False)
+
+    def _auto_thread(event_id: str, thread_id: Optional[str]) -> Optional[str]:
+        """Apply always_thread: if no thread yet, use the event itself as root."""
+        if thread_id:
+            return thread_id
+        return event_id if always_thread else None
+
     async def on_message(room: MatrixRoom, event: RoomMessageText) -> None:
         if event.sender == client.user_id:
             return
@@ -390,7 +398,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             await _handle(room, thread_args, thread_id=event.event_id)
             return
 
-        await _handle(room, text, thread_id=_get_thread_id(event))
+        thread_id = _auto_thread(event.event_id, _get_thread_id(event))
+        await _handle(room, text, thread_id=thread_id)
 
     async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
         if event.sender == client.user_id:
@@ -403,8 +412,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         if not data_uri:
             return
         caption = event.body if event.body and event.body != "image" else ""
-        thread_id = event.source.get("content", {}).get("m.relates_to", {})
-        thread_id = thread_id.get("event_id") if thread_id.get("rel_type") == "m.thread" else None
+        relates_to = event.source.get("content", {}).get("m.relates_to", {})
+        thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
+        thread_id = _auto_thread(event.event_id, thread_id)
         await _handle(room, caption, images=[data_uri], thread_id=thread_id)
 
     async def on_audio(room: MatrixRoom, event: RoomMessageAudio) -> None:
@@ -435,7 +445,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         logger.info("Matrix: voice message transcribed: %s", text[:120])
         relates_to = event.source.get("content", {}).get("m.relates_to", {})
         thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
-        # Show transcription in UI (like phone calls)
+        thread_id = _auto_thread(event.event_id, thread_id)
+        # Show transcription in UI
         if thread_id:
             await _send_thread_reply(room.room_id, thread_id, f"🎙️ *{text}*")
         else:

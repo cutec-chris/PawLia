@@ -58,6 +58,7 @@ interfaces:
   #   user_id: "@yourbot:matrix.org"
   #   password: YOUR_PASSWORD
   #   # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
+  #   # always_thread: true                  # always reply in a new thread (default: false)
   #   # stun_servers:                        # STUN for VoIP (optional)
   #   #   - stun:stun.l.google.com:19302
 
