@@ -1,13 +1,23 @@
 """Matrix VoIP call handler for PawLia using aiortc (WebRTC).
 
-Each incoming call gets its own :class:`CallSession`. The session:
+Each incoming call gets its own :class:`CallSession` **with an isolated
+thread context** (same isolation as ``//thread``).  All transcriptions and
+responses are posted into a dedicated Matrix thread rooted at a
+"📞 Eingehender Anruf" message.
 
-1. Accepts the SDP offer from ``m.call.invite``
-2. Sends back ``m.call.answer``
-3. Exchanges ICE candidates via ``m.call.candidates``
-4. Receives caller audio, runs silence-based VAD, transcribes speech chunks
-5. Passes transcription to the agent, optionally synthesises TTS and plays it back
-6. Cleans up on ``m.call.hangup`` or timeout
+Flow
+----
+1. ``m.call.invite`` arrives → thread-root message is sent → SDP answer
+2. ICE candidates are exchanged via ``m.call.candidates``
+3. Caller audio is received, silence-based VAD detects speech chunks
+4. Each chunk is transcribed (STT) and streamed through the agent
+5. The LLM response is **streamed sentence-by-sentence** — each sentence
+   is synthesised (TTS) and enqueued for playback *immediately*, reducing
+   perceived latency significantly compared to full-response TTS
+6. While the agent is thinking, a configurable **hold audio** loop
+   (default ``assets/keyboard.m4a``) is played to the caller and a
+   Matrix typing indicator is kept alive
+7. Call ends on ``m.call.hangup`` or timeout
 
 Dependencies: aiortc, av, numpy  (optional: edge-tts or piper for TTS)
 """
