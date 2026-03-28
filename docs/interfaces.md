@@ -73,7 +73,17 @@ interfaces:
 
 ### Threads
 
-Matrix thread replies (messages with `m.thread` relation) get their own isolated context window — same behaviour as Telegram forum topics. Use `//thread <msg>` to start a new thread from the main room.
+Matrix thread replies (messages with `m.thread` relation) get their own isolated context window. Use `//thread <msg>` to start a new thread from the main room. Each thread starts with a clean context — only the initial question is visible to the model.
+
+#### Always-thread mode
+
+When `always_thread: true` is set in the Matrix interface config, every message automatically creates a new thread. The user's message becomes the thread root and the bot replies inside it. Messages that are already part of an existing thread stay there. This keeps the main room clean and gives each conversation its own isolated context.
+
+```yaml
+interfaces:
+  matrix:
+    always_thread: true
+```
 
 ### Commands
 
@@ -138,6 +148,7 @@ On startup a random access token is printed to the console. Enter it in the brow
 | Providers | View and edit provider config (API base, key, timeout) |
 | Models | View and edit model definitions |
 | Skills | List all skills, upload new ones (ZIP from ClawHub), configure skill settings, delete user skills |
+| Settings | Edit interface, TTS, and transcription config (e.g. `always_thread`, `hold_audio`, STT provider) |
 
 ### Commands
 

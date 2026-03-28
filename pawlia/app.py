@@ -27,8 +27,10 @@ class App:
     a factory for creating ChatAgent instances per user/interface.
     """
 
-    def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None):
+    def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None,
+                 config_path: Optional[str] = None):
         self.config = config
+        self.config_path = config_path
         self.logger = logger or logging.getLogger("pawlia.app")
 
         # Session directory (same location as legacy system)
@@ -129,6 +131,7 @@ class App:
                     "user_id": user_id,
                     "session_dir": self.session_dir,
                     "session": session,
+                    "config_path": self.config_path,
                 },
             )
 
@@ -151,4 +154,4 @@ def create_app(config_path: Optional[str] = None,
                logger: Optional[logging.Logger] = None) -> App:
     """Load config and create an App instance."""
     config = load_config(config_path)
-    return App(config, logger=logger)
+    return App(config, logger=logger, config_path=config_path)
