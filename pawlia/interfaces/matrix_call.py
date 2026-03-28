@@ -197,22 +197,25 @@ class CallSession:
         call_id: str,
         room_id: str,
         caller_id: str,
+        thread_id: str,
         client: "AsyncClient",
         app: "App",
         cfg: Dict[str, Any],
-        send_text_cb: Callable,
+        agent: Any,
+        send_cb: Callable,
     ) -> None:
         self.call_id = call_id
         self.room_id = room_id
         self.caller_id = caller_id
+        self.thread_id = thread_id
         self._client = client
         self._app = app
         self._cfg = cfg
-        self._send_text = send_text_cb  # async (room_id, text)
+        self._send_cb = send_cb  # async (text,) — already routed to the call thread
 
         self._pc: Optional["RTCPeerConnection"] = None
         self._tts_track: Optional["_TTSAudioTrack"] = None
-        self._agent = app.make_agent(f"mx_{room_id}")
+        self._agent = agent
         self._done = asyncio.Event()
         self._pending_candidates: List[Dict] = []
         self._speaking = False
@@ -483,7 +486,7 @@ class CallSession:
         logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
 
         # Send transcription immediately so it appears before the response
-        await self._send_text(self.room_id, f"🎙️ *{text}*")
+        await self._send_cb(f"🎙️ *{text}*")
 
         # Show typing indicator while agent thinks
         try:
@@ -492,7 +495,7 @@ class CallSession:
             pass
 
         try:
-            response = await self._agent.run(text)
+            response = await self._agent.run(text, thread_id=self.thread_id)
         except Exception as e:
             logger.error("call %s: agent error: %s", self.call_id[:8], e)
             return
@@ -502,7 +505,7 @@ class CallSession:
             except Exception:
                 pass
 
-        await self._send_text(self.room_id, response)
+        await self._send_cb(response)
 
         # TTS: synthesise and feed to outgoing audio track
         if self._tts_track:
@@ -605,11 +608,21 @@ class CallSession:
 class CallManager:
     """Manages all active calls for a Matrix bot instance."""
 
-    def __init__(self, client: "AsyncClient", app: "App", cfg: Dict[str, Any], send_text_cb: Callable) -> None:
+    def __init__(
+        self,
+        client: "AsyncClient",
+        app: "App",
+        cfg: Dict[str, Any],
+        send_text_cb: Callable,
+        send_thread_reply_cb: Callable,
+        get_agent_cb: Callable,
+    ) -> None:
         self._client = client
         self._app = app
         self._cfg = cfg
         self._send_text = send_text_cb
+        self._send_thread_reply = send_thread_reply_cb  # async (room_id, thread_id, text)
+        self._get_agent = get_agent_cb                  # (room_id) -> agent
         self._sessions: Dict[str, CallSession] = {}  # call_id → session
 
     def available(self) -> bool:
@@ -640,14 +653,45 @@ class CallManager:
             logger.error("call %s: no SDP in invite", event.call_id[:8])
             return
 
+        # Create a thread-root message → its event_id becomes the call's thread_id.
+        # All transcriptions and responses will be posted as replies into that thread.
+        call_thread_id: Optional[str] = None
+        try:
+            resp = await self._client.room_send(
+                room_id=room.room_id,
+                message_type="m.room.message",
+                content={
+                    "msgtype": "m.text",
+                    "body": f"📞 Eingehender Anruf von {event.sender}",
+                },
+            )
+            call_thread_id = getattr(resp, "event_id", None)
+            logger.info("call %s: thread root event_id=%s", event.call_id[:8], call_thread_id)
+        except Exception as e:
+            logger.warning("call %s: could not create thread root: %s", event.call_id[:8], e)
+
+        agent = self._get_agent(room.room_id)
+
+        # Build a send callback already bound to the call's thread
+        _tid = call_thread_id
+        _rid = room.room_id
+
+        async def _send_cb(text: str) -> None:
+            if _tid:
+                await self._send_thread_reply(_rid, _tid, text)
+            else:
+                await self._send_text(_rid, text)
+
         session = CallSession(
             call_id=event.call_id,
             room_id=room.room_id,
             caller_id=event.sender,
+            thread_id=call_thread_id or event.call_id,
             client=self._client,
             app=self._app,
             cfg=self._cfg,
-            send_text_cb=self._send_text,
+            agent=agent,
+            send_cb=_send_cb,
         )
         self._sessions[event.call_id] = session
 
