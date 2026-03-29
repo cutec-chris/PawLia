@@ -489,7 +489,7 @@ class ChatAgent(BaseAgent):
         raw_text = ""
         emitted_len = 0  # how much of the clean text has been emitted
 
-        log_prompt(messages)
+        log_prompt(messages, name=self.log_name)
 
         async for chunk in llm.astream(messages):
             accumulated = chunk if accumulated is None else accumulated + chunk

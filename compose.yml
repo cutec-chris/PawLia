@@ -29,8 +29,13 @@ services:
     ports:
       - "127.0.0.1:8888:8888"   # Web UI
       # - "127.0.0.1:8080:8080" # Webhooks
+    # --- Debugging (uncomment to enable) ---
+    # command: ["python", "-m", "pawlia", "--mode", "server", "--debug"]
+    # volumes below include a log mount for prompt logs when debugging
     volumes:
       # Required: your config (copy from config.sample.yaml and fill in)
-      - ./config.yaml:/app/config.yaml:ro
+      - ./config.yaml:/app/config.yaml
       # Persistent session data (memory, etc.)
       - ./session:/app/session
+      # Debug logs (uncomment together with --debug above)
+      # - ./log:/app/pawlia/log

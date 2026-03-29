@@ -16,18 +16,29 @@ _RE_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
 # Chat-template tokens that some models leak into their output
 _RE_CHAT_TOKENS = re.compile(r"<\|.*?\|>.*", re.DOTALL)
 
-_PROMPT_LOG = os.environ.get("PAWLIA_PROMPT_LOG")  # set via --debug
+_LOG_DIR: Optional[str] = None  # set by enable_prompt_logging()
 
 
-def log_prompt(messages: List[BaseMessage]) -> None:
-    """Write the full message list to debug log file if PAWLIA_PROMPT_LOG is set.
+def enable_prompt_logging() -> None:
+    """Enable prompt logging into ``log/`` inside the project directory."""
+    global _LOG_DIR
+    _LOG_DIR = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "log"
+    )
+    os.makedirs(_LOG_DIR, exist_ok=True)
+
+
+def log_prompt(messages: List[BaseMessage], name: str = "prompt") -> None:
+    """Write the full message list to ``log/<name>.log``.
 
     Overwrites the file each time so it always contains the last context.
+    *name* defaults to ``"prompt"``; skill executors pass the skill name.
     """
-    if not _PROMPT_LOG:
+    if not _LOG_DIR:
         return
     try:
-        with open(_PROMPT_LOG, "w", encoding="utf-8") as f:
+        path = os.path.join(_LOG_DIR, f"{name}.log")
+        with open(path, "w", encoding="utf-8") as f:
             f.write(f"--- {datetime.now().isoformat()} ---\n\n")
             for msg in messages:
                 role = msg.__class__.__name__.replace("Message", "").upper()
@@ -43,6 +54,7 @@ class BaseAgent(ABC):
     def __init__(self, llm: ChatOpenAI, logger: Optional[logging.Logger] = None):
         self.llm = llm
         self.logger = logger or logging.getLogger(self.__class__.__name__)
+        self.log_name: str = "prompt"  # overridden by SkillRunnerAgent
 
     @abstractmethod
     async def run(self, *args: Any, **kwargs: Any) -> str:
@@ -54,7 +66,7 @@ class BaseAgent(ABC):
 
         Runs synchronous ``llm.invoke`` in a thread to keep the event loop free.
         """
-        log_prompt(messages)
+        log_prompt(messages, name=self.log_name)
         target = llm or self.llm
 
         def _call() -> AIMessage:
