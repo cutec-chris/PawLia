@@ -4,8 +4,8 @@ __pycache__
 *.pyc
 tests/
 session/
-config.json
-config.ollama.json
+config.yaml
+config.yml
 identity.md
 soul.md
 user.md

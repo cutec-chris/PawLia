@@ -15,6 +15,8 @@ from typing import Any, Optional
 import yaml
 
 
+
+
 # ---------------------------------------------------------------------------
 # Config file helpers
 # ---------------------------------------------------------------------------
@@ -29,7 +31,7 @@ def _find_config() -> Optional[str]:
     if path and os.path.isfile(path):
         return path
     for base in (os.getcwd(), _PKG_ROOT):
-        for name in ("config.yaml", "config.yml", "config.json"):
+        for name in ("config.yaml", "config.yml"):
             candidate = os.path.join(base, name)
             if os.path.isfile(candidate):
                 return candidate
@@ -38,17 +40,12 @@ def _find_config() -> Optional[str]:
 
 def _read(path: str) -> dict:
     with open(path, encoding="utf-8") as f:
-        if path.endswith((".yaml", ".yml")):
-            return yaml.safe_load(f) or {}
-        return json.load(f)
+        return yaml.safe_load(f) or {}
 
 
 def _write(path: str, data: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
-        if path.endswith((".yaml", ".yml")):
-            yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-        else:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
 
 
 def _out(data: Any) -> None:

@@ -1,6 +1,6 @@
 # Configuration
 
-PawLia is configured via `config.yaml` (or `config.json`). Copy `config.sample.yaml` as a starting point — it contains all available options with inline comments.
+PawLia is configured via `config.yaml`. Copy `config.sample.yaml` as a starting point — it contains all available options with inline comments.
 
 ## Providers
 
