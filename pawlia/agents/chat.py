@@ -24,6 +24,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from pawlia.agents.base import BaseAgent, log_prompt
+from pawlia.prompt_utils import load_system_prompt
 from pawlia.skills.loader import AgentSkill
 
 if TYPE_CHECKING:
@@ -49,13 +50,7 @@ def _split_sentences(text: str) -> Tuple[List[str], str]:
     return sentences, text
 
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are PawLia, a helpful AI assistant.\n\n"
-    "You have skills (tools) available. "
-    "When a user asks for something a skill can handle, "
-    "you MUST call the matching skill. NEVER guess or make up answers.\n"
-    "Only answer directly for simple conversation (greetings, opinions)."
-)
+DEFAULT_SYSTEM_PROMPT = load_system_prompt("chat/default.md")
 
 
 class ChatAgent(BaseAgent):

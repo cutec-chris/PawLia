@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from pawlia.automation import ChecklistProcessor, JobRunner, TaskReminderProcessor
+from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import load_json, save_json
 
 CHECK_INTERVAL = 60  # seconds between checks
@@ -295,18 +296,7 @@ class Scheduler:
         context = f"Previous summary:\n{prior}\n\n" if prior else ""
 
         messages = [
-            SystemMessage(content=(
-                "Summarize this conversation in 2-4 short bullet points.\n"
-                "Keep ONLY:\n"
-                "- User preferences and personal facts\n"
-                "- Decisions made or tasks completed\n"
-                "- Open/unanswered requests\n"
-                "DISCARD:\n"
-                "- Specific numbers, routes, or data (the user can ask again)\n"
-                "- Failed attempts, errors, or debugging details\n"
-                "- Greetings and small talk\n"
-                "Write in the user's language. Maximum 4 lines."
-            )),
+            SystemMessage(content=load_system_prompt("scheduler/conversation_summary.md")),
             HumanMessage(content=(
                 f"{context}Conversation to summarize:\n{history}"
             )),

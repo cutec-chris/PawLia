@@ -1,0 +1,1 @@
+The last tool call failed. Read the tool result carefully. If it contains error_code or hint fields, fix the tool name or arguments and try again with a corrected tool call.

@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pawlia.config import load_config
 from pawlia.llm import LLMFactory
 from pawlia.memory import MemoryManager
+from pawlia.prompt_utils import load_system_prompt
 from pawlia.tools.base import ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.skills.loader import AgentSkill, SkillLoader
@@ -91,10 +92,7 @@ class App:
         llm = self.llm.get("chat")
 
         # Minimal prompt — keep it short so local models respond fast
-        system = (
-            "Formuliere diese Benachrichtigung natürlich und kurz (1-2 Sätze). "
-            "Behalte alle Fakten (Zeiten, Orte, Namen). Antworte nur mit dem Text."
-        )
+        system = load_system_prompt("notifications/formatter.md")
 
         messages = [
             SystemMessage(content=system),
