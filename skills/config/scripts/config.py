@@ -108,6 +108,56 @@ def cmd_get(args) -> None:
     _out({"success": True, "path": args.path, "value": value})
 
 
+def cmd_model(args) -> None:
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+    override_path = os.path.join(session_dir, user_id, "memory", "model_override.txt")
+    os.makedirs(os.path.dirname(override_path), exist_ok=True)
+
+    if not args.name:
+        # show current model
+        current = ""
+        if os.path.isfile(override_path):
+            with open(override_path, encoding="utf-8") as f:
+                current = f.read().strip()
+        _out({"success": True, "model": current or "(default)"})
+        return
+
+    # set model
+    with open(override_path, "w", encoding="utf-8") as f:
+        f.write(args.name)
+    _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
+
+
+def cmd_private(args) -> None:
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+    memory_dir = os.path.join(session_dir, user_id, "memory")
+    os.makedirs(memory_dir, exist_ok=True)
+
+    if args.thread:
+        path = os.path.join(memory_dir, f"private_thread_{args.thread}")
+    else:
+        path = os.path.join(memory_dir, "private_session")
+
+    scope = f"Thread {args.thread}" if args.thread else "Session"
+
+    if args.off:
+        if os.path.isfile(path):
+            os.remove(path)
+        _out({"success": True, "private": False, "scope": scope})
+    else:
+        with open(path, "w") as f:
+            f.write("")
+        _out({"success": True, "private": True, "scope": scope})
+
+
 def cmd_set(args) -> None:
     config_path = _find_config()
     if not config_path:
@@ -147,12 +197,23 @@ def main():
     p.add_argument("--path", required=True)
     p.add_argument("--value", required=True, help="Value (YAML scalar: true/false/number/string)")
 
+    p = sub.add_parser("model")
+    p.add_argument("--name", default=None, help="Model name to switch to (omit to show current)")
+    p.add_argument("--user-id", default=None)
+    p.add_argument("--session-dir", default=None)
+
+    p = sub.add_parser("private")
+    p.add_argument("--thread", default=None, help="Thread ID (omit for session-level)")
+    p.add_argument("--off", action="store_true", help="Disable private mode")
+    p.add_argument("--user-id", default=None)
+    p.add_argument("--session-dir", default=None)
+
     args = parser.parse_args()
     if not args.cmd:
         parser.print_help()
         sys.exit(1)
 
-    dispatch = {"show": cmd_show, "get": cmd_get, "set": cmd_set}
+    dispatch = {"show": cmd_show, "get": cmd_get, "set": cmd_set, "model": cmd_model, "private": cmd_private}
     try:
         dispatch[args.cmd](args)
     except Exception as e:
