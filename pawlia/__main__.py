@@ -61,8 +61,9 @@ def main() -> None:
 
     _configure_logging(args.debug)
 
-    if args.debug and "PAWLIA_PROMPT_LOG" not in os.environ:
-        os.environ["PAWLIA_PROMPT_LOG"] = "/tmp/pawlia_prompt.log"
+    if args.debug:
+        from pawlia.agents.base import enable_prompt_logging
+        enable_prompt_logging()
 
     asyncio.run(_run(args))
 

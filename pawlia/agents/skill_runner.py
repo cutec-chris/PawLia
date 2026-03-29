@@ -50,6 +50,7 @@ class SkillRunnerAgent(BaseAgent):
         command_fallback: bool = True,
     ):
         super().__init__(llm, logger)
+        self.log_name = f"skill_{skill.name}"
         self.skill = skill
         self.tool_registry = tool_registry
         self.context = context or {}
@@ -118,6 +119,7 @@ class SkillRunnerAgent(BaseAgent):
             context=self.context,
             llm=self.llm,
             logger=self.logger,
+            log_name=self.log_name,
         )
         executor.on_step = self.on_step
 
