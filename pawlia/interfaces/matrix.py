@@ -176,7 +176,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     # One agent per Matrix room (shared context for everyone in the room)
     agent_cache = AgentCache(app)
-    thread_events: Dict[str, str] = {}
+    thread_events: Dict[str, str] = {}        # event_id → thread_root_id
+    thread_members: Dict[str, List[str]] = {} # thread_root_id → [event_ids]
 
     def get_agent(room_id: str):
         return agent_cache.get(f"mx_{room_id}")
@@ -186,6 +187,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
         thread_events[thread_root_id] = thread_root_id
         thread_events[event_id] = thread_root_id
+        thread_members.setdefault(thread_root_id, [])
+        if event_id not in thread_members[thread_root_id]:
+            thread_members[thread_root_id].append(event_id)
+        if thread_root_id not in thread_members[thread_root_id]:
+            thread_members[thread_root_id].insert(0, thread_root_id)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -297,6 +303,29 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         model_args = _cmd(text, "model")
         if model_args is not None:
             await _handle_model_cmd(room, session_id, model_args, thread_id)
+            return
+
+        if _cmd(text, "clear") is not None:
+            if not thread_id:
+                await _send_text(room.room_id, "_//clear funktioniert nur in Threads._")
+                return
+            event_ids = thread_members.get(thread_id, [])
+            if not event_ids:
+                await _send_thread_reply(room.room_id, thread_id, "_Keine Nachrichten zum Löschen gefunden._")
+                return
+            count = 0
+            for eid in list(event_ids):
+                try:
+                    await client.room_redact(room.room_id, eid)
+                    count += 1
+                except Exception as e:
+                    logger.warning("Matrix: failed to redact %s: %s", eid, e)
+            thread_members.pop(thread_id, None)
+            # Clean up thread_events references
+            for eid in list(thread_events):
+                if thread_events.get(eid) == thread_id:
+                    del thread_events[eid]
+            logger.info("Matrix: cleared %d messages in thread %s", count, thread_id[:12])
             return
 
         bg_args = _cmd(text, "background")
