@@ -615,7 +615,11 @@ class CallSession:
                 chunks.append(np.frombuffer(bytes(out.planes[0]), dtype=np.int16))
             if not chunks:
                 return None
-            return np.concatenate(chunks)
+            pcm = np.concatenate(chunks)
+            volume = float(self._app.config.get("tts", {}).get("hold_audio_volume", 0.25))
+            if volume != 1.0:
+                pcm = (pcm.astype(np.float32) * volume).clip(-32768, 32767).astype(np.int16)
+            return pcm
         except Exception as e:
             logger.warning("call %s: failed to load hold audio: %s", self.call_id[:8], e)
             return None
