@@ -58,10 +58,6 @@ class Scheduler:
         self._memory_indexer: Optional[Any] = None
         # Background task queue (initialized lazily)
         self._bg_tasks: Optional[Any] = None
-        # LLM priority gate: high-prio requests (chat) block low-prio (background)
-        self._llm_active = 0
-        # Mutex to prevent concurrent LLM access (Ollama = single slot)
-        self._llm_lock = asyncio.Lock()
         # Track last user activity for idle-based background work
         # Start with current time so background work doesn't fire immediately on boot
         self._boot_time = time.monotonic()
@@ -74,7 +70,6 @@ class Scheduler:
             from pawlia.memory_indexer import MemoryIndexer
             self._memory_indexer = MemoryIndexer(
                 self.session_dir, self._config,
-                llm_busy_check=lambda: self.llm_busy,
             )
         return self._memory_indexer
 
@@ -97,27 +92,6 @@ class Scheduler:
     def touch_activity(self, user_id: str) -> None:
         """Mark a user as active now (resets the idle timer for memory indexing)."""
         self._last_activity[user_id] = time.monotonic()
-
-    async def acquire_llm(self) -> None:
-        """Acquire the LLM lock for a high-priority request (chat).
-
-        Waits until any background LLM work (summarization etc.) finishes.
-        """
-        await self._llm_lock.acquire()
-        self._llm_active += 1
-
-    def release_llm(self) -> None:
-        """Release the LLM lock after a high-priority request."""
-        self._llm_active = max(0, self._llm_active - 1)
-        try:
-            self._llm_lock.release()
-        except RuntimeError:
-            pass
-
-    @property
-    def llm_busy(self) -> bool:
-        """True if any high-priority LLM request is in progress."""
-        return self._llm_active > 0
 
     def set_llm_formatter(self, formatter: LLMFormatter) -> None:
         """Set the LLM formatter for personalizing notifications.
@@ -218,7 +192,7 @@ class Scheduler:
 
         # ── Force-summarize when exchange count exceeds hard limit ──
         # This runs even when the user is active to prevent unbounded growth.
-        if not self.llm_busy and self._app and self._app.memory:
+        if self._app and self._app.memory:
             from pawlia.memory import FORCE_SUMMARY_EXCHANGES
             for user_id in user_ids:
                 session = self._app.memory.load_session(user_id)
@@ -227,13 +201,8 @@ class Scheduler:
                         await self._summarize_user(user_id)
                     except Exception as e:
                         logger.error("Forced summarization failed for %s: %s", user_id, e)
-                    if self.llm_busy:
-                        break
 
         # ── Low priority (idle-based, ordered by priority) ──
-        if self.llm_busy:
-            return
-
         for user_id in user_ids:
             idle = self._user_idle_minutes(user_id)
 
@@ -243,8 +212,6 @@ class Scheduler:
                     await self._summarize_user(user_id)
                 except Exception as e:
                     logger.error("Summarization failed for %s: %s", user_id, e)
-                if self.llm_busy:
-                    return
 
             # Prio 2: Background tasks (10 min idle)
             if idle >= IDLE_BACKGROUND_MIN and self._app:
@@ -252,8 +219,6 @@ class Scheduler:
                     await self._process_background_tasks(user_id)
                 except Exception as e:
                     logger.error("Background task failed for %s: %s", user_id, e)
-                if self.llm_busy:
-                    return
 
             # Prio 3: Memory indexing (configurable idle, default 20 min)
             skill_config = self._config.get("skill-config") or {}
@@ -265,8 +230,6 @@ class Scheduler:
                         await self._memory_indexer.process_user(user_id)
                     except Exception as e:
                         logger.error("Memory indexing failed for %s: %s", user_id, e)
-                    if self.llm_busy:
-                        return
 
     async def _summarize_user(self, user_id: str) -> None:
         """Summarize a user's conversation if needed.
@@ -310,12 +273,11 @@ class Scheduler:
             logger.warning("Cannot summarize %s: chat LLM not configured", user_id)
             return
 
-        async with self._llm_lock:
-            try:
-                response = await llm.ainvoke(messages)
-            except Exception as e:
-                logger.error("Summarization LLM call failed for %s: %s", user_id, e)
-                return
+        try:
+            response = await llm.ainvoke(messages)
+        except Exception as e:
+            logger.error("Summarization LLM call failed for %s: %s", user_id, e)
+            return
 
         from pawlia.agents.base import BaseAgent
         summary = BaseAgent.strip_thinking(response.content or "").strip()

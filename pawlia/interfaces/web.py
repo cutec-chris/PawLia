@@ -130,7 +130,6 @@ async def start_web(app: "App", cfg: Dict) -> None:
     from pawlia.interfaces.common import (
         AgentCache, preview_text, build_status, format_status,
         handle_model_command, format_private_toggle, format_bg_enqueue,
-        run_with_llm_lock,
     )
 
     agent_cache = AgentCache(app)
@@ -235,7 +234,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
                 return web.json_response({"response": "_Verwendung: /thread <Nachricht>_"})
             new_thread = f"web_{int(time.time())}"
             agent = agent_cache.get(user_id)
-            resp = await run_with_llm_lock(app, agent, thread_msg, thread_id=new_thread)
+            resp = await agent.run(thread_msg, thread_id=new_thread)
             logger.info("Web chat: %s [thread %s]: %s", user_id, new_thread, preview_text(resp))
             return web.json_response({"response": resp, "thread_id": new_thread})
 
@@ -273,8 +272,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
             async def _on_skill_done(skill_name: str) -> None:
                 await _sse("skill_done", {"skill": skill_name})
 
-            response = await run_with_llm_lock(
-                app, agent, message, images=images, thread_id=thread_id,
+            response = await agent.run(
+                message, images=images, thread_id=thread_id,
                 on_skill_start=_on_skill_start,
                 on_skill_step=_on_skill_step,
                 on_skill_done=_on_skill_done,
