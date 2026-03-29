@@ -1,6 +1,6 @@
 ---
 name: files
-description: Read, write, list, and delete files in the user's personal workspace. Use for creating notes, saving text, reading previously saved files, writing workspace config files like IDENTITY.md, soul.md, USER.md, and deleting files like bootstrap.md.
+description: Read, write, list, and delete files in the user's personal workspace. Use for creating notes, saving text, reading previously saved files, writing workspace config files like identity.md, soul.md, user.md, and deleting files like bootstrap.md. All filenames are automatically lowercased.
 license: MIT
 metadata:
   author: Christian Ulrich

@@ -295,7 +295,7 @@ class TestBuildSystemPrompt:
 
 
 class TestSystemPromptIdentityFiles:
-    """Verify soul.md, IDENTITY.md, and USER.md are all present in the prompt."""
+    """Verify soul.md, identity.md, and user.md are all present in the prompt."""
 
     def test_contains_soul_md(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -311,23 +311,22 @@ class TestSystemPromptIdentityFiles:
             mm = MemoryManager(tmpdir)
             session = mm.load_session("u_id")
             ws = mm._workspace_dir("u_id")
-            # Write a recognisable IDENTITY.md
-            with open(os.path.join(ws, "IDENTITY.md"), "w") as f:
-                f.write("# IDENTITY.md\n- **Name:** TestBot\n- **Creature:** Cat")
+            with open(os.path.join(ws, "identity.md"), "w") as f:
+                f.write("# identity.md\n- **Name:** TestBot\n- **Creature:** Cat")
             prompt = mm.build_system_prompt(session)
             assert "TestBot" in prompt
-            assert "IDENTITY.md" in prompt
+            assert "identity.md" in prompt
 
     def test_contains_user_md(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)
             session = mm.load_session("u_usr")
             ws = mm._workspace_dir("u_usr")
-            with open(os.path.join(ws, "USER.md"), "w") as f:
-                f.write("# USER.md\n- **Name:** Chris\n- **Language:** Deutsch")
+            with open(os.path.join(ws, "user.md"), "w") as f:
+                f.write("# user.md\n- **Name:** Chris\n- **Language:** Deutsch")
             prompt = mm.build_system_prompt(session)
             assert "Chris" in prompt
-            assert "USER.md" in prompt
+            assert "user.md" in prompt
 
     def test_all_three_identity_files_present(self):
         """All three identity files must appear in a single prompt."""
@@ -337,33 +336,33 @@ class TestSystemPromptIdentityFiles:
             ws = mm._workspace_dir("u_all3")
             with open(os.path.join(ws, "soul.md"), "w") as f:
                 f.write("# SOUL\nI am kind and helpful.")
-            with open(os.path.join(ws, "IDENTITY.md"), "w") as f:
+            with open(os.path.join(ws, "identity.md"), "w") as f:
                 f.write("# IDENTITY\n- **Name:** PawLia")
-            with open(os.path.join(ws, "USER.md"), "w") as f:
+            with open(os.path.join(ws, "user.md"), "w") as f:
                 f.write("# USER\n- **Name:** Chris")
             prompt = mm.build_system_prompt(session)
             assert "SOUL" in prompt, "soul.md missing from prompt"
-            assert "PawLia" in prompt, "IDENTITY.md missing from prompt"
-            assert "Chris" in prompt, "USER.md missing from prompt"
+            assert "PawLia" in prompt, "identity.md missing from prompt"
+            assert "Chris" in prompt, "user.md missing from prompt"
 
     def test_identity_files_order(self):
-        """Files are sorted alphabetically: IDENTITY < USER < soul."""
+        """Identity files appear in defined order: identity, user, soul."""
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)
             session = mm.load_session("u_order")
             ws = mm._workspace_dir("u_order")
             with open(os.path.join(ws, "soul.md"), "w") as f:
                 f.write("MARKER_SOUL")
-            with open(os.path.join(ws, "IDENTITY.md"), "w") as f:
+            with open(os.path.join(ws, "identity.md"), "w") as f:
                 f.write("MARKER_IDENTITY")
-            with open(os.path.join(ws, "USER.md"), "w") as f:
+            with open(os.path.join(ws, "user.md"), "w") as f:
                 f.write("MARKER_USER")
             prompt = mm.build_system_prompt(session)
             pos_id = prompt.index("MARKER_IDENTITY")
             pos_usr = prompt.index("MARKER_USER")
             pos_soul = prompt.index("MARKER_SOUL")
             assert pos_id < pos_usr < pos_soul, \
-                f"Expected IDENTITY < USER < soul, got {pos_id}, {pos_usr}, {pos_soul}"
+                f"Expected identity < user < soul, got {pos_id}, {pos_usr}, {pos_soul}"
 
 
 class TestExchangesInMessageHistory:
