@@ -100,6 +100,23 @@ class ChatAgent(BaseAgent):
         # Set by App.make_agent after construction.
         self._llm_resolver: Optional[Callable[[str], Any]] = None
 
+    def build_system_prompt(
+        self,
+        *,
+        mode: str = "chat",
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        """Resolve the system prompt for a chat or call context."""
+        if system_prompt:
+            return system_prompt
+        if self.memory and self.session:
+            return self.memory.build_system_prompt(
+                self.session,
+                skills=self.skills,
+                mode=mode,
+            )
+        return DEFAULT_SYSTEM_PROMPT
+
     def _resolve_skill_name(self, name: str) -> str:
         """Resolve minor skill-name variations from model tool calls."""
         normalized = name.replace("_", "").replace("-", "").lower()
@@ -187,14 +204,7 @@ class ChatAgent(BaseAgent):
         _on_skill_start = on_skill_start or self.on_skill_start
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
-        if system_prompt:
-            prompt = system_prompt
-        elif self.memory and self.session:
-            prompt = self.memory.build_system_prompt(
-                self.session, skills=self.skills,
-            )
-        else:
-            prompt = DEFAULT_SYSTEM_PROMPT
+        prompt = self.build_system_prompt(system_prompt=system_prompt)
 
         messages: List[BaseMessage] = [SystemMessage(content=prompt)]
 
@@ -360,12 +370,7 @@ class ChatAgent(BaseAgent):
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
 
-        if system_prompt:
-            prompt = system_prompt
-        elif self.memory and self.session:
-            prompt = self.memory.build_system_prompt(self.session, skills=self.skills)
-        else:
-            prompt = DEFAULT_SYSTEM_PROMPT
+        prompt = self.build_system_prompt(system_prompt=system_prompt)
 
         messages: List[BaseMessage] = [SystemMessage(content=prompt)]
 
