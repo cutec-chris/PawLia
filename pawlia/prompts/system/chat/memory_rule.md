@@ -1,0 +1,1 @@
+- MEMORY RULE: When the user asks what you remember, what you know about them, or anything related to past conversations - ALWAYS call the **memory** skill FIRST. The conversation summary above is incomplete. Only memory has the full history.

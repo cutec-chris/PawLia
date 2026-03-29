@@ -1,0 +1,1 @@
+Formuliere diese Benachrichtigung natürlich und kurz (1-2 Sätze). Behalte alle Fakten (Zeiten, Orte, Namen). Antworte nur mit dem Text.

@@ -19,6 +19,8 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from pawlia.prompt_utils import load_system_prompt
+
 # Summarization trigger thresholds
 MAX_EXCHANGES_BEFORE_SUMMARY = 10
 FORCE_SUMMARY_EXCHANGES = 30  # force summarize even if user is active
@@ -26,15 +28,6 @@ KEEP_RECENT_EXCHANGES = 5  # exchanges to keep intact after summarization
 SIMILARITY_THRESHOLD = 0.6  # 0-1, how similar two bot responses must be
 SIMILARITY_WINDOW = 4  # compare last N bot responses
 IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
-
-CALL_MODE_INSTRUCTIONS = (
-    "## Conversation Mode: Phone Call\n"
-    "You are currently in a live phone call. Reply like natural speech, not like chat text.\n"
-    "- Keep answers compact: usually 1-2 short sentences, only longer when necessary.\n"
-    "- Use simple, spoken phrasing and short pauses instead of long explanations.\n"
-    "- Avoid bullet lists, markdown formatting, and dense structured output unless the user explicitly asks for it.\n"
-    "- If something is unclear, ask one short clarifying question instead of guessing."
-)
 
 
 class Session:
@@ -404,16 +397,13 @@ class MemoryManager:
     def _build_mode_instructions(mode: str) -> str:
         """Build additional instructions for special conversation modes."""
         if mode == "call":
-            return CALL_MODE_INSTRUCTIONS
+            return load_system_prompt("calls/live_call.md")
         return ""
 
     @staticmethod
     def _build_skill_instructions(skills: Dict[str, Any]) -> str:
         """Build explicit skill usage instructions for the system prompt."""
-        lines = [
-            "## Your capabilities",
-            "You have the following skills available as tools:",
-        ]
+        lines = load_system_prompt("chat/skill_capabilities_intro.md").splitlines()
         for name, skill in skills.items():
             desc = getattr(skill, "description", "")
             if desc:
@@ -428,23 +418,9 @@ class MemoryManager:
         has_memory = "memory" in skills
 
         lines.append("")
-        lines.append(
-            "RULES:\n"
-            "- If a user's request matches one of the skills below, you MUST call the matching skill. NEVER guess or make up answers.\n"
-            "- When a user asks for something a skill can handle, "
-            "you MUST use the tool call mechanism to invoke the skill. "
-            "NEVER just describe or mention the skill in text — actually CALL it.\n"
-            "- NEVER say things like 'I will search...' or 'Let me look that up...' "
-            "without making an actual tool call. If a skill is needed, call it immediately.\n"
-            "- NEVER guess or make up answers when a skill can provide real data.\n"
-            "- Only answer directly for simple conversation (greetings, opinions)."
-        )
+        lines.extend(load_system_prompt("chat/skill_rules.md").splitlines())
         if has_memory:
-            lines.append(
-                "- MEMORY RULE: When the user asks what you remember, what you know about them, "
-                "or anything related to past conversations — ALWAYS call the **memory** skill FIRST. "
-                "The conversation summary above is incomplete. Only memory has the full history."
-            )
+            lines.append(load_system_prompt("chat/memory_rule.md"))
 
         return "\n".join(lines)
 
