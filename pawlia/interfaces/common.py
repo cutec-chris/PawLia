@@ -96,7 +96,7 @@ def build_status(
         exchanges = session.exchanges
 
     # Estimate context size (chars → rough token estimate at ~4 chars/token)
-    context_chars = sum(len(u) + len(b) for u, b in exchanges)
+    context_chars = sum(len(e[0]) + len(e[1]) for e in exchanges)
     summary_chars = len(session.summary)
     estimated_tokens = (context_chars + summary_chars) // 4
 
