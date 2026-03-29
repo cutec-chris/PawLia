@@ -203,6 +203,11 @@ class ChatAgent(BaseAgent):
         if self.session and self.memory:
             if thread_id:
                 exchanges = self.memory.get_thread_context(self.session, thread_id)
+                self.logger.info(
+                    "Context: replaying %d exchange(s) from thread %s",
+                    len(exchanges),
+                    thread_id[:12],
+                )
             else:
                 exchanges = self.session.exchanges
             for exchange in exchanges:
