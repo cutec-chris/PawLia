@@ -23,6 +23,7 @@ from langchain_core.messages import (
 )
 
 from pawlia.agents.base import log_prompt
+from pawlia.prompt_utils import load_system_prompt
 from pawlia.skills.workflow_schema import (
     BuildingBlock,
     CompiledWorkflow,
@@ -88,7 +89,7 @@ class WorkflowExecutor:
 
         bound = self.llm.bind_tools(tools, tool_choice="required")
         messages = [
-            SystemMessage(content="Pick the workflow that matches the user's request by calling it."),
+            SystemMessage(content=load_system_prompt("workflow/select.md")),
             HumanMessage(content=query),
         ]
         log_prompt(messages, name=self.log_name)
@@ -109,7 +110,7 @@ class WorkflowExecutor:
             self.logger.warning("Workflow selection failed on attempt %d", attempt + 1)
             messages.append(response)
             messages.append(HumanMessage(
-                content="Call exactly one workflow tool. Do not answer with text."
+                content=load_system_prompt("workflow/select_retry.md")
             ))
 
         return None
@@ -121,12 +122,19 @@ class WorkflowExecutor:
 
         # Build system prompt with config context
         now = datetime.now()
-        system = f"Today is {now.strftime('%Y-%m-%d')} ({now.strftime('%A')}). Current time: {now.strftime('%H:%M')}.\n"
-        system += "Use the available tools to fulfill the user's request.\n"
         skill_config = self.context.get("skill_config")
+        skill_config_block = ""
         if skill_config:
-            system += f"Config values: {json.dumps(skill_config, ensure_ascii=False)}\n"
-        system += "After getting results, respond with the answer."
+            skill_config_block = (
+                f"Config values: {json.dumps(skill_config, ensure_ascii=False)}"
+            )
+        system = load_system_prompt(
+            "workflow/execute.md",
+            current_date=now.strftime("%Y-%m-%d"),
+            current_day=now.strftime("%A"),
+            current_time=now.strftime("%H:%M"),
+            skill_config_block=skill_config_block,
+        )
 
         messages: List[Any] = [
             SystemMessage(content=system),

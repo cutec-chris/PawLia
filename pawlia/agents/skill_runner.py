@@ -23,6 +23,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from pawlia.agents.base import BaseAgent
+from pawlia.prompt_utils import load_system_prompt
 from pawlia.skills.executor import WorkflowExecutor
 from pawlia.skills.loader import AgentSkill
 from pawlia.tools.base import ToolExecutionResult, ToolRegistry
@@ -209,9 +210,7 @@ class SkillRunnerAgent(BaseAgent):
                         asyncio.ensure_future(self.on_step(f"↩ nudge {nudge_count}"))
                     messages.append(response)
                     messages.append(HumanMessage(
-                        content="Do NOT generate code, HTML, or explanations. "
-                        "The task is NOT complete. "
-                        "Use one of the available tools NOW to continue."
+                        content=load_system_prompt("skills/runner_continue_nudge.md")
                     ))
                     self.logger.info("Nudging LLM to continue (turn %d, nudge %d)", _turn, nudge_count)
                     continue
@@ -265,10 +264,7 @@ class SkillRunnerAgent(BaseAgent):
 
     @staticmethod
     def _retry_guidance() -> str:
-        return (
-            "The last tool call failed. Read the tool result carefully. "
-            "If it contains error_code or hint fields, fix the tool name or arguments and try again with a corrected tool call."
-        )
+        return load_system_prompt("skills/runner_retry_guidance.md")
 
     # ------------------------------------------------------------------
     # Mode 2: Command mode (for small models that can't do tool calls)
@@ -360,34 +356,13 @@ class SkillRunnerAgent(BaseAgent):
 
     def _build_tool_prompt(self) -> str:
         """System prompt for tool-call mode."""
-        parts = [
-            f"You are a specialized agent for the '{self.skill.name}' skill.",
-            "You MUST use the bash tool to run scripts. NEVER generate code, HTML, or fake output.",
-            "Do NOT guess or make up data — only use actual script output.",
-            "",
-            "## CRITICAL: Multi-step execution",
-            "Tasks often require MULTIPLE sequential bash tool calls.",
-            "After each tool result, decide: is the task done?",
-            "- If YES → respond with a short text summary of the result.",
-            "- If NO → immediately make the next bash tool call. Do NOT explain what you will do.",
-            "",
-            "## Error recovery",
-            "When a command returns an error, DO NOT give up or explain the error. Instead:",
-            "1. Immediately call bash to run `show` or another recovery command.",
-            "2. Analyse the output and try a corrected approach.",
-            "3. Only report failure after 2-3 recovery attempts.",
-        ]
+        parts = [load_system_prompt("skills/runner_tool.md", skill_name=self.skill.name)]
         self._append_skill_context(parts)
         return "\n".join(parts)
 
     def _build_command_prompt(self) -> str:
         """System prompt for command mode (text-only, no tools)."""
-        parts = [
-            f"You are a specialized agent for the '{self.skill.name}' skill.",
-            "Your job: output the EXACT shell command to run for this task.",
-            "Output ONLY the command inside a ```bash code block.",
-            "Do NOT explain, do NOT guess results — just the command.",
-        ]
+        parts = [load_system_prompt("skills/runner_command.md", skill_name=self.skill.name)]
         self._append_skill_context(parts)
         return "\n".join(parts)
 
