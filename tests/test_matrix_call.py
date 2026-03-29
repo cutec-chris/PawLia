@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+import io
+import sys
 
+import numpy as np
 import pytest
 
 from pawlia.interfaces.matrix_call import CallSession
@@ -51,3 +54,79 @@ async def test_process_speech_uses_call_system_prompt():
     )
     assert send_cb.await_args_list[0].args[0] == "🎙️ *Hallo da*"
     assert send_cb.await_args_list[1].args[0] == "Kurze Antwort"
+
+
+def test_load_hold_audio_uses_ndarray_resampling():
+    session = CallSession(
+        call_id="call-2",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-2",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={"tts": {"hold_audio": "dummy.m4a", "hold_audio_volume": 1.0}}),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    out_frame = SimpleNamespace(
+        to_ndarray=lambda: np.array([[0.5, -0.5, 0.25]], dtype=np.float32)
+    )
+    resampler = MagicMock()
+    resampler.resample.side_effect = [[out_frame], []]
+    container = SimpleNamespace(decode=lambda audio=0: [object()])
+    fake_av = SimpleNamespace(
+        open=lambda stream: container,
+        AudioResampler=lambda **kwargs: resampler,
+    )
+
+    with patch("os.path.exists", return_value=True), \
+         patch("builtins.open", return_value=io.BytesIO(b"audio-bytes")), \
+         patch.dict(sys.modules, {"av": fake_av}):
+        pcm = session._load_hold_audio()
+
+    assert pcm is not None
+    assert pcm.dtype == np.int16
+    assert pcm.tolist() == [16383, -16383, 8191]
+
+
+def test_load_hold_audio_uses_mono_wav_default_without_m4a_fallback():
+    session = CallSession(
+        call_id="call-3",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-3",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    chosen_paths = []
+
+    def fake_exists(path):
+        return path.endswith("keyboard_mono.wav")
+
+    def fake_open(path, mode="rb"):
+        chosen_paths.append(path)
+        return io.BytesIO(b"audio-bytes")
+
+    out_frame = SimpleNamespace(
+        to_ndarray=lambda: np.array([[0.0, 0.0]], dtype=np.float32)
+    )
+    resampler = MagicMock()
+    resampler.resample.side_effect = [[out_frame], []]
+    container = SimpleNamespace(decode=lambda audio=0: [object()])
+    fake_av = SimpleNamespace(
+        open=lambda stream: container,
+        AudioResampler=lambda **kwargs: resampler,
+    )
+
+    with patch("os.path.exists", side_effect=fake_exists), \
+         patch("builtins.open", side_effect=fake_open), \
+         patch.dict(sys.modules, {"av": fake_av}):
+        session._load_hold_audio()
+
+    assert chosen_paths
+    assert all(path.endswith("keyboard_mono.wav") for path in chosen_paths)
