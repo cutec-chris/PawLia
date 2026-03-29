@@ -559,6 +559,7 @@ class CallSession:
 
         try:
             first_sentence_received = False
+            call_prompt = self._agent.build_system_prompt(mode="call")
 
             async def _on_sentence(sentence: str) -> None:
                 """Synthesize and enqueue one sentence for immediate TTS playback."""
@@ -579,7 +580,10 @@ class CallSession:
                     logger.warning("call %s: TTS sentence failed: %s", self.call_id[:8], e)
 
             response = await self._agent.run_streamed(
-                text, thread_id=self.thread_id, on_sentence=_on_sentence,
+                text,
+                system_prompt=call_prompt,
+                thread_id=self.thread_id,
+                on_sentence=_on_sentence,
             )
         except Exception as e:
             logger.error("call %s: agent error: %s", self.call_id[:8], e)

@@ -27,6 +27,15 @@ SIMILARITY_THRESHOLD = 0.6  # 0-1, how similar two bot responses must be
 SIMILARITY_WINDOW = 4  # compare last N bot responses
 IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
 
+CALL_MODE_INSTRUCTIONS = (
+    "## Conversation Mode: Phone Call\n"
+    "You are currently in a live phone call. Reply like natural speech, not like chat text.\n"
+    "- Keep answers compact: usually 1-2 short sentences, only longer when necessary.\n"
+    "- Use simple, spoken phrasing and short pauses instead of long explanations.\n"
+    "- Avoid bullet lists, markdown formatting, and dense structured output unless the user explicitly asks for it.\n"
+    "- If something is unclear, ask one short clarifying question instead of guessing."
+)
+
 
 class Session:
     def __init__(self, user_id: str):
@@ -341,11 +350,14 @@ class MemoryManager:
         self,
         session: Session,
         skills: Optional[Dict[str, Any]] = None,
+        mode: str = "chat",
     ) -> str:
         """Build the system prompt from workspace identity files + memory.
 
         ``skills`` maps skill name → AgentSkill so the prompt can list
         each skill with its description.
+
+        ``mode`` can add context-specific instructions, e.g. for live calls.
         """
         workspace = self._workspace_dir(session.user_id)
         self._ensure_identity_files(workspace)
@@ -378,11 +390,22 @@ class MemoryManager:
             f"Current date and time: {datetime.now().strftime('%A, %d. %B %Y %H:%M')}"
         )
 
+        mode_block = self._build_mode_instructions(mode)
+        if mode_block:
+            parts.append(mode_block)
+
         # Skill instructions
         skill_block = self._build_skill_instructions(skills or {})
         parts.append(skill_block)
 
         return "\n\n════════════════════\n\n".join(parts)
+
+    @staticmethod
+    def _build_mode_instructions(mode: str) -> str:
+        """Build additional instructions for special conversation modes."""
+        if mode == "call":
+            return CALL_MODE_INSTRUCTIONS
+        return ""
 
     @staticmethod
     def _build_skill_instructions(skills: Dict[str, Any]) -> str:
