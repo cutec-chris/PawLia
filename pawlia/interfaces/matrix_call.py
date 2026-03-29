@@ -102,9 +102,9 @@ if _AIORTC_AVAILABLE:
 
             # Pace output at real-time (20 ms per frame)
             if self._start_time is None:
-                self._start_time = time.time()
+                self._start_time = time.monotonic()
             target = self._start_time + (self._pts / self.SAMPLE_RATE)
-            delay = target - time.time()
+            delay = target - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)
 
@@ -602,17 +602,17 @@ class CallSession:
     def _load_hold_audio(self) -> Optional["np.ndarray"]:
         """Load hold audio from config and decode to int16 mono PCM at 48 kHz.
 
-        Config: ``tts.hold_audio`` — path to a wav/mp3 file.
+        Config: ``tts.hold_audio`` — explicit audio file path.
         Returns ``None`` if not configured or the file cannot be loaded.
         """
         import os
         path = self._app.config.get("tts", {}).get("hold_audio")
         if not path:
-            # Default: assets/keyboard.m4a relative to project root
-            default = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                                   "assets", "keyboard.m4a")
-            if os.path.exists(default):
-                path = default
+            path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                "assets",
+                "keyboard_mono.wav",
+            )
         if not path:
             return None
         if not os.path.exists(path):
@@ -624,20 +624,24 @@ class CallSession:
             with open(path, "rb") as f:
                 data = f.read()
             container = av.open(io.BytesIO(data))
-            resampler = av.AudioResampler(format="s16", layout="mono", rate=48000)
+            resampler = av.AudioResampler(format="fltp", layout="mono", rate=48000)
             chunks: List["np.ndarray"] = []
             for frame in container.decode(audio=0):
                 for out in resampler.resample(frame):
-                    chunks.append(np.frombuffer(bytes(out.planes[0]), dtype=np.int16))
+                    arr = out.to_ndarray()
+                    if arr.size:
+                        chunks.append(arr[0].astype(np.float32, copy=False))
             for out in resampler.resample(None):
-                chunks.append(np.frombuffer(bytes(out.planes[0]), dtype=np.int16))
+                arr = out.to_ndarray()
+                if arr.size:
+                    chunks.append(arr[0].astype(np.float32, copy=False))
             if not chunks:
                 return None
             pcm = np.concatenate(chunks)
             volume = float(self._app.config.get("tts", {}).get("hold_audio_volume", 0.25))
             if volume != 1.0:
-                pcm = (pcm.astype(np.float32) * volume).clip(-32768, 32767).astype(np.int16)
-            return pcm
+                pcm = np.clip(pcm * volume, -1.0, 1.0)
+            return (pcm * 32767).astype(np.int16)
         except Exception as e:
             logger.warning("call %s: failed to load hold audio: %s", self.call_id[:8], e)
             return None
