@@ -160,6 +160,12 @@ class MemoryManager:
     def _model_override_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "model_override.txt")
 
+    def _private_session_path(self, user_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), "private_session")
+
+    def _private_thread_path(self, user_id: str, thread_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), f"private_thread_{thread_id}")
+
     def _thread_daily_path(self, user_id: str, thread_id: str, date_str: str) -> str:
         return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_{date_str}.md")
 
@@ -229,6 +235,7 @@ class MemoryManager:
         session.exchange_count = len(session.exchanges)
         override = self._read(self._model_override_path(user_id)).strip()
         session.model_override = override or None
+        session.private = os.path.isfile(self._private_session_path(user_id))
 
         self._sessions[user_id] = session
         return session
@@ -280,15 +287,26 @@ class MemoryManager:
 
     def toggle_private_thread(self, session: Session, thread_id: str) -> bool:
         """Toggle private mode for a thread. Returns the new state."""
+        path = self._private_thread_path(session.user_id, thread_id)
         if thread_id in session.private_threads:
             session.private_threads.discard(thread_id)
+            if os.path.isfile(path):
+                os.remove(path)
             return False
         session.private_threads.add(thread_id)
+        with open(path, "w") as f:
+            f.write("")
         return True
 
     def toggle_private(self, session: Session) -> bool:
-        """Toggle session-level private mode (CLI). Returns the new state."""
+        """Toggle session-level private mode. Returns the new state."""
         session.private = not session.private
+        path = self._private_session_path(session.user_id)
+        if session.private:
+            with open(path, "w") as f:
+                f.write("")
+        elif os.path.isfile(path):
+            os.remove(path)
         return session.private
 
     def append_thread_exchange(
