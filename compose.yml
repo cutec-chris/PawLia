@@ -38,4 +38,4 @@ services:
       # Persistent session data (memory, etc.)
       - ./session:/app/session
       # Debug logs (uncomment together with --debug above)
-      # - ./log:/app/pawlia/log
+      # - ./log:/app/log

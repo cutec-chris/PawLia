@@ -101,8 +101,8 @@ class MemoryManager:
         """
         identity_map = {
             "soul.md": "soul.md",
-            "IDENTITY.md": "identity.md",
-            "USER.md": "user.md",
+            "identity.md": "identity.md",
+            "user.md": "user.md",
         }
         prompts_dir = self._prompts_dir()
         bootstrap_dst = os.path.join(workspace, "bootstrap.md")
@@ -333,14 +333,10 @@ class MemoryManager:
         self._ensure_identity_files(workspace)
         parts: list[str] = []
 
-        # Include all .md files at workspace root (non-recursive), sorted
-        try:
-            ws_files = sorted(
-                f for f in os.listdir(workspace)
-                if f.lower().endswith(".md") and os.path.isfile(os.path.join(workspace, f))
-            )
-        except OSError:
-            ws_files = []
+        # Only include the identity files that define the assistant's persona
+        _IDENTITY_FILES = ("identity.md", "user.md", "soul.md", "memory.md")
+        ws_files = [f for f in _IDENTITY_FILES
+                    if os.path.isfile(os.path.join(workspace, f))]
 
         for filename in ws_files:
             content = self._strip_frontmatter(
