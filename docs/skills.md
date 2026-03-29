@@ -10,6 +10,8 @@ When the user sends a message, the dispatcher (ChatAgent) decides whether to cal
 
 | Skill | Description | Requires |
 |-------|-------------|---------|
+| `memory` | Long-term conversation memory — indexes daily chat logs by topic | `skill-config.memory` (embedding settings) |
+| `researcher` | Per-project research knowledge bases (index URLs, PDFs, query) | `skill-config.researcher` (embedding settings) |
 | `searxng` | Web search via a SearXNG instance | `skill-config.searxng.url` |
 | `perplexica` | AI-powered search via Perplexica | `skill-config.perplexica.url` |
 | `browser` | Browse and extract content from web pages | — |
