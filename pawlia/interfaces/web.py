@@ -127,7 +127,11 @@ async def start_web(app: "App", cfg: Dict) -> None:
     if not config_path:
         logger.warning("Web: could not locate config file — provider/model edits disabled")
 
-    from pawlia.interfaces.common import AgentCache, preview_text
+    from pawlia.interfaces.common import (
+        AgentCache, preview_text, build_status, format_status,
+        handle_model_command, format_private_toggle, format_bg_enqueue,
+        run_with_llm_lock,
+    )
 
     agent_cache = AgentCache(app)
     pending: Dict[str, List[str]] = defaultdict(list)
@@ -197,13 +201,11 @@ async def start_web(app: "App", cfg: Dict) -> None:
         lower = message.lower().strip()
 
         if lower == "/status":
-            from pawlia.interfaces.common import build_status, format_status
             agent = agent_cache.get(user_id)
             status = build_status(app, user_id, agent, thread_id=thread_id)
             return web.json_response({"response": format_status(status)})
 
         if lower.startswith("/model"):
-            from pawlia.interfaces.common import handle_model_command
             args_str = message.strip()[len("/model"):].strip()
             result = handle_model_command(app, user_id, args_str, thread_id=thread_id)
             if result.invalidate_agent:
@@ -218,18 +220,14 @@ async def start_web(app: "App", cfg: Dict) -> None:
                 active = app.memory.toggle_private_thread(session, thread_id)
             else:
                 active = app.memory.toggle_private(session)
-            icon = "\U0001f512" if active else "\U0001f513"
-            state = "aktiviert" if active else "deaktiviert"
-            return web.json_response({"response": f"{icon} Private Mode {state}"})
+            return web.json_response({"response": format_private_toggle(active)})
 
         if lower.startswith("/background"):
             bg_message = message.strip()[len("/background"):].strip()
             if not bg_message:
                 return web.json_response({"response": "_Verwendung: /background <Nachricht>_"})
-            task = app.scheduler.bg_tasks.enqueue(user_id, bg_message)
-            return web.json_response({
-                "response": f"⏳ Aufgabe in Warteschlange: **{bg_message[:60]}**\nWird im Hintergrund verarbeitet wenn das System idle ist.",
-            })
+            app.scheduler.bg_tasks.enqueue(user_id, bg_message)
+            return web.json_response({"response": format_bg_enqueue(bg_message)})
 
         if lower.startswith("/thread"):
             thread_msg = message.strip()[len("/thread"):].strip()
@@ -237,11 +235,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
                 return web.json_response({"response": "_Verwendung: /thread <Nachricht>_"})
             new_thread = f"web_{int(time.time())}"
             agent = agent_cache.get(user_id)
-            await app.scheduler.acquire_llm()
-            try:
-                resp = await agent.run(thread_msg, thread_id=new_thread)
-            finally:
-                app.scheduler.release_llm()
+            resp = await run_with_llm_lock(app, agent, thread_msg, thread_id=new_thread)
             logger.info("Web chat: %s [thread %s]: %s", user_id, new_thread, preview_text(resp))
             return web.json_response({"response": resp, "thread_id": new_thread})
 
@@ -279,16 +273,12 @@ async def start_web(app: "App", cfg: Dict) -> None:
             async def _on_skill_done(skill_name: str) -> None:
                 await _sse("skill_done", {"skill": skill_name})
 
-            await app.scheduler.acquire_llm()
-            try:
-                response = await agent.run(
-                    message, images=images, thread_id=thread_id,
-                    on_skill_start=_on_skill_start,
-                    on_skill_step=_on_skill_step,
-                    on_skill_done=_on_skill_done,
-                )
-            finally:
-                app.scheduler.release_llm()
+            response = await run_with_llm_lock(
+                app, agent, message, images=images, thread_id=thread_id,
+                on_skill_start=_on_skill_start,
+                on_skill_step=_on_skill_step,
+                on_skill_done=_on_skill_done,
+            )
             ctx = f" [thread {thread_id}]" if thread_id else ""
             logger.info("Web chat: %s%s -> %s", user_id, ctx, preview_text(response))
             await _sse("done", {"response": response})
