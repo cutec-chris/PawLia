@@ -260,6 +260,7 @@ class CallSession:
         self._done = asyncio.Event()
         self._pending_candidates: List[Dict] = []
         self._speaking = False
+        self._ice_reconnect_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -328,7 +329,20 @@ class CallSession:
         async def on_ice_state():
             state = self._pc.iceConnectionState
             logger.info("call %s: ICE state → %s", self.call_id[:8], state)
-            if state in ("failed", "closed"):
+            if state == "connected":
+                # Cancel reconnect watchdog if ICE recovered
+                if self._ice_reconnect_task and not self._ice_reconnect_task.done():
+                    self._ice_reconnect_task.cancel()
+                    self._ice_reconnect_task = None
+            elif state == "disconnected":
+                if not self._ice_reconnect_task or self._ice_reconnect_task.done():
+                    self._ice_reconnect_task = asyncio.ensure_future(
+                        self._ice_reconnect_watchdog()
+                    )
+            elif state == "failed":
+                asyncio.ensure_future(self._notify_disconnect())
+                self._done.set()
+            elif state == "closed":
                 self._done.set()
 
         _gathering_done = asyncio.Event()
@@ -654,6 +668,30 @@ class CallSession:
             except Exception as e:
                 logger.debug("call %s: stats error: %s", self.call_id[:8], e)
             await asyncio.sleep(5)
+
+    async def _ice_reconnect_watchdog(self) -> None:
+        """Give ICE 30 s to recover from 'disconnected' before ending the call."""
+        ICE_RECONNECT_TIMEOUT = 30
+        logger.info("call %s: ICE disconnected — waiting %ds for recovery",
+                    self.call_id[:8], ICE_RECONNECT_TIMEOUT)
+        try:
+            await asyncio.sleep(ICE_RECONNECT_TIMEOUT)
+        except asyncio.CancelledError:
+            logger.info("call %s: ICE recovered — reconnect watchdog cancelled", self.call_id[:8])
+            return
+        if self._pc and self._pc.iceConnectionState == "disconnected":
+            logger.warning("call %s: ICE did not recover after %ds — ending call",
+                           self.call_id[:8], ICE_RECONNECT_TIMEOUT)
+            await self._notify_disconnect()
+            self._done.set()
+
+    async def _notify_disconnect(self) -> None:
+        """Send a Matrix message when the connection drops unexpectedly."""
+        try:
+            await self._send_cb("📞 Verbindung unterbrochen")
+        except Exception as e:
+            logger.warning("call %s: could not send disconnect notification: %s",
+                           self.call_id[:8], e)
 
     async def _watchdog(self) -> None:
         """Auto-hangup after MAX_CALL_SECONDS."""
