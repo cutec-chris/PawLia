@@ -9,4 +9,5 @@ pytest.ini
 .claude/*
 skills/user/*
 tmp/*
+log/*
 .venv/*

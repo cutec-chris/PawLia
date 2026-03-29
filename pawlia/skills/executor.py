@@ -49,11 +49,13 @@ class WorkflowExecutor:
         context: Dict[str, Any],
         llm: Any,
         logger: Optional[logging.Logger] = None,
+        log_name: str = "prompt",
     ):
         self.tool_registry = tool_registry
         self.context = context
         self.llm = llm
         self.logger = logger or logging.getLogger(__name__)
+        self.log_name = log_name
         self.on_step: Any = None  # Optional async callback
 
     # ------------------------------------------------------------------
@@ -89,7 +91,7 @@ class WorkflowExecutor:
             SystemMessage(content="Pick the workflow that matches the user's request by calling it."),
             HumanMessage(content=query),
         ]
-        log_prompt(messages)
+        log_prompt(messages, name=self.log_name)
 
         for attempt in range(2):
             try:
@@ -130,7 +132,7 @@ class WorkflowExecutor:
             SystemMessage(content=system),
             HumanMessage(content=query),
         ]
-        log_prompt(messages)
+        log_prompt(messages, name=self.log_name)
 
         outputs: List[str] = []
 
