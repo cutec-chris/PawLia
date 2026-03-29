@@ -16,7 +16,7 @@ The CI workflow is defined in `.github/workflows/ci.yml` and performs the follow
 1. **Container Setup**: Uses `node:20-alpine` container for lightweight execution
 2. **Install Python**: Installs Python 3 and pip using `apk add --no-cache python3 py3-pip git`
 3. **Checkout code**: Checks out the repository code using Forgejo's checkout action
-4. **Create CI Config**: Generates minimal `config.json` with required providers/agents sections
+4. **Create CI Config**: Generates minimal `config.yaml` with required providers/agents sections
 5. **Install dependencies**: Installs all required Python packages from `source/requirements.txt`
 6. **Run tests**: Executes test suite using pytest
 7. **Upload test results**: Archives test results as artifacts (even if tests fail)
@@ -97,7 +97,7 @@ This workflow uses a **Node.js 20 Alpine** container:
 - **Base Image**: `node:20-alpine` (lightweight Alpine Linux)
 - **Python**: Python 3 installed via `apk add python3 py3-pip`
 - **Git**: Required for checkout, installed via `apk add git`
-- **Config**: Auto-generates `config.json` for CI environment
+- **Config**: Auto-generates `config.yaml` for CI environment
 - **Benefits**: Smaller image size, faster startup, minimal dependencies
 
 ## Why Node.js Container for Python Tests?

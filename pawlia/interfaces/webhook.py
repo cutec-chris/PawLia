@@ -3,7 +3,7 @@
 Exposes a simple HTTP POST endpoint that accepts a JSON body
 and returns the assistant's response.
 
-Config (in config.json under "interfaces.webhook"):
+Config (in config.yaml under "interfaces.webhook"):
     {
       "host": "0.0.0.0",
       "port": 8080,
@@ -41,7 +41,7 @@ logger = logging.getLogger("pawlia.interfaces.webhook")
 async def start_webhook(app: "App", cfg: Dict) -> None:
     """Start the webhook HTTP server.
 
-    ``cfg`` is the ``interfaces.webhook`` section of config.json.
+    ``cfg`` is the ``interfaces.webhook`` section of config.yaml.
     """
     host: str = cfg.get("host", "0.0.0.0")
     port: int = cfg.get("port", 8080)

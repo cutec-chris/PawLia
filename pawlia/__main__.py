@@ -51,7 +51,7 @@ def _configure_logging(debug: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PawLia - AI Assistant")
-    parser.add_argument("--config", default=None, help="Path to config.json")
+    parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(
         "--mode", choices=["cli", "server"], default="cli",
@@ -124,7 +124,7 @@ async def _run(args) -> None:
 
     if not tasks:
         logging.getLogger("pawlia").error(
-            "Server mode: no interfaces configured in config.json under 'interfaces'."
+            "Server mode: no interfaces configured in config.yaml under 'interfaces'."
         )
         app.scheduler.stop()
         return

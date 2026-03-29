@@ -1,6 +1,6 @@
 """Telegram interface for PawLia using python-telegram-bot.
 
-Config (in config.json under "interfaces.telegram"):
+Config (in config.yaml under "interfaces.telegram"):
     {
       "token": "YOUR_TELEGRAM_BOT_TOKEN"
     }
@@ -30,7 +30,7 @@ logger = logging.getLogger("pawlia.interfaces.telegram")
 async def start_telegram(app: "App", cfg: Dict) -> None:
     """Start the Telegram bot and poll for messages.
 
-    ``cfg`` is the ``interfaces.telegram`` section of config.json.
+    ``cfg`` is the ``interfaces.telegram`` section of config.yaml.
     """
     token: str = cfg["token"]
 
