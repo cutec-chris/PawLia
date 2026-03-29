@@ -22,8 +22,9 @@ _LOG_DIR: Optional[str] = None  # set by enable_prompt_logging()
 def enable_prompt_logging() -> None:
     """Enable prompt logging into ``log/`` inside the project directory."""
     global _LOG_DIR
+    # Two levels up from pawlia/agents/base.py → project root
     _LOG_DIR = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "log"
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "log"
     )
     os.makedirs(_LOG_DIR, exist_ok=True)
 

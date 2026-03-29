@@ -25,6 +25,7 @@ def _workdir(user_id: str, session_dir: str) -> str:
 
 
 def _safe_path(workdir: str, filename: str) -> str:
+    filename = filename.lower()
     resolved = os.path.realpath(os.path.join(workdir, filename))
     root = os.path.realpath(workdir)
     if not resolved.startswith(root + os.sep) and resolved != root:
