@@ -1,6 +1,6 @@
 skill: config
-version: '1.0'
-compiled_at: '2026-03-28'
+version: '1.1'
+compiled_at: '2026-03-29'
 compiled_by: manual
 workflows:
 - id: config_operations
@@ -45,3 +45,55 @@ workflows:
       exit_code: 0
       output_not_contains:
       - '"success": false'
+- id: model_switch
+  trigger: When the user wants to switch, change, or show the active model
+  max_steps: 3
+  goal_check:
+    prompt: Has the model been shown or changed as requested?
+    max_retries: 1
+  building_blocks:
+  - id: show_model
+    command: python {scripts_dir}/config.py model
+    description: Show the currently active model
+    status_desc: Zeige aktives Modell
+    verify:
+      exit_code: 0
+  - id: set_model
+    command: python {scripts_dir}/config.py model --name {name}
+    description: Switch the active model at runtime (takes effect immediately)
+    status_desc: Wechsle Modell zu {name}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+- id: private_mode
+  trigger: When the user wants to enable or disable private mode for the session or a thread
+  max_steps: 2
+  goal_check:
+    prompt: Has private mode been toggled as requested?
+    max_retries: 1
+  building_blocks:
+  - id: private_on
+    command: python {scripts_dir}/config.py private
+    description: Enable private mode for the current session (messages won't be saved)
+    status_desc: Private Mode aktivieren
+    verify:
+      exit_code: 0
+  - id: private_on_thread
+    command: python {scripts_dir}/config.py private --thread {thread_id}
+    description: Enable private mode for a specific thread
+    status_desc: Private Mode für Thread aktivieren
+    verify:
+      exit_code: 0
+  - id: private_off
+    command: python {scripts_dir}/config.py private --off
+    description: Disable private mode for the current session
+    status_desc: Private Mode deaktivieren
+    verify:
+      exit_code: 0
+  - id: private_off_thread
+    command: python {scripts_dir}/config.py private --thread {thread_id} --off
+    description: Disable private mode for a specific thread
+    status_desc: Private Mode für Thread deaktivieren
+    verify:
+      exit_code: 0

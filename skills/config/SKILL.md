@@ -1,6 +1,6 @@
 ---
 name: config
-description: Read and write pawlia configuration settings (interfaces, TTS, transcription, agents, skill-config). Use this to enable/disable features, change providers, adjust interface settings like always_thread, or configure skill parameters.
+description: Read and write pawlia configuration settings (interfaces, TTS, transcription, agents, skill-config), switch the active model at runtime, and toggle private mode. Use this to enable/disable features, change providers, adjust interface settings, configure skill parameters, change the model, or enable/disable private mode.
 license: MIT
 metadata:
   author: Christian Ulrich
@@ -67,10 +67,47 @@ python <scripts_dir>/config.py set --path agents.default --value fast
 python <scripts_dir>/config.py set --path skill-config.memory.idle_minutes --value 10
 ```
 
+## Switch the active model (runtime)
+
+Show the current model:
+
+```
+python <scripts_dir>/config.py model
+```
+
+Switch to a different model (takes effect immediately, no restart needed):
+
+```
+python <scripts_dir>/config.py model --name qwen3.5:latest
+```
+
+The model name must match a key in the `models` section of config.yaml.
+
+## Private mode
+
+Enable private mode for the current session (messages won't be saved):
+
+```
+python <scripts_dir>/config.py private
+```
+
+Enable private mode for a specific thread:
+
+```
+python <scripts_dir>/config.py private --thread <thread_id>
+```
+
+Disable private mode:
+
+```
+python <scripts_dir>/config.py private --off
+python <scripts_dir>/config.py private --thread <thread_id> --off
+```
+
 ## Output
 
 All commands return JSON. On success: `{"success": true, ...}`. On error: `{"success": false, "error": "..."}`.
 
 After `set`, the response includes `"value_read_back"` — the value actually written to disk. Always compare it against what you intended to set and report any discrepancy to the user.
 
-**Note:** Changes to config.yaml take effect after the next restart. Inform the user that a restart is required for the changes to become active.
+**Note:** Changes to config.yaml (via `set`) take effect after the next restart. The `model` command changes the active model immediately without restart.
