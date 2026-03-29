@@ -478,7 +478,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
         if not event.body.strip():
             return
-        asyncio.create_task(_on_message_task(room, event))
+        _spawn(_on_message_task(room, event))
 
     async def _on_image_task(room: MatrixRoom, event: RoomMessageImage) -> None:
         mxc_url = event.url
@@ -499,7 +499,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
         if not event.url:
             return
-        asyncio.create_task(_on_image_task(room, event))
+        _spawn(_on_image_task(room, event))
 
     async def _on_audio_task(room: MatrixRoom, event: RoomMessageAudio) -> None:
         """Handle voice messages: download → transcribe → agent."""
@@ -541,7 +541,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
         if not event.url:
             return
-        asyncio.create_task(_on_audio_task(room, event))
+        _spawn(_on_audio_task(room, event))
 
     async def on_call_invite(room: MatrixRoom, event: CallInviteEvent) -> None:
         if event.sender == client.user_id:
@@ -572,6 +572,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     app.scheduler.register(_matrix_notify)
 
+    _active_tasks: set[asyncio.Task] = set()
+
+    def _spawn(coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        _active_tasks.add(task)
+        task.add_done_callback(_active_tasks.discard)
+        return task
+
     # ------------------------------------------------------------------
     # Sync loop
     # ------------------------------------------------------------------
@@ -592,5 +600,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     except asyncio.CancelledError:
         logger.info("Matrix: sync cancelled")
     finally:
+        for task in list(_active_tasks):
+            task.cancel()
+        if _active_tasks:
+            await asyncio.gather(*_active_tasks, return_exceptions=True)
         await client.close()
         logger.info("Matrix: disconnected")
