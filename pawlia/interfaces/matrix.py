@@ -425,7 +425,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 return text[len(prefix):].strip()
         return None
 
-    always_thread: bool = cfg.get("always_thread", False)
+    always_thread: bool = cfg.get("always_thread", True)
 
     def _auto_thread(event_id: str, thread_id: Optional[str]) -> Optional[str]:
         """Apply always_thread: if no thread yet, use the event itself as root."""
