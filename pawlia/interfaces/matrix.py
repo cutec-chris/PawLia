@@ -309,7 +309,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             if not thread_id:
                 await _send_text(room.room_id, "_//clear funktioniert nur in Threads._")
                 return
-            event_ids = thread_members.get(thread_id, [])
+            # Only delete messages IN the thread, not the thread root itself
+            event_ids = [eid for eid in thread_members.get(thread_id, []) if eid != thread_id]
             if not event_ids:
                 await _send_thread_reply(room.room_id, thread_id, "_Keine Nachrichten zum Löschen gefunden._")
                 return
@@ -320,11 +321,10 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     count += 1
                 except Exception as e:
                     logger.warning("Matrix: failed to redact %s: %s", eid, e)
-            thread_members.pop(thread_id, None)
-            # Clean up thread_events references
-            for eid in list(thread_events):
-                if thread_events.get(eid) == thread_id:
-                    del thread_events[eid]
+            # Keep only the root in the tracker
+            thread_members[thread_id] = [thread_id]
+            for eid in event_ids:
+                thread_events.pop(eid, None)
             logger.info("Matrix: cleared %d messages in thread %s", count, thread_id[:12])
             return
 
