@@ -114,7 +114,7 @@ def cmd_model(args) -> None:
     if not user_id or not session_dir:
         _out({"success": False, "error": "user-id and session-dir required"})
         return
-    override_path = os.path.join(session_dir, user_id, "memory", "model_override.txt")
+    override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
     os.makedirs(os.path.dirname(override_path), exist_ok=True)
 
     if not args.name:
