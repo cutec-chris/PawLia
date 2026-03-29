@@ -39,7 +39,7 @@ async def start_cli(app: "App") -> None:
 
     from pawlia.interfaces.common import (
         build_status, format_status, md_to_text, handle_model_command,
-        run_with_llm_lock, format_private_toggle, format_bg_enqueue,
+        format_private_toggle, format_bg_enqueue,
     )
 
     async def _on_interim(text: str) -> None:
@@ -108,7 +108,7 @@ async def start_cli(app: "App") -> None:
             thread_id = f"cli_{int(time.time())}"
             active_fut = asyncio.current_task()
             try:
-                response = await run_with_llm_lock(app, agent, message, thread_id=thread_id)
+                response = await agent.run(message, thread_id=thread_id)
                 print(f"{_CYAN}Bot [Thread]:{_RESET} {response}\n")
             except asyncio.CancelledError:
                 print("\n(interrupted)")
@@ -144,7 +144,7 @@ async def start_cli(app: "App") -> None:
 
         active_fut = asyncio.current_task()
         try:
-            response = await run_with_llm_lock(app, agent, user_input)
+            response = await agent.run(user_input)
             print(f"{_CYAN}Bot:{_RESET} {response}\n")
         except asyncio.CancelledError:
             print("\n(interrupted)")

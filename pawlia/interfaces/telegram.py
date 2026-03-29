@@ -35,7 +35,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, md_to_tg_html,
-        handle_model_command, preview_text, run_with_llm_lock,
+        handle_model_command, preview_text,
         format_private_toggle, format_bg_enqueue, bytes_to_data_uri,
     )
 
@@ -98,8 +98,8 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                         pass
 
             agent.on_interim = _on_interim
-            response = await run_with_llm_lock(
-                app, agent, text,
+            response = await agent.run(
+                text,
                 images=images or None,
                 thread_id=str(thread_id) if thread_id else None,
                 on_skill_start=_on_skill_start,

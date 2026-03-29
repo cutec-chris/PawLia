@@ -170,7 +170,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
-        preview_text, run_with_llm_lock, format_private_toggle,
+        preview_text, format_private_toggle,
         format_bg_enqueue, bytes_to_data_uri,
     )
 
@@ -394,8 +394,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     )
 
             agent.on_interim = _on_interim
-            response = await run_with_llm_lock(
-                app, agent, text, images=images or None, thread_id=thread_id,
+            response = await agent.run(
+                text, images=images or None, thread_id=thread_id,
                 on_skill_start=_on_skill_start,
                 on_skill_step=_on_skill_step,
                 on_skill_done=_on_skill_done,
@@ -457,12 +457,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return thread_id
         return event_id if always_thread else None
 
-    async def on_message(room: MatrixRoom, event: RoomMessageText) -> None:
-        if event.sender == client.user_id:
-            return
+    async def _on_message_task(room: MatrixRoom, event: RoomMessageText) -> None:
         text = event.body.strip()
-        if not text:
-            return
 
         thread_args = _cmd(text, "thread")
         if thread_args is not None:
@@ -477,9 +473,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         _remember_thread_event(event.event_id, thread_id)
         await _handle(room, text, thread_id=thread_id)
 
-    async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
+    async def on_message(room: MatrixRoom, event: RoomMessageText) -> None:
         if event.sender == client.user_id:
             return
+        if not event.body.strip():
+            return
+        asyncio.create_task(_on_message_task(room, event))
+
+    async def _on_image_task(room: MatrixRoom, event: RoomMessageImage) -> None:
         mxc_url = event.url
         if not mxc_url:
             return
@@ -493,10 +494,15 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         _remember_thread_event(event.event_id, thread_id)
         await _handle(room, caption, images=[data_uri], thread_id=thread_id)
 
-    async def on_audio(room: MatrixRoom, event: RoomMessageAudio) -> None:
-        """Handle voice messages: download → transcribe → agent."""
+    async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
         if event.sender == client.user_id:
             return
+        if not event.url:
+            return
+        asyncio.create_task(_on_image_task(room, event))
+
+    async def _on_audio_task(room: MatrixRoom, event: RoomMessageAudio) -> None:
+        """Handle voice messages: download → transcribe → agent."""
         mxc_url = event.url
         if not mxc_url:
             return
@@ -529,6 +535,13 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             await _send_text(room.room_id, f"🎙️ *{text}*")
         # Route through normal handler (prefixed so agent knows it was voice)
         await _handle(room, f"[Sprachnachricht]: {text}", thread_id=thread_id)
+
+    async def on_audio(room: MatrixRoom, event: RoomMessageAudio) -> None:
+        if event.sender == client.user_id:
+            return
+        if not event.url:
+            return
+        asyncio.create_task(_on_audio_task(room, event))
 
     async def on_call_invite(room: MatrixRoom, event: CallInviteEvent) -> None:
         if event.sender == client.user_id:

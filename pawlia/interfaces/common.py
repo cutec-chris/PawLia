@@ -3,19 +3,8 @@
 import base64
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
-if TYPE_CHECKING:
-    from pawlia.app import App
-
-
-async def run_with_llm_lock(app: "App", agent: Any, message: str, **kwargs) -> str:
-    """Run ``agent.run()`` while holding the LLM scheduler lock."""
-    await app.scheduler.acquire_llm()
-    try:
-        return await agent.run(message, **kwargs)
-    finally:
-        app.scheduler.release_llm()
 
 
 def format_private_toggle(active: bool) -> str:
