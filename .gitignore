@@ -1,13 +1,11 @@
-config.json
 config.yaml
+config.yml
 *.pyc
 session/*
 pytest.ini
 .pytest_last.txt
 .aider.*
-config.groq.json
 .claude/*
-config.*.json
 .claude/*
 skills/user/*
 tmp/*

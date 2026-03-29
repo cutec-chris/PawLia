@@ -21,21 +21,15 @@ jobs:
 
     - name: Create minimal config for CI
       run: |
-        cat > config.json << 'EOF'
-        {
-          "providers": {
-            "default": {
-              "apiKey": "test-key",
-              "apiBase": "http://localhost:11434/v1",
-              "timeout": 30
-            }
-          },
-          "agents": {
-            "defaults": {
-              "model": "test-model"
-            }
-          }
-        }
+        cat > config.yaml << 'EOF'
+        providers:
+          default:
+            apiKey: test-key
+            apiBase: http://localhost:11434/v1
+            timeout: 30
+        agents:
+          defaults:
+            model: test-model
         EOF
 
     - name: Install dependencies

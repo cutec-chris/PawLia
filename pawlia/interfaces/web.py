@@ -90,7 +90,7 @@ def _find_config_path(hint: Optional[str] = None) -> Optional[str]:
         candidates.append(hint)
     pkg_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     for base in (os.getcwd(), pkg_root):
-        for name in ("config.yaml", "config.yml", "config.json"):
+        for name in ("config.yaml", "config.yml"):
             candidates.append(os.path.join(base, name))
     for c in candidates:
         if os.path.isfile(c):
@@ -100,17 +100,12 @@ def _find_config_path(hint: Optional[str] = None) -> Optional[str]:
 
 def _read_config(path: str) -> dict:
     with open(path, "r", encoding="utf-8") as f:
-        if path.endswith((".yaml", ".yml")):
-            return yaml.safe_load(f) or {}
-        return json.load(f) or {}
+        return yaml.safe_load(f) or {}
 
 
 def _write_config(path: str, cfg: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
-        if path.endswith((".yaml", ".yml")):
-            yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        else:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
 async def start_web(app: "App", cfg: Dict) -> None:

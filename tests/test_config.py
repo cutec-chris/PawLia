@@ -1,15 +1,16 @@
 """Tests for pawlia.config."""
 
-import json
 import os
 import tempfile
+
+import yaml
 
 from pawlia.config import load_config
 
 
 def test_load_config_from_explicit_path():
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump({"providers": {"test": {}}}, f)
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+        yaml.dump({"providers": {"test": {}}}, f)
         f.flush()
         path = f.name
 
@@ -24,9 +25,9 @@ def test_load_config_missing_returns_empty(tmp_path, monkeypatch):
     """When no config file exists anywhere, return empty dict."""
     monkeypatch.chdir(tmp_path)
     import pawlia.config as cfg_mod
-    # Prevent the project-root fallback from finding the real config.json
+    # Prevent the project-root fallback from finding the real config.yaml
     monkeypatch.setattr(cfg_mod, "__file__", str(tmp_path / "pawlia" / "config.py"))
-    cfg = load_config(os.path.join(str(tmp_path), "nonexistent.json"))
+    cfg = load_config(os.path.join(str(tmp_path), "nonexistent.yaml"))
     assert cfg == {}
 
 
