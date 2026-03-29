@@ -37,6 +37,11 @@ async def start_cli(app: "App") -> None:
     """Start an interactive CLI session."""
     global _waiting_for_input
 
+    from pawlia.interfaces.common import (
+        build_status, format_status, md_to_text, handle_model_command,
+        run_with_llm_lock, format_private_toggle, format_bg_enqueue,
+    )
+
     async def _on_interim(text: str) -> None:
         sys.stdout.write(f"{_CYAN}Bot:{_RESET} {text}\n")
         sys.stdout.flush()
@@ -92,9 +97,7 @@ async def start_cli(app: "App") -> None:
 
         if user_input.strip().lower() == "/private":
             active = app.memory.toggle_private(agent.session)
-            icon = "🔒" if active else "🔓"
-            state = "aktiviert" if active else "deaktiviert"
-            print(f"{icon} Private Mode {state} — Nachrichten werden {'nicht ' if active else ''}gespeichert.\n")
+            print(f"{md_to_text(format_private_toggle(active))}\n")
             continue
 
         if user_input.strip().lower().startswith("/thread"):
@@ -104,21 +107,17 @@ async def start_cli(app: "App") -> None:
                 continue
             thread_id = f"cli_{int(time.time())}"
             active_fut = asyncio.current_task()
-            await app.scheduler.acquire_llm()
             try:
-                response = await agent.run(message, thread_id=thread_id)
+                response = await run_with_llm_lock(app, agent, message, thread_id=thread_id)
                 print(f"{_CYAN}Bot [Thread]:{_RESET} {response}\n")
             except asyncio.CancelledError:
                 print("\n(interrupted)")
             except Exception as e:
                 logger.error("Error: %s", e)
                 print(f"Error: {e}\n")
-            finally:
-                app.scheduler.release_llm()
             continue
 
         if user_input.strip().lower() == "/status":
-            from pawlia.interfaces.common import build_status, format_status, md_to_text
             status = build_status(app, "cli_user", agent)
             print(f"\n{md_to_text(format_status(status))}\n")
             continue
@@ -128,13 +127,11 @@ async def start_cli(app: "App") -> None:
             if not bg_message:
                 print("Verwendung: /background <Nachricht>\n")
                 continue
-            task = app.scheduler.bg_tasks.enqueue("cli_user", bg_message)
-            print(f"⏳ Aufgabe in Warteschlange: {bg_message[:60]}")
-            print(f"   Wird im Hintergrund verarbeitet wenn idle.\n")
+            app.scheduler.bg_tasks.enqueue("cli_user", bg_message)
+            print(f"{md_to_text(format_bg_enqueue(bg_message))}\n")
             continue
 
         if user_input.strip().lower().startswith("/model"):
-            from pawlia.interfaces.common import handle_model_command
             args_str = user_input.strip()[len("/model"):].strip()
             result = handle_model_command(app, "cli_user", args_str)
             if result.action == "show":
@@ -146,16 +143,13 @@ async def start_cli(app: "App") -> None:
             continue
 
         active_fut = asyncio.current_task()
-        await app.scheduler.acquire_llm()
         try:
-            response = await agent.run(user_input)
+            response = await run_with_llm_lock(app, agent, user_input)
             print(f"{_CYAN}Bot:{_RESET} {response}\n")
         except asyncio.CancelledError:
             print("\n(interrupted)")
         except Exception as e:
             logger.error("Error: %s", e)
             print(f"Error: {e}\n")
-        finally:
-            app.scheduler.release_llm()
 
     print("Exiting...")

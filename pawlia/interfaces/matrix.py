@@ -12,7 +12,6 @@ Config (in config.yaml under "interfaces.matrix"):
 """
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -169,7 +168,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         await client.close()
         return
 
-    from pawlia.interfaces.common import AgentCache, build_status, format_status, handle_model_command, preview_text
+    from pawlia.interfaces.common import (
+        AgentCache, build_status, format_status, handle_model_command,
+        preview_text, run_with_llm_lock, format_private_toggle,
+        format_bg_enqueue, bytes_to_data_uri,
+    )
 
     # One agent per Matrix room (shared context for everyone in the room)
     agent_cache = AgentCache(app)
@@ -194,9 +197,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         if not isinstance(resp, DownloadResponse):
             logger.warning("Matrix: failed to download image: %s", resp)
             return None
-        b64 = base64.b64encode(resp.body).decode()
-        mime = resp.content_type or mimetype
-        return f"data:{mime};base64,{b64}"
+        return bytes_to_data_uri(resp.body, resp.content_type or mimetype)
 
     async def _send_text(room_id: str, text: str) -> None:
         try:
@@ -290,9 +291,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 return
             session = app.memory.load_session(session_id)
             active = app.memory.toggle_private_thread(session, thread_id)
-            icon = "🔒" if active else "🔓"
-            state = "aktiviert" if active else "deaktiviert"
-            await _send_text(room.room_id, f"{icon} Private Mode {state} — Nachrichten werden {'**nicht** ' if active else ''}gespeichert.")
+            await _send_text(room.room_id, format_private_toggle(active))
             return
 
         model_args = _cmd(text, "model")
@@ -305,8 +304,8 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             if not bg_args:
                 await _send_text(room.room_id, "_Verwendung: //background <Nachricht>_")
                 return
-            task = app.scheduler.bg_tasks.enqueue(session_id, bg_args)
-            await _send_text(room.room_id, f"⏳ Aufgabe in Warteschlange: **{bg_args[:60]}**\nWird im Hintergrund verarbeitet wenn idle.")
+            app.scheduler.bg_tasks.enqueue(session_id, bg_args)
+            await _send_text(room.room_id, format_bg_enqueue(bg_args))
             return
 
         async def _send(text: str) -> None:
@@ -366,16 +365,12 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     )
 
             agent.on_interim = _on_interim
-            await app.scheduler.acquire_llm()
-            try:
-                response = await agent.run(
-                    text, images=images or None, thread_id=thread_id,
-                    on_skill_start=_on_skill_start,
-                    on_skill_step=_on_skill_step,
-                    on_skill_done=_on_skill_done,
-                )
-            finally:
-                app.scheduler.release_llm()
+            response = await run_with_llm_lock(
+                app, agent, text, images=images or None, thread_id=thread_id,
+                on_skill_start=_on_skill_start,
+                on_skill_step=_on_skill_step,
+                on_skill_done=_on_skill_done,
+            )
 
             await client.room_typing(room.room_id, typing_state=False)
             logger.info("Matrix: response in %s%s: %s", room.room_id, ctx, preview_text(response))

@@ -1,11 +1,40 @@
 """Shared utilities for PawLia interfaces."""
 
+import base64
 import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from pawlia.app import App
+
+
+async def run_with_llm_lock(app: "App", agent: Any, message: str, **kwargs) -> str:
+    """Run ``agent.run()`` while holding the LLM scheduler lock."""
+    await app.scheduler.acquire_llm()
+    try:
+        return await agent.run(message, **kwargs)
+    finally:
+        app.scheduler.release_llm()
+
+
+def format_private_toggle(active: bool) -> str:
+    """Format the private-mode toggle response."""
+    icon = "\U0001f512" if active else "\U0001f513"
+    state = "aktiviert" if active else "deaktiviert"
+    saving = "**nicht** " if active else ""
+    return f"{icon} Private Mode {state} — Nachrichten werden {saving}gespeichert."
+
+
+def format_bg_enqueue(message: str) -> str:
+    """Format the background-task enqueue confirmation."""
+    return f"⏳ Aufgabe in Warteschlange: **{message[:60]}**\nWird im Hintergrund verarbeitet wenn idle."
+
+
+def bytes_to_data_uri(data: bytes, mimetype: str = "image/jpeg") -> str:
+    """Convert raw image bytes to a base64 data-URI."""
+    b64 = base64.b64encode(data).decode()
+    return f"data:{mimetype};base64,{b64}"
 
 
 class AgentCache:

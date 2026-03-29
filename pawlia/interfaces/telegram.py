@@ -7,7 +7,6 @@ Config (in config.yaml under "interfaces.telegram"):
 """
 
 import asyncio
-import base64
 import logging
 from typing import TYPE_CHECKING, Dict, List, Optional
 
@@ -34,7 +33,11 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     """
     token: str = cfg["token"]
 
-    from pawlia.interfaces.common import AgentCache, build_status, format_status, md_to_tg_html, handle_model_command, preview_text
+    from pawlia.interfaces.common import (
+        AgentCache, build_status, format_status, md_to_tg_html,
+        handle_model_command, preview_text, run_with_llm_lock,
+        format_private_toggle, format_bg_enqueue, bytes_to_data_uri,
+    )
 
     # One agent per user; thread context is passed at run() time
     agent_cache = AgentCache(app)
@@ -95,18 +98,14 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                         pass
 
             agent.on_interim = _on_interim
-            await app.scheduler.acquire_llm()
-            try:
-                response = await agent.run(
-                    text,
-                    images=images or None,
-                    thread_id=str(thread_id) if thread_id else None,
-                    on_skill_start=_on_skill_start,
-                    on_skill_step=_on_skill_step,
-                    on_skill_done=_on_skill_done,
-                )
-            finally:
-                app.scheduler.release_llm()
+            response = await run_with_llm_lock(
+                app, agent, text,
+                images=images or None,
+                thread_id=str(thread_id) if thread_id else None,
+                on_skill_start=_on_skill_start,
+                on_skill_step=_on_skill_step,
+                on_skill_done=_on_skill_done,
+            )
             ctx_label = f" [thread {thread_id}]" if thread_id else ""
             logger.info("Telegram: response to %s%s: %s", user_id, ctx_label, preview_text(response))
             await update.message.reply_text(
@@ -134,11 +133,8 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         user_id = f"tg_{user.id}"
         session = app.memory.load_session(user_id)
         active = app.memory.toggle_private_thread(session, str(thread_id))
-        icon = "🔒" if active else "🔓"
-        state = "aktiviert" if active else "deaktiviert"
         await update.message.reply_text(
-            f"{icon} Private Mode {state} — Nachrichten werden <b>{'nicht ' if active else ''}gespeichert</b>.",
-            parse_mode=ParseMode.HTML,
+            md_to_tg_html(format_private_toggle(active)), parse_mode=ParseMode.HTML,
         )
 
     async def on_thread_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,8 +247,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         photo = update.message.photo[-1]
         file = await photo.get_file()
         data = await file.download_as_bytearray()
-        b64 = base64.b64encode(bytes(data)).decode()
-        data_uri = f"data:image/jpeg;base64,{b64}"
+        data_uri = bytes_to_data_uri(bytes(data), "image/jpeg")
 
         caption = (update.message.caption or "").strip()
 
