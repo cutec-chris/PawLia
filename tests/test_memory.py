@@ -293,6 +293,25 @@ class TestBuildSystemPrompt:
             assert "Chris" in prompt
             assert "## Memory" in prompt
 
+    def test_call_mode_adds_phone_instructions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_call")
+
+            prompt = mm.build_system_prompt(session, mode="call")
+
+            assert "Conversation Mode: Phone Call" in prompt
+            assert "Keep answers compact" in prompt
+
+    def test_default_mode_does_not_add_phone_instructions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_chat")
+
+            prompt = mm.build_system_prompt(session)
+
+            assert "Conversation Mode: Phone Call" not in prompt
+
 
 class TestSystemPromptIdentityFiles:
     """Verify soul.md, identity.md, and user.md are all present in the prompt."""
