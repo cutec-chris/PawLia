@@ -58,6 +58,7 @@ class SkillRunnerAgent(BaseAgent):
         self.context["cwd"] = skill.base_dir
         self.command_fallback = command_fallback
         self.on_step = None  # Optional[Callable[[str], Awaitable[None]]]
+        self._directives: List[str] = []  # collected __directive__ lines from tool output
 
         # Bind real tools to the LLM
         tool_specs = tool_registry.get_specs()
@@ -77,13 +78,18 @@ class SkillRunnerAgent(BaseAgent):
         from tools are returned as-is since the tool loop already had
         a chance to recover from them.
         """
+        self._directives.clear()
         for attempt in range(1, self.MAX_RETRIES + 1):
             result = await self._attempt(query)
             if result.strip():
+                if self._directives:
+                    result = "\n".join(self._directives) + "\n" + result
                 return result
             self.logger.info("Attempt %d produced no output — retrying", attempt)
 
         self.logger.warning("All %d attempts produced no output", self.MAX_RETRIES)
+        if self._directives:
+            return "\n".join(self._directives)
         return ""
 
     async def _attempt(self, query: str) -> str:
@@ -258,6 +264,15 @@ class SkillRunnerAgent(BaseAgent):
         result = self.tool_registry.execute_detailed(tc_name, tc_args, self.context)
         result_str = result.to_tool_message()
         self.logger.debug("Tool result: %s", result_str[:200])
+
+        # Extract __directive__ lines before passing to LLM
+        clean_lines = []
+        for line in result_str.splitlines():
+            if '"__directive__"' in line:
+                self._directives.append(line)
+            else:
+                clean_lines.append(line)
+        result_str = "\n".join(clean_lines)
 
         messages.append(ToolMessage(content=result_str, tool_call_id=tc_id))
         return result

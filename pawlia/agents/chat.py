@@ -6,6 +6,7 @@ the ChatAgent spawns a SkillRunnerAgent to do the actual work, then
 incorporates the result into its final response.
 """
 
+import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -81,6 +82,7 @@ class ChatAgent(BaseAgent):
         self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self.on_skill_done: Optional[InterimCallback] = None      # (skill_name)
+        self.on_model_change: Optional[Callable[[str], None]] = None  # (new_model)
 
         # Bind skill specs as "tools" so the LLM can call them
         self._skill_specs = [s.as_openai_spec() for s in skills.values()]
@@ -301,6 +303,7 @@ class ChatAgent(BaseAgent):
                 runner = self.skill_runner_factory(skill)
                 runner.on_step = _on_skill_step
                 result = await runner.run(query=query)
+                result = self._process_directives(result)
                 if _on_skill_done:
                     try:
                         await _on_skill_done(skill_name)
@@ -437,6 +440,7 @@ class ChatAgent(BaseAgent):
                 runner = self.skill_runner_factory(skill)
                 runner.on_step = _on_skill_step
                 skill_result = await runner.run(query=query)
+                skill_result = self._process_directives(skill_result)
                 if _on_skill_done:
                     try:
                         await _on_skill_done(skill_name)
@@ -520,6 +524,37 @@ class ChatAgent(BaseAgent):
                 await on_sentence(remainder.strip())
 
         return accumulated, raw_text
+
+    _DIRECTIVE_RE = re.compile(r'\{"__directive__"\s*:.*\}')
+
+    def _process_directives(self, result: str) -> str:
+        """Extract and handle ``__directive__`` JSON lines from skill output.
+
+        Returns the result string with directive lines removed.
+        """
+        clean_lines = []
+        for line in result.splitlines():
+            m = self._DIRECTIVE_RE.search(line)
+            if not m:
+                clean_lines.append(line)
+                continue
+            try:
+                obj = json.loads(m.group(0))
+            except (json.JSONDecodeError, ValueError):
+                clean_lines.append(line)
+                continue
+            directive = obj.get("__directive__")
+            if directive == "set_model":
+                model = obj.get("model")
+                if model and self.memory and self.session:
+                    self.memory.set_model_override(self.session, model)
+                    self.logger.info("Directive: model override set to '%s'", model)
+                    if self.on_model_change:
+                        self.on_model_change(model)
+            else:
+                self.logger.warning("Unknown directive: %s", directive)
+                clean_lines.append(line)
+        return "\n".join(clean_lines)
 
     def _resolve_llms(
         self, thread_id: Optional[str], *, images: bool = False
