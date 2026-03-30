@@ -5,7 +5,7 @@ Called by the Scheduler once per tick. Tracks which files have been indexed
 
 Requires ``skill-config.memory`` to be configured with embedding settings.
 The active RAG backend is selected via ``skill-config.memory.rag_backend``
-(default: ``lightrag``; alternative: ``mem0``).
+(default: ``markdown``; alternatives: ``lightrag``, ``simple``, ``mem0``).
 """
 
 import json
@@ -79,7 +79,7 @@ class MemoryIndexer:
     def _tracker_path(self, user_id: str) -> str:
         d = os.path.join(self._session_dir, user_id, "memory_index")
         os.makedirs(d, exist_ok=True)
-        backend = self._cfg.get("rag_backend", "lightrag")
+        backend = self._cfg.get("rag_backend", "markdown")
         return os.path.join(d, f"indexed_files_{backend}.json")
 
     def _load_tracked(self, user_id: str) -> dict:

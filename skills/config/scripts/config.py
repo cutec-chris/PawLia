@@ -109,16 +109,14 @@ def cmd_get(args) -> None:
 
 
 def cmd_model(args) -> None:
-    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
-    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
-    if not user_id or not session_dir:
-        _out({"success": False, "error": "user-id and session-dir required"})
-        return
-    override_path = os.path.join(session_dir, user_id, "memory", "model_override.txt")
-    os.makedirs(os.path.dirname(override_path), exist_ok=True)
-
     if not args.name:
-        # show current model
+        # show: still needs session to read the override file
+        user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+        session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+        if not user_id or not session_dir:
+            _out({"success": False, "error": "user-id and session-dir required"})
+            return
+        override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
         current = ""
         if os.path.isfile(override_path):
             with open(override_path, encoding="utf-8") as f:
@@ -126,9 +124,15 @@ def cmd_model(args) -> None:
         _out({"success": True, "model": current or "(default)"})
         return
 
-    # set model
-    with open(override_path, "w", encoding="utf-8") as f:
-        f.write(args.name)
+    # set model — write file for consistent readback, directive triggers in-memory update
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if user_id and session_dir:
+        override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
+        os.makedirs(os.path.dirname(override_path), exist_ok=True)
+        with open(override_path, "w", encoding="utf-8") as f:
+            f.write(args.name)
+    _out({"__directive__": "set_model", "model": args.name})
     _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
 
 

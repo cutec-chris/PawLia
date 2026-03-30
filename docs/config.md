@@ -172,6 +172,40 @@ skill-config:
     url: http://localhost:3000
 ```
 
+### RAG backends (memory & researcher)
+
+The `memory` and `researcher` skills index documents for later retrieval. The backend is selected via `rag_backend`:
+
+```yaml
+skill-config:
+  memory:
+    embedding_provider: ollama
+    embedding_model: bge-m3:latest
+    embedding_dim: 1024
+    embedding_host: http://localhost:11434
+    rag_backend: markdown          # markdown | lightrag | simple | mem0
+    rag_model: qwen3.5:latest      # LLM for topic extraction / RAG
+```
+
+| Backend | Default | Description |
+|---------|---------|-------------|
+| `markdown` | **yes** | LLM extracts topics from conversations and writes one Markdown file per topic. Retrieval via keyword matching — no embeddings, no extra dependencies. |
+| `lightrag` | | Knowledge-graph RAG (powerful, slow). Requires `lightrag-hku`. |
+| `simple` | | Chunk + embed + cosine similarity. Fast, numpy only. |
+| `mem0` | | Fact extraction via mem0. Requires `mem0ai` + `chromadb`. |
+
+| Key | Used by | Description |
+|-----|---------|-------------|
+| `embedding_provider` | lightrag, simple | `ollama` or OpenAI-compatible |
+| `embedding_model` | lightrag, simple | Embedding model name |
+| `embedding_dim` | lightrag, simple | Embedding dimensions |
+| `embedding_host` | all | Ollama / API base URL |
+| `rag_backend` | all | Backend selection (default: `markdown`) |
+| `rag_provider` | markdown, lightrag, mem0 | LLM provider (defaults to `embedding_provider`) |
+| `rag_model` | markdown, lightrag, mem0 | LLM model for indexing / queries |
+| `rag_numctx` | markdown, lightrag | LLM context window (default: 4096) |
+| `rag_timeout` | all | LLM timeout in seconds (default: 600) |
+
 ## Skill Installation
 
 ```yaml
