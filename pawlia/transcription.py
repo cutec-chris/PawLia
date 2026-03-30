@@ -62,10 +62,14 @@ async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "au
 
     try:
         if provider == "local":
+            logger.debug("transcription: using local faster-whisper (model=%s)", provider_cfg.get("model", "base"))
             return await _transcribe_local(audio_bytes, provider_cfg, mime)
+        base_url = provider_cfg.get("base_url", _PROVIDER_BASE_URLS.get(provider, "<no base_url>")).rstrip("/")
+        model = provider_cfg.get("model", _DEFAULT_MODEL)
+        logger.info("transcription: sending to %s/audio/transcriptions (provider=%s model=%s)", base_url, provider, model)
         return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
     except Exception as e:
-        logger.error("transcription: error (%s): %s", provider, e)
+        logger.error("transcription: error (provider=%s): %s", provider, e, exc_info=True)
         return None
 
 
@@ -116,14 +120,22 @@ async def _transcribe_api(audio_bytes: bytes, provider: str, cfg: Dict, mime: st
     if language:
         data["language"] = language
 
+    url = f"{base_url}/audio/transcriptions"
     async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{base_url}/audio/transcriptions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": (f"audio.{ext}", audio_bytes, mime)},
-            data=data,
-            timeout=60,
-        )
+        try:
+            resp = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (f"audio.{ext}", audio_bytes, mime)},
+                data=data,
+                timeout=60,
+            )
+        except httpx.ConnectError as e:
+            raise ConnectionError(f"STT: could not connect to {url} — {e}") from e
+        except httpx.TimeoutException as e:
+            raise TimeoutError(f"STT: request to {url} timed out — {e}") from e
+        if resp.status_code >= 400:
+            logger.error("transcription: HTTP %d from %s — %s", resp.status_code, url, resp.text[:300])
         resp.raise_for_status()
         return resp.json().get("text", "").strip() or None
 

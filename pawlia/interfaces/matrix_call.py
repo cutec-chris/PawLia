@@ -298,9 +298,8 @@ class CallSession:
             logger.error("matrix_call: aiortc not installed — cannot accept call")
             return None
 
-        # Temporarily enable verbose aiortc logging for DTLS/SRTP debugging
         for _name in ("aiortc", "aioice"):
-            logging.getLogger(_name).setLevel(logging.DEBUG)
+            logging.getLogger(_name).setLevel(logging.WARNING)
 
         ice_servers = await self._get_ice_servers()
         self._pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
@@ -316,8 +315,8 @@ class CallSession:
                 # Log codec info from receivers
                 for r in self._pc.getReceivers():
                     if r.track == track:
-                        logger.info("call %s: receiver params: %s",
-                                    self.call_id[:8], getattr(r, "_track", None))
+                        logger.debug("call %s: receiver params: %s",
+                                     self.call_id[:8], getattr(r, "_track", None))
                 asyncio.ensure_future(self._audio_pipeline(track))
 
         @self._pc.on("connectionstatechange")
@@ -357,7 +356,7 @@ class CallSession:
         # Strip RED codec from offer — Element may send RED-wrapped Opus
         # (PT 63) which aiortc silently drops, causing silence.
         sdp_offer = _strip_red_codec(sdp_offer)
-        logger.info("call %s: SDP offer (cleaned):\n%s", self.call_id[:8], sdp_offer)
+        logger.debug("call %s: SDP offer (cleaned):\n%s", self.call_id[:8], sdp_offer)
         await self._pc.setRemoteDescription(
             RTCSessionDescription(sdp=sdp_offer, type="offer")
         )
@@ -369,8 +368,8 @@ class CallSession:
 
         answer = await self._pc.createAnswer()
         await self._pc.setLocalDescription(answer)
-        logger.info("call %s: SDP answer:\n%s", self.call_id[:8],
-                    self._pc.localDescription.sdp)
+        logger.debug("call %s: SDP answer:\n%s", self.call_id[:8],
+                     self._pc.localDescription.sdp)
 
         # Load hold audio (background sound while waiting for agent response)
         hold_pcm = self._load_hold_audio()
@@ -404,7 +403,7 @@ class CallSession:
 
         candidates = _parse_sdp_candidates(sdp)
         for c in candidates:
-            logger.info("call %s: local candidate: %s", self.call_id[:8], c["candidate"])
+            logger.debug("call %s: local candidate: %s", self.call_id[:8], c["candidate"])
         if not candidates:
             return
 
@@ -475,25 +474,25 @@ class CallSession:
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 5:
                     nz_count = int(np.count_nonzero(raw))
-                    logger.info("call %s: frame #%d fmt=%s pts=%s ch=%d "
-                                "pcm_len=%d nz_samples=%d rms=%.4f "
-                                "raw_first10=%s",
-                                self.call_id[:8], frames_received,
-                                frame.format.name, frame.pts, n_channels,
-                                len(pcm), nz_count, rms,
-                                raw[:10].tolist())
+                    logger.debug("call %s: frame #%d fmt=%s pts=%s ch=%d "
+                                 "pcm_len=%d nz_samples=%d rms=%.4f "
+                                 "raw_first10=%s",
+                                 self.call_id[:8], frames_received,
+                                 frame.format.name, frame.pts, n_channels,
+                                 len(pcm), nz_count, rms,
+                                 raw[:10].tolist())
                 elif frames_received % 50 == 0:
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
-                    logger.info("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
-                                self.call_id[:8], frames_received, rms,
-                                len(speech_buffer), silence_count, h)
+                    logger.debug("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
+                                 self.call_id[:8], frames_received, rms,
+                                 len(speech_buffer), silence_count, h)
 
                 # Suppress echo: discard mic input while TTS is playing
                 if self._tts_track and self._tts_track.is_playing:
                     if speech_buffer:
-                        logger.info("call %s: dropping speech buffer (TTS playing)",
-                                    self.call_id[:8])
+                        logger.debug("call %s: dropping speech buffer (TTS playing)",
+                                     self.call_id[:8])
                         speech_buffer = []
                         silence_count = 0
                     continue
