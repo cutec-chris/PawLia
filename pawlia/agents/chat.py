@@ -99,6 +99,8 @@ class ChatAgent(BaseAgent):
         # Resolver for default agent-type LLMs (e.g. "chat", "vision").
         # Used to fall back when an override model is unreachable.
         self._fallback_resolver: Optional[Callable[[str], Any]] = None
+        # Resolves config keys (e.g. "fast") to actual model names (e.g. "qwen3.5:4b").
+        self._model_name_resolver: Optional[Callable[[str], str]] = None
 
     def build_system_prompt(
         self,
@@ -601,6 +603,8 @@ class ChatAgent(BaseAgent):
             if directive == "set_model":
                 model = obj.get("model")
                 if model and self.memory and self.session:
+                    if self._model_name_resolver:
+                        model = self._model_name_resolver(model)
                     self.memory.set_model_override(self.session, model)
                     self.logger.info("Directive: model override set to '%s'", model)
                     if self.on_model_change:

@@ -60,7 +60,7 @@ def handle_model_command(
             current = session.model_override or "(default)"
         return ModelCommandResult("show", current, ctx_label)
 
-    new_model = args.strip()
+    new_model = app.llm.resolve_model_name(args.strip())
     if thread_id:
         app.memory.set_thread_model_override(session, thread_id, new_model)
     else:
