@@ -32,6 +32,14 @@ if TYPE_CHECKING:
     from pawlia.memory import MemoryManager, Session
 
 _SENTENCE_RE = re.compile(r'[.!?…]\s')
+_RE_CODE_BLOCK = re.compile(r'```[^\n]*\n(.*?)(?:```|$)', re.DOTALL)
+
+_FAKE_TOOL_CALL_NUDGE = (
+    "You wrote a tool call as plain text or a code block instead of using the "
+    "actual function-call mechanism. Do NOT write commands as text. "
+    "Use a real tool call now."
+)
+_MAX_FAKE_TOOL_RETRIES = 5
 
 
 def _split_sentences(text: str) -> Tuple[List[str], str]:
@@ -269,7 +277,7 @@ class ChatAgent(BaseAgent):
         _override_notice = ""
         override_model = self._active_override_model(thread_id)
         try:
-            response = await self._invoke(messages, llm=active_llm)
+            response, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
         except Exception as exc:
             if not override_model:
                 raise
@@ -285,7 +293,7 @@ class ChatAgent(BaseAgent):
                 thread_id, images=bool(images),
             )
             active_llm = bound_llm
-            response = await self._invoke(messages, llm=active_llm)
+            response, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
 
         self.logger.debug("LLM response: tool_calls=%s, content=%s",
                           bool(response.tool_calls),
@@ -464,6 +472,12 @@ class ChatAgent(BaseAgent):
 
         self.logger.debug("Streamed turn 1: tool_calls=%s, len=%d",
                           bool(getattr(accumulated, "tool_calls", None)), len(raw_text))
+
+        # If the streamed response is a fake tool call, retry non-streamed
+        if accumulated and self._is_fake_tool_call(accumulated):
+            self.logger.warning("Fake tool call detected in streamed turn 1, retrying non-streamed")
+            accumulated, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
+            raw_text = accumulated.content if isinstance(accumulated.content, str) else ""
 
         if not accumulated or not getattr(accumulated, "tool_calls", None):
             result = self.strip_thinking(raw_text)
@@ -672,6 +686,49 @@ class ChatAgent(BaseAgent):
         self.vision_bound_llm = vision_bound
 
         return (vision_bound if images else bound), llm
+
+    def _is_fake_tool_call(self, response: AIMessage) -> bool:
+        """Return True if the LLM wrote a tool call as text instead of calling it.
+
+        Detects fenced code blocks whose first token matches a known skill name.
+        Only relevant when tools are bound and no real tool_calls are present.
+        """
+        if not self._skill_specs or response.tool_calls:
+            return False
+        content = response.content if isinstance(response.content, str) else ""
+        skill_names = set(self.skills.keys())
+        for match in _RE_CODE_BLOCK.finditer(content):
+            first_token = match.group(1).strip().split()[0] if match.group(1).strip() else ""
+            if first_token in skill_names:
+                return True
+        return False
+
+    async def _invoke_with_tool_retry(
+        self,
+        messages: List[BaseMessage],
+        llm: Any,
+    ) -> Tuple[AIMessage, List[BaseMessage]]:
+        """Invoke the LLM, retrying if it writes a fake tool call as text.
+
+        Returns ``(response, messages)`` where *messages* may have had nudge
+        entries appended during retries (for context only — not persisted).
+        """
+        retry_messages = list(messages)
+        for attempt in range(_MAX_FAKE_TOOL_RETRIES):
+            response = await self._invoke(retry_messages, llm=llm)
+            if not self._is_fake_tool_call(response):
+                return response, retry_messages
+            self.logger.warning(
+                "Fake tool call detected (attempt %d/%d), nudging LLM",
+                attempt + 1, _MAX_FAKE_TOOL_RETRIES,
+            )
+            retry_messages = retry_messages + [
+                response,
+                HumanMessage(content=_FAKE_TOOL_CALL_NUDGE),
+            ]
+        # Last attempt — return whatever we got
+        response = await self._invoke(retry_messages, llm=llm)
+        return response, retry_messages
 
     async def _persist(
         self,
