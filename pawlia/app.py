@@ -146,6 +146,8 @@ class App:
         )
         # Let the agent resolve per-thread model overrides at run() time
         agent._llm_resolver = self.llm.get_with_model
+        # Let the agent fall back to default LLMs when an override is unreachable
+        agent._fallback_resolver = self.llm.get
         return agent
 
 
