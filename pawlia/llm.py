@@ -112,18 +112,38 @@ class LLMFactory:
             self._cache[key] = self._build(model_cfg)
         return self._cache[key]
 
+    def resolve_model_name(self, name: str) -> str:
+        """Resolve a config key (e.g. ``"fast"``) to its ``model`` value.
+
+        If *name* is a known config key, returns the ``model`` field from that
+        config.  Otherwise returns *name* unchanged.
+        """
+        cfg = self.models.get(name)
+        if cfg and "model" in cfg:
+            return cfg["model"]
+        return name
+
     def get_with_model(self, model_name: str) -> Any:
         """Return a (cached) LLM by model name.
 
-        *model_name* is first looked up in ``models:``.  If not found it is
-        treated as a raw model identifier and the default provider is used.
+        *model_name* is first looked up in ``models:``.  If not found, a
+        reverse lookup checks whether it matches the ``model`` field of any
+        config entry.  If still unresolved, it is treated as a raw model
+        identifier and the default provider is used.
         """
         if model_name in self.models:
             model_cfg = self.models[model_name]
         else:
-            # Raw model string — use default provider
-            default = self._resolve_agent("default")
-            model_cfg = {**default, "model": model_name}
+            # Reverse lookup: match by actual model name inside configs
+            model_cfg = None
+            for _key, cfg in self.models.items():
+                if cfg.get("model") == model_name:
+                    model_cfg = cfg
+                    break
+            if model_cfg is None:
+                # Raw model string — use default provider
+                default = self._resolve_agent("default")
+                model_cfg = {**default, "model": model_name}
         key = self._cache_key(model_cfg)
         if key not in self._cache:
             self._cache[key] = self._build(model_cfg)
