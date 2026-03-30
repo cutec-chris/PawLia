@@ -120,26 +120,30 @@ skill-config:
   #   embedding_model: bge-m3:latest
   #   embedding_dim: 1024
   #   embedding_host: http://localhost:11434
-  #   # rag_backend: lightrag            # lightrag (default) | simple (fast, no extra deps) | mem0 (requires mem0ai+chromadb)
+  #   # rag_backend: markdown            # markdown (default) | lightrag | simple | mem0
   #   # rag_provider: ollama             # defaults to embedding_provider
-  #   # rag_model: qwen3.5:latest        # LLM for RAG queries (not used by simple)
-  #   # rag_numctx: 4096                 # (lightrag only)
-  #   # rag_timeout: 600                 # LLM timeout in seconds (lightrag only)
-  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (lightrag only)
+  #   # rag_model: qwen3.5:latest        # LLM for topic extraction / RAG (not used by simple)
+  #   # rag_numctx: 4096                 # LLM context window (lightrag/markdown)
+  #   # rag_timeout: 600                 # LLM timeout in seconds
+  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (lightrag/simple)
   #   # rag_max_async_llm: 1             # max parallel LLM requests (lightrag only)
-  #   # rag_max_async_embedding: 1       # max parallel embedding requests (lightrag only)
+  #   # rag_max_async_embedding: 1       # max parallel embedding requests (lightrag/simple)
 
   # memory:                              # Long-term conversation memory
   #   embedding_provider: ollama
   #   embedding_model: bge-m3:latest
   #   embedding_dim: 1024
   #   embedding_host: http://localhost:11434
-  #   # rag_backend: lightrag            # lightrag (default) | simple (fast, no extra deps) | mem0 (requires mem0ai+chromadb)
+  #   # rag_backend: markdown            # markdown (default) | lightrag | simple | mem0
+  #   #                                  #   markdown  — LLM extracts topics → one .md file per topic, keyword retrieval
+  #   #                                  #   lightrag  — knowledge-graph RAG (powerful, slow, needs lightrag-hku)
+  #   #                                  #   simple    — chunk + embed + cosine similarity (fast, no extra deps)
+  #   #                                  #   mem0      — fact extraction (needs mem0ai + chromadb)
   #   # rag_provider: ollama             # defaults to embedding_provider
-  #   # rag_model: qwen3.5:latest        # LLM for RAG indexing/queries (not used by simple)
-  #   # rag_numctx: 4096                 # (lightrag only)
-  #   # rag_timeout: 600                 # LLM timeout in seconds (lightrag only)
-  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (lightrag only)
+  #   # rag_model: qwen3.5:latest        # LLM for topic extraction / RAG (not used by simple)
+  #   # rag_numctx: 4096                 # LLM context window (lightrag/markdown)
+  #   # rag_timeout: 600                 # LLM timeout in seconds
+  #   # rag_embedding_timeout: 120       # embedding timeout in seconds (lightrag/simple)
   #   # rag_max_async_llm: 1             # max parallel LLM requests (lightrag only)
-  #   # rag_max_async_embedding: 1       # max parallel embedding requests (lightrag only)
+  #   # rag_max_async_embedding: 1       # max parallel embedding requests (lightrag/simple)
   #   # idle_minutes: 20                 # min idle time before indexing starts (0 = index ASAP)

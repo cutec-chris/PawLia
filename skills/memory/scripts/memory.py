@@ -108,7 +108,7 @@ async def cmd_index(user_id: str):
 
 
 async def cmd_status(user_id: str):
-    backend = CFG.get("rag_backend", "lightrag")
+    backend = CFG.get("rag_backend", "markdown")
     tracker_path = _SESSION_DIR / user_id / "memory_index" / f"indexed_files_{backend}.json"
     indexed = {}
     if tracker_path.exists():
