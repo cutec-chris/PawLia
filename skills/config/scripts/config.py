@@ -108,22 +108,6 @@ def cmd_get(args) -> None:
     _out({"success": True, "path": args.path, "value": value})
 
 
-def _resolve_model_name(name: str, models: dict) -> str:
-    """Resolve a user-supplied name to the actual model identifier.
-
-    Lookup order:
-    1. Exact config key match (e.g. "qwen32" → models.qwen32.model)
-    2. Exact match against the 'model' field in any config entry
-    3. Return *name* unchanged as a raw model identifier
-    """
-    # 1. Config key
-    if name in models and "model" in models[name]:
-        return models[name]["model"]
-    # 2. Reverse lookup by model value
-    for _key, cfg in models.items():
-        if isinstance(cfg, dict) and cfg.get("model") == name:
-            return name
-    return name
 
 
 def cmd_model(args) -> None:
@@ -149,8 +133,13 @@ def cmd_model(args) -> None:
         _out({"success": True, "model": current or "(default)", "available_models": available})
         return
 
-    # Resolve config key / alias to the actual model identifier
-    resolved = _resolve_model_name(args.name, models)
+    # Name must be a known config key
+    if args.name not in models:
+        available = {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)}
+        _out({"success": False, "error": f"Unknown model '{args.name}'", "available_models": available})
+        return
+
+    resolved = models[args.name]["model"]
 
     # set model — write file for consistent readback, directive triggers in-memory update
     user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
