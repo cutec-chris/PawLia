@@ -190,7 +190,13 @@ class LLMFactory:
         if fallback:
             return self._resolve_agent(fallback)
 
-        return {"model": "llama3.1:latest", "provider": self._default_provider_name()}
+        # Last resort: use the first defined model in config
+        if self.models:
+            return next(iter(self.models.values()))
+
+        raise RuntimeError(
+            f"Cannot resolve agent '{agent_type}': no models defined in config"
+        )
 
     def _agent_value(self, agent_type: str) -> Any:
         """Return the raw value assigned to an agent type (string key or inline dict)."""
