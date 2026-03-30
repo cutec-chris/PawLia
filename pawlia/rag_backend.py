@@ -1,13 +1,14 @@
 """Abstract RAG backend interface and implementations.
 
 Supported backends:
-  - lightrag  (default) — LightRAG knowledge-graph RAG, powerful but slow
+  - markdown  (default) — LLM-based topic extraction → one Markdown file per topic
+  - lightrag            — LightRAG knowledge-graph RAG, powerful but slow
   - simple              — chunking + embedding + cosine similarity, no extra deps
   - mem0                — mem0 fact-extraction (requires: pip install mem0ai chromadb)
 
 Select via skill-config:
   memory:
-    rag_backend: simple   # lightrag | simple | mem0
+    rag_backend: lightrag   # markdown | lightrag | simple | mem0
 
 All backends expose the same async interface:
   insert(text, doc_id)
@@ -20,6 +21,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import unicodedata
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
@@ -572,6 +575,276 @@ class SimpleVectorBackend(RagBackend):
 
 
 # ---------------------------------------------------------------------------
+# Markdown topic backend (no embeddings, no knowledge graph)
+# ---------------------------------------------------------------------------
+
+class MarkdownTopicBackend(RagBackend):
+    """Topic-based markdown file backend — no embeddings or knowledge graphs.
+
+    Uses an LLM to categorise conversation content into topics and writes
+    one markdown file per topic.  Retrieval is simple keyword matching
+    across the topic files — no vector search, no extra dependencies.
+
+    Storage layout inside *index_path*:
+      topics/          — one .md file per topic (slug-based filenames)
+      doc_topics.json  — {doc_id: [slug, …]}  for tracking
+    """
+
+    # Size limit for query results (chars, ~8 K tokens).
+    _MAX_RESULT_CHARS = 32_000
+
+    # Common stop words (DE + EN) excluded from keyword matching.
+    _STOP_WORDS = frozenset(
+        "der die das und oder ein eine ist war hat haben was wie wer wo wann "
+        "warum ich du wir sie er es mit von zu für auf in an bei nach über "
+        "unter vor hinter zwischen nicht auch noch schon nur aber denn wenn "
+        "dass weil als ob the a an and or is was are were has have what how "
+        "who where when why i you we they he she it with from to for on at "
+        "by about do did not also".split()
+    )
+
+    def __init__(
+        self,
+        index_path: str,
+        cfg: dict,
+        llm_busy_check: Optional[Callable[[], bool]] = None,
+    ):
+        self._index_path = index_path
+        self._cfg = cfg
+        self._llm_busy = llm_busy_check
+        self._topics_dir = os.path.join(index_path, "topics")
+        self._tracker_path = os.path.join(index_path, "doc_topics.json")
+        self._indexed: set[str] = set()
+        self._tracker: Optional[dict] = None
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _load_tracker(self) -> dict:
+        if self._tracker is not None:
+            return self._tracker
+        if os.path.exists(self._tracker_path):
+            try:
+                with open(self._tracker_path, encoding="utf-8") as f:
+                    self._tracker = json.load(f)
+                self._indexed = set(self._tracker.keys())
+                return self._tracker
+            except Exception:
+                pass
+        self._tracker = {}
+        return self._tracker
+
+    def _save_tracker(self) -> None:
+        os.makedirs(self._index_path, exist_ok=True)
+        with open(self._tracker_path, "w", encoding="utf-8") as f:
+            json.dump(self._tracker or {}, f, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _slugify(name: str) -> str:
+        """Convert a topic name to a filesystem-safe slug."""
+        slug = name.lower().strip()
+        for old, new in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+            slug = slug.replace(old, new)
+        slug = unicodedata.normalize("NFKD", slug)
+        slug = slug.encode("ascii", "ignore").decode("ascii")
+        slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
+        return slug[:80] or "misc"
+
+    # ── LLM call ─────────────────────────────────────────────────────────────
+
+    async def _llm_extract_topics(self, text: str) -> list[dict]:
+        """Call the configured LLM to extract topics from *text*."""
+        import urllib.request
+
+        cfg = self._cfg
+        provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
+        model = cfg.get("rag_model", "qwen3.5:latest")
+        host = cfg.get("embedding_host", "http://localhost:11434")
+
+        system_prompt = (
+            "Du bist ein Assistent der Gesprächsprotokolle analysiert und nach "
+            "Themen sortiert. Antworte NUR mit validem JSON."
+        )
+        user_prompt = (
+            "Analysiere das folgende Gesprächsprotokoll und extrahiere die "
+            "besprochenen Themen.\nFür jedes Thema erstelle eine Zusammenfassung "
+            "mit den wichtigsten Informationen, Entscheidungen und Details.\n\n"
+            "Antworte NUR mit einem JSON-Array:\n"
+            '[{"topic": "kurzer-themenname", "title": "Titel", '
+            '"summary": "Markdown-Zusammenfassung"}]\n\n'
+            f"Gesprächsprotokoll:\n{text}"
+        )
+
+        if provider == "ollama":
+            url = f"{host.rstrip('/')}/api/chat"
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "stream": False,
+                "options": {
+                    "num_ctx": int(cfg.get("rag_numctx", 4096)),
+                    "temperature": 0.1,
+                },
+            }
+        else:
+            base = cfg.get("rag_base_url", cfg.get("embedding_base_url", host))
+            url = f"{base.rstrip('/')}/chat/completions"
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": 0.1,
+            }
+
+        body = json.dumps(payload).encode()
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if provider != "ollama":
+            api_key = cfg.get("rag_api_key", cfg.get("embedding_api_key", ""))
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+        def _do():
+            timeout = int(cfg.get("rag_timeout", 600))
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+
+        result = await asyncio.to_thread(_do)
+
+        # Extract content from response
+        if provider == "ollama":
+            content = result.get("message", {}).get("content", "")
+        else:
+            content = (
+                result.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            )
+
+        # Strip <think>…</think> blocks (common with thinking-enabled models)
+        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+
+        # Parse JSON
+        try:
+            topics = json.loads(content)
+            if isinstance(topics, list):
+                return topics
+        except json.JSONDecodeError:
+            pass
+        # Fallback: find first JSON array in response
+        m = re.search(r"\[.*\]", content, re.DOTALL)
+        if m:
+            try:
+                topics = json.loads(m.group())
+                if isinstance(topics, list):
+                    return topics
+            except json.JSONDecodeError:
+                pass
+
+        logger.warning("MarkdownTopicBackend: could not parse LLM JSON, using raw")
+        return [{"topic": "misc", "title": "Verschiedenes", "summary": content}]
+
+    # ── RagBackend interface ────────────────────────────────────────────────
+
+    async def insert(self, text: str, doc_id: str) -> None:
+        if self._llm_busy and self._llm_busy():
+            raise RuntimeError("LLM busy — deferring memory indexing")
+
+        os.makedirs(self._topics_dir, exist_ok=True)
+        tracker = self._load_tracker()
+
+        topics = await self._llm_extract_topics(text)
+
+        slugs: list[str] = []
+        for t in topics:
+            topic_name = t.get("topic", "misc")
+            title = t.get("title", topic_name)
+            summary = t.get("summary", "")
+            if not summary:
+                continue
+
+            slug = self._slugify(topic_name)
+            slugs.append(slug)
+            filepath = os.path.join(self._topics_dir, f"{slug}.md")
+
+            # Extract date from doc_id (chat_<user>_YYYY-MM-DD)
+            date_str = doc_id.rsplit("_", 1)[-1] if "_" in doc_id else doc_id
+            section = f"\n\n### {title} ({date_str})\n\n{summary}\n"
+
+            if os.path.exists(filepath):
+                with open(filepath, "a", encoding="utf-8") as f:
+                    f.write(section)
+            else:
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(f"# {title}\n{section}")
+
+        tracker[doc_id] = slugs
+        self._indexed.add(doc_id)
+        self._save_tracker()
+        logger.info(
+            "MarkdownTopicBackend: indexed %d topics for %s: %s",
+            len(slugs), doc_id, slugs,
+        )
+
+    async def wait_for_indexed(
+        self, doc_id: str, timeout: int = 120, poll_interval: float = 5.0,
+    ) -> bool:
+        # insert() is synchronous — once it returns the doc is indexed.
+        return doc_id in self._indexed
+
+    async def query(self, question: str) -> str:
+        if not os.path.isdir(self._topics_dir):
+            return "Noch keine Dokumente indiziert."
+
+        topic_files = sorted(
+            f for f in os.listdir(self._topics_dir) if f.endswith(".md")
+        )
+        if not topic_files:
+            return "Noch keine Dokumente indiziert."
+
+        # Tokenise query, remove stop words
+        query_words = set(re.split(r"\W+", question.lower())) - self._STOP_WORDS - {""}
+
+        scored: list[tuple[int, str, str]] = []
+        for fname in topic_files:
+            filepath = os.path.join(self._topics_dir, fname)
+            try:
+                with open(filepath, encoding="utf-8") as f:
+                    content = f.read()
+            except Exception:
+                continue
+
+            name_part = fname[:-3].replace("-", " ")
+            search_text = name_part + " " + content.lower()
+            score = sum(1 for w in query_words if w in search_text)
+            # Boost filename / topic-name matches
+            score += sum(2 for w in query_words if w in name_part)
+            scored.append((score, fname, content))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        has_matches = any(s > 0 for s, _, _ in scored)
+        results: list[str] = []
+        total = 0
+        for score, _fname, content in scored:
+            if has_matches and score == 0:
+                break
+            if total + len(content) > self._MAX_RESULT_CHARS:
+                break
+            results.append(content)
+            total += len(content)
+
+        if not results:
+            return "Keine relevanten Informationen gefunden."
+        return "\n\n---\n\n".join(results)
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -587,7 +860,8 @@ def create_backend(
     """Instantiate the configured RAG backend.
 
     Select via ``cfg["rag_backend"]``:
-      - ``"lightrag"`` (default) — LightRAG knowledge-graph
+      - ``"markdown"`` (default) — LLM topic extraction → Markdown files
+      - ``"lightrag"``           — LightRAG knowledge-graph
       - ``"simple"``             — chunking + cosine similarity (numpy only)
       - ``"mem0"``               — mem0 fact extraction (requires mem0ai + chromadb)
 
@@ -600,7 +874,11 @@ def create_backend(
         Override config defaults (useful for query-only instances that can
         afford higher concurrency).
     """
-    backend_name = cfg.get("rag_backend", "lightrag")
+    backend_name = cfg.get("rag_backend", "markdown")
+
+    if backend_name == "markdown":
+        logger.debug("Using Markdown-topic backend at %s", index_path)
+        return MarkdownTopicBackend(index_path, cfg, llm_busy_check)
 
     if backend_name == "simple":
         logger.debug("Using SimpleVector backend at %s", index_path)

@@ -14,7 +14,9 @@ class AgentCache:
 
     def get(self, user_id: str, **kwargs) -> Any:
         if user_id not in self._agents:
-            self._agents[user_id] = self._app.make_agent(user_id, **kwargs)
+            agent = self._app.make_agent(user_id, **kwargs)
+            agent.on_model_change = lambda _model: self.invalidate(user_id)
+            self._agents[user_id] = agent
         return self._agents[user_id]
 
     def invalidate(self, user_id: str) -> None:
