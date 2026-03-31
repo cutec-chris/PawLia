@@ -73,19 +73,7 @@ async def start_cli(app: "App") -> None:
 
     async def _readline() -> str:
         """Read a line from stdin asynchronously so Ctrl+C can cancel it."""
-        fut: asyncio.Future[str] = loop.create_future()
-
-        def _on_readable() -> None:
-            loop.remove_reader(sys.stdin.fileno())
-            if not fut.done():
-                fut.set_result(sys.stdin.readline())
-
-        loop.add_reader(sys.stdin.fileno(), _on_readable)
-        try:
-            return await fut
-        except asyncio.CancelledError:
-            loop.remove_reader(sys.stdin.fileno())
-            raise
+        return await loop.run_in_executor(None, sys.stdin.readline)
 
     while True:
         sys.stdout.write("You: ")
