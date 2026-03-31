@@ -649,30 +649,52 @@ class MarkdownTopicBackend(RagBackend):
         slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
         return slug[:80] or "misc"
 
-    # ── LLM call ─────────────────────────────────────────────────────────────
+    # ── helpers ──────────────────────────────────────────────────────────────
 
-    async def _llm_extract_topics(self, text: str) -> list[dict]:
-        """Call the configured LLM to extract topics from *text*."""
+    def _get_existing_topic_catalog(self) -> dict[str, str]:
+        """Return {slug: title} for all existing topic files."""
+        catalog: dict[str, str] = {}
+        if not os.path.isdir(self._topics_dir):
+            return catalog
+        for fname in os.listdir(self._topics_dir):
+            if not fname.endswith(".md"):
+                continue
+            slug = fname[:-3]
+            filepath = os.path.join(self._topics_dir, fname)
+            try:
+                with open(filepath, encoding="utf-8") as f:
+                    first_line = f.readline().strip()
+                title = first_line.lstrip("#").strip() or slug
+            except Exception:
+                title = slug
+            catalog[slug] = title
+        return catalog
+
+    @staticmethod
+    def _find_similar_slug(
+        new_slug: str, existing_slugs: list[str], threshold: float = 0.7
+    ) -> Optional[str]:
+        """Return the most similar existing slug if similarity >= threshold, else None."""
+        from difflib import SequenceMatcher
+        best_slug: Optional[str] = None
+        best_ratio = 0.0
+        for existing in existing_slugs:
+            ratio = SequenceMatcher(None, new_slug, existing).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_slug = existing
+        return best_slug if best_ratio >= threshold else None
+
+    # ── LLM calls ────────────────────────────────────────────────────────────
+
+    async def _llm_call(self, system_prompt: str, user_prompt: str) -> str:
+        """Make a single LLM call and return the stripped content string."""
         import urllib.request
 
         cfg = self._cfg
         provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
         model = cfg.get("rag_model", "qwen3.5:latest")
         host = cfg.get("embedding_host", "http://localhost:11434")
-
-        system_prompt = (
-            "Du bist ein Assistent der Gesprächsprotokolle analysiert und nach "
-            "Themen sortiert. Antworte NUR mit validem JSON."
-        )
-        user_prompt = (
-            "Analysiere das folgende Gesprächsprotokoll und extrahiere die "
-            "besprochenen Themen.\nFür jedes Thema erstelle eine Zusammenfassung "
-            "mit den wichtigsten Informationen, Entscheidungen und Details.\n\n"
-            "Antworte NUR mit einem JSON-Array:\n"
-            '[{"topic": "kurzer-themenname", "title": "Titel", '
-            '"summary": "Markdown-Zusammenfassung"}]\n\n'
-            f"Gesprächsprotokoll:\n{text}"
-        )
 
         if provider == "ollama":
             url = f"{host.rstrip('/')}/api/chat"
@@ -716,7 +738,6 @@ class MarkdownTopicBackend(RagBackend):
 
         result = await asyncio.to_thread(_do)
 
-        # Extract content from response
         if provider == "ollama":
             content = result.get("message", {}).get("content", "")
         else:
@@ -726,17 +747,45 @@ class MarkdownTopicBackend(RagBackend):
                 .get("content", "")
             )
 
-        # Strip <think>…</think> blocks (common with thinking-enabled models)
-        content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
 
-        # Parse JSON
+    async def _llm_extract_topics(
+        self, text: str, existing_topics: dict[str, str]
+    ) -> list[dict]:
+        """Extract topics from *text*, guided by the existing topic catalog."""
+        existing_hint = ""
+        if existing_topics:
+            lines = "\n".join(
+                f"- {slug}: {title}" for slug, title in sorted(existing_topics.items())
+            )
+            existing_hint = (
+                f"\nBestehende Themen (verwende diese Slugs wenn der Inhalt dazu passt):\n"
+                f"{lines}\n"
+            )
+
+        system_prompt = (
+            "Du bist ein Assistent der Gesprächsprotokolle analysiert und nach "
+            "Themen sortiert. Antworte NUR mit validem JSON."
+        )
+        user_prompt = (
+            "Analysiere das folgende Gesprächsprotokoll und extrahiere die "
+            "besprochenen Themen.\nFür jedes Thema erstelle eine Zusammenfassung "
+            "mit den wichtigsten Informationen, Entscheidungen und Details.\n"
+            + existing_hint
+            + "\nAntworte NUR mit einem JSON-Array:\n"
+            '[{"topic": "bestehender-slug-oder-neuer-name", "title": "Titel", '
+            '"summary": "Markdown-Zusammenfassung"}]\n\n'
+            f"Gesprächsprotokoll:\n{text}"
+        )
+
+        content = await self._llm_call(system_prompt, user_prompt)
+
         try:
             topics = json.loads(content)
             if isinstance(topics, list):
                 return topics
         except json.JSONDecodeError:
             pass
-        # Fallback: find first JSON array in response
         m = re.search(r"\[.*\]", content, re.DOTALL)
         if m:
             try:
@@ -749,6 +798,135 @@ class MarkdownTopicBackend(RagBackend):
         logger.warning("MarkdownTopicBackend: could not parse LLM JSON, using raw")
         return [{"topic": "misc", "title": "Verschiedenes", "summary": content}]
 
+    async def _llm_match_existing(
+        self, new_slug: str, new_title: str, existing_topics: dict[str, str]
+    ) -> Optional[str]:
+        """Ask LLM if *new_slug* semantically matches an existing topic.
+
+        Returns the matched existing slug or None.
+        """
+        if not existing_topics:
+            return None
+        lines = "\n".join(
+            f"- {slug}: {title}" for slug, title in sorted(existing_topics.items())
+        )
+        system_prompt = "Antworte NUR mit validem JSON."
+        user_prompt = (
+            f"Bestehende Themen:\n{lines}\n\n"
+            f"Neues Thema: \"{new_slug}\" (Titel: \"{new_title}\")\n\n"
+            "Gehört das neue Thema inhaltlich zu einem der bestehenden? "
+            'Antworte mit JSON: {"match": "bestehender-slug"} oder {"match": null}'
+        )
+        content = await self._llm_call(system_prompt, user_prompt)
+        for pattern in (r'\{[^}]*"match"[^}]*\}', r"\{.*\}"):
+            m = re.search(pattern, content, re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group())
+                    match = data.get("match")
+                    if match and match in existing_topics:
+                        return match
+                    break
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+        return None
+
+    async def _consolidate_topics(self) -> None:
+        """Merge duplicate or strongly overlapping topic files.
+
+        Asks the LLM which topics should be combined, then merges the content
+        of the dissolved files into the keeper file and updates the tracker.
+        """
+        catalog = self._get_existing_topic_catalog()
+        if len(catalog) < 2:
+            return
+
+        lines = "\n".join(
+            f"- {slug}: {title}" for slug, title in sorted(catalog.items())
+        )
+        system_prompt = "Antworte NUR mit validem JSON."
+        user_prompt = (
+            f"Hier sind alle gespeicherten Themen (slug: titel):\n{lines}\n\n"
+            "Welche Themen sind inhaltlich gleich oder stark überlappend und "
+            "sollten zusammengeführt werden?\n"
+            "Antworte mit einem JSON-Array von Merge-Operationen, oder [] wenn keine nötig:\n"
+            '[{"keep": "slug-behalten", "merge": ["slug-aufloesen1", "slug-aufloesen2"]}]'
+        )
+        content = await self._llm_call(system_prompt, user_prompt)
+
+        merges: list[dict] = []
+        try:
+            data = json.loads(content)
+            if isinstance(data, list):
+                merges = data
+        except json.JSONDecodeError:
+            m = re.search(r"\[.*\]", content, re.DOTALL)
+            if m:
+                try:
+                    data = json.loads(m.group())
+                    if isinstance(data, list):
+                        merges = data
+                except json.JSONDecodeError:
+                    pass
+
+        if not merges:
+            logger.debug("MarkdownTopicBackend: consolidation — no merges needed")
+            return
+
+        tracker = self._load_tracker()
+        merged_count = 0
+
+        for op in merges:
+            keep_slug = op.get("keep", "")
+            merge_slugs = [s for s in op.get("merge", []) if s != keep_slug]
+            if not keep_slug or not merge_slugs:
+                continue
+
+            keep_path = os.path.join(self._topics_dir, f"{keep_slug}.md")
+            if not os.path.exists(keep_path):
+                logger.warning(
+                    "MarkdownTopicBackend: consolidate keep target missing: %s", keep_slug
+                )
+                continue
+
+            for m_slug in merge_slugs:
+                merge_path = os.path.join(self._topics_dir, f"{m_slug}.md")
+                if not os.path.exists(merge_path):
+                    continue
+                try:
+                    with open(merge_path, encoding="utf-8") as f:
+                        merge_content = f.read()
+                    # Drop the H1 header of the dissolved file before appending
+                    body_lines = merge_content.split("\n")
+                    if body_lines and body_lines[0].startswith("# "):
+                        merge_content = "\n".join(body_lines[1:]).lstrip("\n")
+
+                    with open(keep_path, "a", encoding="utf-8") as f:
+                        f.write(f"\n\n{merge_content}")
+
+                    os.remove(merge_path)
+                    merged_count += 1
+                    logger.info(
+                        "MarkdownTopicBackend: merged '%s' → '%s'", m_slug, keep_slug
+                    )
+
+                    # Update tracker: replace dissolved slug with keeper everywhere
+                    for doc_id, slugs in tracker.items():
+                        if m_slug in slugs:
+                            tracker[doc_id] = [
+                                keep_slug if s == m_slug else s for s in slugs
+                            ]
+                except Exception as exc:
+                    logger.warning(
+                        "MarkdownTopicBackend: consolidation error for %s: %s", m_slug, exc
+                    )
+
+        if merged_count:
+            self._save_tracker()
+            logger.info(
+                "MarkdownTopicBackend: consolidated %d topic file(s)", merged_count
+            )
+
     # ── RagBackend interface ────────────────────────────────────────────────
 
     async def insert(self, text: str, doc_id: str) -> None:
@@ -757,10 +935,13 @@ class MarkdownTopicBackend(RagBackend):
 
         os.makedirs(self._topics_dir, exist_ok=True)
         tracker = self._load_tracker()
+        existing_topics = self._get_existing_topic_catalog()
 
-        topics = await self._llm_extract_topics(text)
+        # Pass 1: extract topics, guided by the existing catalog (Stufen 1+5)
+        topics = await self._llm_extract_topics(text, existing_topics)
 
         slugs: list[str] = []
+        new_slugs_created: list[str] = []
         for t in topics:
             topic_name = t.get("topic", "misc")
             title = t.get("title", topic_name)
@@ -769,6 +950,27 @@ class MarkdownTopicBackend(RagBackend):
                 continue
 
             slug = self._slugify(topic_name)
+
+            # Idee 4: string-similarity pre-filter (no LLM, catches typos/variants)
+            if slug not in existing_topics:
+                similar = self._find_similar_slug(slug, list(existing_topics.keys()))
+                if similar:
+                    logger.debug(
+                        "MarkdownTopicBackend: '%s' → '%s' via string similarity",
+                        slug, similar,
+                    )
+                    slug = similar
+
+            # Stufe 2: semantic LLM matching for still-unknown slugs
+            if slug not in existing_topics:
+                matched = await self._llm_match_existing(slug, title, existing_topics)
+                if matched:
+                    logger.debug(
+                        "MarkdownTopicBackend: '%s' → '%s' via LLM match", slug, matched
+                    )
+                    slug = matched
+
+            is_new = slug not in existing_topics
             slugs.append(slug)
             filepath = os.path.join(self._topics_dir, f"{slug}.md")
 
@@ -782,6 +984,9 @@ class MarkdownTopicBackend(RagBackend):
             else:
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(f"# {title}\n{section}")
+                if is_new:
+                    new_slugs_created.append(slug)
+                    existing_topics[slug] = title  # keep catalog current for later iterations
 
         tracker[doc_id] = slugs
         self._indexed.add(doc_id)
@@ -790,6 +995,17 @@ class MarkdownTopicBackend(RagBackend):
             "MarkdownTopicBackend: indexed %d topics for %s: %s",
             len(slugs), doc_id, slugs,
         )
+
+        # Stufe 3: consolidate after every run that produced new topic files
+        if new_slugs_created:
+            logger.info(
+                "MarkdownTopicBackend: %d new topic(s), running consolidation: %s",
+                len(new_slugs_created), new_slugs_created,
+            )
+            try:
+                await self._consolidate_topics()
+            except Exception as exc:
+                logger.warning("MarkdownTopicBackend: consolidation failed: %s", exc)
 
     async def wait_for_indexed(
         self, doc_id: str, timeout: int = 120, poll_interval: float = 5.0,

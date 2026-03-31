@@ -7,6 +7,7 @@ query interface and provides manual index/status commands for debugging.
 Usage:
     memory.py <user_id> search <question>
     memory.py <user_id> index          # manual trigger (debug)
+    memory.py <user_id> consolidate    # merge duplicate topic files
     memory.py <user_id> status
 """
 
@@ -107,6 +108,23 @@ async def cmd_index(user_id: str):
     print(json.dumps({"status": "ok", "message": "Indexing complete"}))
 
 
+async def cmd_consolidate(user_id: str):
+    """Manually trigger topic consolidation on the existing index."""
+    index_path = _SESSION_DIR / user_id / "memory_index"
+    if not index_path.exists():
+        print(json.dumps({"error": "Kein Index vorhanden"}))
+        sys.exit(1)
+
+    from pawlia.rag_backend import create_backend, MarkdownTopicBackend
+    backend = create_backend(str(index_path), CFG)
+    if not isinstance(backend, MarkdownTopicBackend):
+        print(json.dumps({"error": "consolidate ist nur für das markdown-Backend verfügbar"}))
+        sys.exit(1)
+
+    await backend._consolidate_topics()
+    print(json.dumps({"status": "ok", "message": "Konsolidierung abgeschlossen"}))
+
+
 async def cmd_status(user_id: str):
     backend = CFG.get("rag_backend", "markdown")
     tracker_path = _SESSION_DIR / user_id / "memory_index" / f"indexed_files_{backend}.json"
@@ -140,7 +158,7 @@ async def main():
     env_user_id = os.environ.get("PAWLIA_USER_ID")
 
     if env_user_id and len(sys.argv) >= 2 and sys.argv[1] in (
-        "search", "index", "status"
+        "search", "index", "status", "consolidate"
     ):
         user_id = env_user_id
         command = sys.argv[1]
@@ -161,6 +179,8 @@ async def main():
         await cmd_search(user_id, " ".join(args))
     elif command == "index":
         await cmd_index(user_id)
+    elif command == "consolidate":
+        await cmd_consolidate(user_id)
     elif command == "status":
         await cmd_status(user_id)
     else:
