@@ -71,13 +71,30 @@ async def start_cli(app: "App") -> None:
         # Windows doesn't support add_signal_handler; fall back to signal.signal
         signal.signal(signal.SIGINT, lambda *_: _on_sigint())
 
+    async def _readline() -> str:
+        """Read a line from stdin asynchronously so Ctrl+C can cancel it."""
+        fut: asyncio.Future[str] = loop.create_future()
+
+        def _on_readable() -> None:
+            loop.remove_reader(sys.stdin.fileno())
+            if not fut.done():
+                fut.set_result(sys.stdin.readline())
+
+        loop.add_reader(sys.stdin.fileno(), _on_readable)
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            loop.remove_reader(sys.stdin.fileno())
+            raise
+
     while True:
         sys.stdout.write("You: ")
         sys.stdout.flush()
         _waiting_for_input = True
+        active_fut = asyncio.current_task()
 
         try:
-            user_input = await loop.run_in_executor(None, sys.stdin.readline)
+            user_input = await _readline()
             if not user_input:
                 print()
                 break
@@ -87,6 +104,7 @@ async def start_cli(app: "App") -> None:
             break
         finally:
             _waiting_for_input = False
+            active_fut = None
 
         if user_input.strip().lower() in ("exit", "quit"):
             break
