@@ -139,18 +139,16 @@ def cmd_model(args) -> None:
         _out({"success": False, "error": f"Unknown model '{args.name}'", "available_models": available})
         return
 
-    resolved = models[args.name]["model"]
-
-    # set model — write file for consistent readback, directive triggers in-memory update
+    # set model — write config key (not resolved name) so provider info is preserved
     user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
     session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
     if user_id and session_dir:
         override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
         os.makedirs(os.path.dirname(override_path), exist_ok=True)
         with open(override_path, "w", encoding="utf-8") as f:
-            f.write(resolved)
-    _out({"__directive__": "set_model", "model": resolved})
-    _out({"success": True, "model": resolved, "message": f"Model auf '{resolved}' gesetzt."})
+            f.write(args.name)
+    _out({"__directive__": "set_model", "model": args.name})
+    _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
 
 
 def cmd_private(args) -> None:
