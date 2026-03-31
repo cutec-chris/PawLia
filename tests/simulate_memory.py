@@ -98,7 +98,7 @@ def test_append_exchange(tmp: str):
     mm.append_exchange(s, "Hallo!", "Hi, wie kann ich helfen?")
     check("exchange_count after 1", s.exchange_count == 1)
     check("exchanges list length", len(s.exchanges) == 1)
-    check("exchange content", s.exchanges[0] == ("Hallo!", "Hi, wie kann ich helfen?"))
+    check("exchange content", s.exchanges[0] == ("Hallo!", "Hi, wie kann ich helfen?", None))
     check("daily_history not empty", len(s.daily_history) > 0)
     check("daily_history contains user text", "Hallo!" in s.daily_history)
     check("daily_history contains bot text", "Hi, wie kann ich helfen?" in s.daily_history)
@@ -152,7 +152,7 @@ def test_append_empty_strings(tmp: str):
 
     mm.append_exchange(s, "", "")
     check("Empty exchange counted", s.exchange_count == 1)
-    check("Empty exchange in list", s.exchanges[0] == ("", ""))
+    check("Empty exchange in list", s.exchanges[0] == ("", "", None))
 
     mm.append_exchange(s, "Q", "")
     check("Empty bot response tracked", s.exchange_count == 2)
@@ -181,9 +181,9 @@ def test_exchange_parsing(tmp: str):
     s2 = mm2.load_session("parse_user")
 
     check("Reloaded exchange_count", s2.exchange_count == 3)
-    check("Reloaded exchanges[0]", s2.exchanges[0] == ("Frage eins", "Antwort eins"))
-    check("Reloaded exchanges[1]", s2.exchanges[1] == ("Frage zwei", "Antwort zwei"))
-    check("Reloaded exchanges[2]", s2.exchanges[2] == ("Frage drei", "Antwort drei"))
+    check("Reloaded exchanges[0]", s2.exchanges[0] == ("Frage eins", "Antwort eins", None))
+    check("Reloaded exchanges[1]", s2.exchanges[1] == ("Frage zwei", "Antwort zwei", None))
+    check("Reloaded exchanges[2]", s2.exchanges[2] == ("Frage drei", "Antwort drei", None))
 
 
 def test_parse_exchanges_static(tmp: str):
@@ -211,8 +211,8 @@ def test_parse_exchanges_static(tmp: str):
     )
     result2 = parse(multi)
     check("3 exchanges parsed", len(result2) == 3)
-    check("Multi Q1", result2[0] == ("Q1", "A1"))
-    check("Multi Q3", result2[2] == ("Q3", "A3"))
+    check("Multi Q1", result2[0] == ("Q1", "A1", None))
+    check("Multi Q3", result2[2] == ("Q3", "A3", None))
 
     # Multiline assistant response
     multiline = "\n[10:00:00] User: explain\nAssistant: line1\nline2\nline3"
@@ -300,12 +300,11 @@ def test_threads(tmp: str):
     mm.append_exchange(s, "Main 3", "Reply 3")
 
     thread_ctx = mm.get_thread_context(s, "thread_abc")
-    check("Thread seeded with main exchanges", len(thread_ctx) == 3)
-    check("Seed content correct", thread_ctx[0] == ("Main 1", "Reply 1"))
+    check("New thread starts empty", len(thread_ctx) == 0)
 
     mm.append_thread_exchange(s, "thread_abc", "Thread Frage", "Thread Antwort")
-    check("Thread has 4 exchanges now", len(thread_ctx) == 4)
-    check("Thread exchange content", thread_ctx[3] == ("Thread Frage", "Thread Antwort"))
+    check("Thread has 1 exchange", len(thread_ctx) == 1)
+    check("Thread exchange content", thread_ctx[0] == ("Thread Frage", "Thread Antwort", None))
     check("Main session still 3 exchanges", s.exchange_count == 3)
 
     thread_path = mm._thread_daily_path("thread_user", "thread_abc", s.current_date_str)
@@ -313,13 +312,13 @@ def test_threads(tmp: str):
     with open(thread_path, encoding="utf-8") as f:
         thread_disk = f.read()
     check("Thread log contains thread text", "Thread Frage" in thread_disk)
-    check("Seeded exchanges not in thread log", "Main 1" not in thread_disk)
+    check("Main exchanges not in thread log", "Main 1" not in thread_disk)
 
     thread_ctx2 = mm.get_thread_context(s, "thread_xyz")
-    check("Second thread also seeded", len(thread_ctx2) == 3)
+    check("Second thread also starts empty", len(thread_ctx2) == 0)
     mm.append_thread_exchange(s, "thread_xyz", "Other Q", "Other A")
-    check("Second thread has 4", len(thread_ctx2) == 4)
-    check("First thread still 4", len(thread_ctx) == 4)
+    check("Second thread has 1", len(thread_ctx2) == 1)
+    check("First thread still 1", len(thread_ctx) == 1)
 
 
 def test_private_threads(tmp: str):
@@ -355,7 +354,7 @@ def test_private_threads(tmp: str):
 
 
 def test_thread_seed_limit(tmp: str):
-    section("Thread seed limit")
+    section("Thread isolation (no seeding)")
     from pawlia.memory import MemoryManager
 
     mm = MemoryManager(tmp)
@@ -365,18 +364,14 @@ def test_thread_seed_limit(tmp: str):
         mm.append_exchange(s, f"Main Q{i}", f"Main A{i}")
 
     ctx = mm.get_thread_context(s, "t_default")
-    check("Default seed is 5 exchanges", len(ctx) == 5)
-    check("Seed starts from end", ctx[0] == ("Main Q5", "Main A5"))
+    check("Thread starts empty regardless of main exchanges", len(ctx) == 0)
 
-    ctx2 = mm.get_thread_context(s, "t_small", seed_n=2)
-    check("Custom seed_n=2", len(ctx2) == 2)
-    check("Custom seed from end", ctx2[0] == ("Main Q8", "Main A8"))
+    ctx2 = mm.get_thread_context(s, "t_other")
+    check("Second thread also starts empty", len(ctx2) == 0)
 
-    ctx3 = mm.get_thread_context(s, "t_zero", seed_n=0)
-    check("seed_n=0 -> empty", len(ctx3) == 0)
-
-    ctx4 = mm.get_thread_context(s, "t_large", seed_n=100)
-    check("seed_n > exchanges -> all", len(ctx4) == 10)
+    mm.append_thread_exchange(s, "t_default", "Thread Q", "Thread A")
+    check("Thread has 1 after append", len(ctx) == 1)
+    check("Other thread unaffected", len(ctx2) == 0)
 
 
 def test_empty_thread_no_seed(tmp: str):
@@ -405,8 +400,8 @@ def test_thread_reload_from_disk(tmp: str):
     s2 = mm2.load_session("trl_user")
     ctx = mm2.get_thread_context(s2, "t1")
     check("Thread exchanges reloaded", len(ctx) == 2)
-    check("Thread Q1 reloaded", ctx[0] == ("Thread Q1", "Thread A1"))
-    check("Thread Q2 reloaded", ctx[1] == ("Thread Q2", "Thread A2"))
+    check("Thread Q1 reloaded", ctx[0] == ("Thread Q1", "Thread A1", None))
+    check("Thread Q2 reloaded", ctx[1] == ("Thread Q2", "Thread A2", None))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -512,28 +507,18 @@ def test_repetition_trigger(tmp: str):
 
 
 def test_idle_trigger(tmp: str):
-    section("Idle trigger")
-    from pawlia.memory import MemoryManager, IDLE_TIMEOUT_SECONDS
+    section("Idle trigger (handled by Scheduler, not should_summarize)")
+    from pawlia.memory import MemoryManager
 
+    # Idle-based summarization is now managed by the Scheduler, not should_summarize.
+    # should_summarize only returns "force", "exchange_limit", or "repetition".
     mm = MemoryManager(tmp)
     s = mm.load_session("idle_user")
     mm.append_exchange(s, "Q", "A")
     s.last_activity = datetime.now() - timedelta(minutes=10)
     trigger = mm.should_summarize(s)
-    check("Idle trigger fires", trigger == "idle", f"got: {trigger}")
-
-    # Boundary: just under threshold
-    mm2 = MemoryManager(tmp)
-    s2 = mm2.load_session("idle_boundary")
-    mm2.append_exchange(s2, "Q", "A")
-    s2.last_activity = datetime.now() - timedelta(seconds=IDLE_TIMEOUT_SECONDS - 10)
-    check("No idle trigger under threshold", mm2.should_summarize(s2) == "")
-
-    # Idle with 0 exchanges -> no trigger
-    mm3 = MemoryManager(tmp)
-    s3 = mm3.load_session("idle_noex")
-    s3.last_activity = datetime.now() - timedelta(hours=1)
-    check("No idle trigger with 0 exchanges", mm3.should_summarize(s3) == "")
+    check("Idle trigger not in should_summarize", trigger != "idle", f"got: {trigger}")
+    check("No trigger for 1 exchange", trigger == "", f"got: {trigger}")
 
 
 def test_detect_repetition_static(tmp: str):
@@ -587,8 +572,9 @@ def test_summarize(tmp: str):
     mm.summarize(s, summary_text)
 
     check("Summary stored in session", s.summary == summary_text)
-    check("Exchanges cleared", len(s.exchanges) == 0)
-    check("exchange_count reset", s.exchange_count == 0)
+    # summarize keeps up to KEEP_RECENT_EXCHANGES (5); with 3 exchanges all are kept
+    check("Exchanges kept (3 < 5 limit)", len(s.exchanges) == 3)
+    check("exchange_count kept", s.exchange_count == 3)
     check("daily_history cleared", s.daily_history == "")
     check("recent_bot_responses cleared", len(s.recent_bot_responses) == 0)
 
@@ -620,17 +606,18 @@ def test_summarize_then_continue(tmp: str):
 
     mm.summarize(s, "* Prior conversation summary")
 
+    # summarize keeps up to KEEP_RECENT_EXCHANGES (5); with 5 exchanges all are kept
     # Continue adding exchanges after summarization
     mm.append_exchange(s, "New Q1", "New A1")
     mm.append_exchange(s, "New Q2", "New A2")
-    check("exchange_count after summary + 2", s.exchange_count == 2)
-    check("exchanges are new ones", s.exchanges[0] == ("New Q1", "New A1"))
+    check("exchange_count after summary + 2", s.exchange_count == 7)
+    check("first exchange is oldest kept", s.exchanges[0] == ("Q0", "A0", None))
     check("summary preserved", s.summary == "* Prior conversation summary")
 
-    # Second summarization
+    # Second summarization — 7 exchanges, keeps last 5
     mm.summarize(s, "* Updated summary with new info")
     check("Summary replaced", s.summary == "* Updated summary with new info")
-    check("Exchanges cleared again", s.exchange_count == 0)
+    check("Exchanges trimmed to 5", s.exchange_count == 5)
 
 
 def test_summarize_whitespace(tmp: str):
@@ -657,15 +644,14 @@ def test_system_prompt(tmp: str):
     s = mm.load_session("prompt_user")
 
     ws = mm._workspace_dir("prompt_user")
-    with open(os.path.join(ws, "IDENTITY.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(ws, "identity.md"), "w", encoding="utf-8") as f:
         f.write("- **Name:** TestBot\n- **Creature:** Cat")
-    with open(os.path.join(ws, "USER.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(ws, "user.md"), "w", encoding="utf-8") as f:
         f.write("- **Name:** Chris\n- **Language:** Deutsch")
+    with open(os.path.join(ws, "memory.md"), "w", encoding="utf-8") as f:
+        f.write("Nutzer bevorzugt Deutsch.")
 
-    with open(mm._memory_path("prompt_user"), "w", encoding="utf-8") as f:
-        f.write("Chris mag Pizza.")
     s.user_memory = "Chris mag Pizza."
-
     s.summary = "* Chris fragte nach dem Wetter"
 
     prompt = mm.build_system_prompt(s)
@@ -676,7 +662,7 @@ def test_system_prompt(tmp: str):
     check("Prompt contains summary", "Wetter" in prompt)
     check("Prompt contains skill instruction", "MUST call" in prompt)
     check("Prompt contains memory.md instruction", "memory.md" in prompt)
-    check("Prompt contains separator", "---" in prompt)
+    check("Prompt contains separator", "════════════════════" in prompt)
 
 
 def test_system_prompt_empty(tmp: str):
@@ -707,25 +693,30 @@ def test_system_prompt_no_summary_no_memory(tmp: str):
 
 
 def test_system_prompt_multiple_md_files(tmp: str):
-    section("System prompt (multiple .md files)")
+    section("System prompt (identity .md files only)")
     from pawlia.memory import MemoryManager
 
     mm = MemoryManager(tmp)
     s = mm.load_session("multi_md_user")
 
     ws = mm._workspace_dir("multi_md_user")
-    for name in ["AAA.md", "BBB.md", "CCC.md"]:
-        with open(os.path.join(ws, name), "w", encoding="utf-8") as f:
-            f.write(f"Content of {name}")
+    # Only identity files are included: identity.md, user.md, soul.md, memory.md
+    with open(os.path.join(ws, "identity.md"), "w", encoding="utf-8") as f:
+        f.write("Content of identity.md")
+    with open(os.path.join(ws, "user.md"), "w", encoding="utf-8") as f:
+        f.write("Content of user.md")
+    # Non-identity .md files should NOT be included
+    with open(os.path.join(ws, "random.md"), "w", encoding="utf-8") as f:
+        f.write("Content of random.md")
 
     prompt = mm.build_system_prompt(s)
-    check("AAA.md included", "Content of AAA.md" in prompt)
-    check("BBB.md included", "Content of BBB.md" in prompt)
-    check("CCC.md included", "Content of CCC.md" in prompt)
+    check("AAA.md included", "Content of identity.md" in prompt)
+    check("BBB.md included", "Content of user.md" in prompt)
+    check("CCC.md included", "Content of random.md" not in prompt)
 
-    # Check sorted order: AAA before CCC
-    aaa_pos = prompt.index("Content of AAA.md")
-    ccc_pos = prompt.index("Content of CCC.md")
+    # Check identity.md appears before user.md
+    aaa_pos = prompt.index("Content of identity.md")
+    ccc_pos = prompt.index("Content of user.md")
     check("Files sorted alphabetically", aaa_pos < ccc_pos)
 
 
@@ -1137,30 +1128,24 @@ def test_scheduler_idle_minutes(tmp: str):
 
 
 def test_scheduler_llm_gate(tmp: str):
-    section("Scheduler LLM gate")
+    section("Scheduler LLM formatter")
     from pawlia.scheduler import Scheduler
 
     sched = Scheduler(tmp)
 
-    check("Not busy initially", sched.llm_busy is False)
+    # LLM gate (llm_busy/acquire_llm/release_llm) was removed.
+    # Verify Scheduler still has touch_activity and set_llm_formatter.
+    check("touch_activity callable", callable(getattr(sched, "touch_activity", None)))
+    check("set_llm_formatter callable", callable(getattr(sched, "set_llm_formatter", None)))
 
-    sched.acquire_llm()
-    check("Busy after acquire", sched.llm_busy is True)
+    # set_llm_formatter accepts a callable
+    called = []
+    async def dummy_formatter(uid, msg):
+        called.append((uid, msg))
+        return msg
 
-    sched.acquire_llm()
-    check("Still busy (counter=2)", sched.llm_busy is True)
-
-    sched.release_llm()
-    check("Still busy (counter=1)", sched.llm_busy is True)
-
-    sched.release_llm()
-    check("Free after all released", sched.llm_busy is False)
-
-    # Extra release doesn't go negative
-    sched.release_llm()
-    sched.release_llm()
-    check("No negative after extra release", sched.llm_busy is False)
-    check("Counter is 0", sched._llm_active == 0)
+    sched.set_llm_formatter(dummy_formatter)
+    check("Formatter stored", sched._llm_formatter is dummy_formatter)
 
 
 def test_scheduler_priority_constants(tmp: str):
@@ -1600,8 +1585,8 @@ def test_many_exchanges(tmp: str):
     mm2 = MemoryManager(tmp)
     s2 = mm2.load_session("stress_user")
     check(f"Reloaded {n} exchanges", s2.exchange_count == n)
-    check("First exchange correct", s2.exchanges[0] == ("Question 0", "Answer 0 with some content here"))
-    check("Last exchange correct", s2.exchanges[-1] == (f"Question {n-1}", f"Answer {n-1} with some content here"))
+    check("First exchange correct", s2.exchanges[0] == ("Question 0", "Answer 0 with some content here", None))
+    check("Last exchange correct", s2.exchanges[-1] == (f"Question {n-1}", f"Answer {n-1} with some content here", None))
 
 
 def test_many_threads(tmp: str):
@@ -1622,7 +1607,7 @@ def test_many_threads(tmp: str):
     check(f"{n_threads} threads created", len(s.thread_contexts) == n_threads)
     for i in range(n_threads):
         tid = f"thread_{i:03d}"
-        check(f"Thread {tid} has 2 exchanges", len(s.thread_contexts[tid]) == 2)
+        check(f"Thread {tid} has 1 exchange", len(s.thread_contexts[tid]) == 1)
 
 
 def test_concurrent_users(tmp: str):
@@ -1689,11 +1674,12 @@ def test_summarize_resume_cycle(tmp: str):
         mm.summarize(s, f"Summary after cycle {cycle}")
 
     check("Final summary is cycle 4", "cycle 4" in s.summary)
-    check("Exchanges cleared after last cycle", s.exchange_count == 0)
+    # summarize keeps last KEEP_RECENT_EXCHANGES (5) from 10 exchanges per cycle
+    check("Exchanges trimmed after last cycle", s.exchange_count == 5)
 
     # Add a few more after last cycle
     mm.append_exchange(s, "Post-cycle Q", "Post-cycle A")
-    check("Post-cycle exchange", s.exchange_count == 1)
+    check("Post-cycle exchange", s.exchange_count == 6)
 
     # Daily log has ALL exchanges (append-only)
     dp = mm._daily_path("cycle_user", s.current_date_str)
@@ -1988,11 +1974,9 @@ def test_long_conversation_threads(tmp: str):
     user = "long_conv_user"
     s = mm.load_session(user)
 
-    # Start a thread — should get seeded with recent main exchanges
+    # Start a thread — starts empty, isolated from main exchanges
     ctx = mm.get_thread_context(s, "topic_cooking")
-    seed_count = len(ctx)
-    check("Thread seeded", seed_count > 0)
-    check("Thread seed <= 5", seed_count <= 5)
+    check("Thread starts empty", len(ctx) == 0)
 
     # Add topic-specific exchanges in the thread
     mm.append_thread_exchange(s, "topic_cooking", "Wie mache ich Pesto?",
@@ -2001,7 +1985,7 @@ def test_long_conversation_threads(tmp: str):
                               "Ja, Walnüsse sind eine tolle günstige Alternative. Leicht anrösten für mehr Geschmack.")
 
     ctx_after = mm.get_thread_context(s, "topic_cooking")
-    check("Thread has seed + 2 new", len(ctx_after) == seed_count + 2)
+    check("Thread has 2 exchanges", len(ctx_after) == 2)
 
     # Pesto exchange should NOT appear in main session
     check("Main has no Pesto", "Pesto" not in s.daily_history)
@@ -2087,7 +2071,7 @@ def test_long_conversation_multi_summarize(tmp: str):
 
         summary = f"Cycle {cycle} summary: {exchanges_per_cycle} exchanges about various topics."
         mm.summarize(s, summary)
-        check(f"Cycle {cycle}: exchanges cleared", s.exchange_count == 0)
+        check(f"Cycle {cycle}: exchanges trimmed to 5", s.exchange_count == 5)
         check(f"Cycle {cycle}: summary updated", f"Cycle {cycle}" in s.summary)
 
     check(f"Total inserted: {total_inserted}", total_inserted == cycles * exchanges_per_cycle)
