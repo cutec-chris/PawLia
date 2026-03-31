@@ -634,6 +634,19 @@ class ChatAgent(BaseAgent):
                         self.logger.info("Directive: model override set to '%s'", model)
                     if self.on_model_change:
                         self.on_model_change(model)
+            elif directive == "set_private":
+                if self.memory and self.session:
+                    desired: bool = bool(obj.get("private", True))
+                    target_thread: Optional[str] = obj.get("thread") or thread_id
+                    if target_thread:
+                        current = target_thread in self.session.private_threads
+                        if current != desired:
+                            self.memory.toggle_private_thread(self.session, target_thread)
+                        self.logger.info("Directive: thread '%s' private=%s", target_thread, desired)
+                    else:
+                        if self.session.private != desired:
+                            self.memory.toggle_private(self.session)
+                        self.logger.info("Directive: session private=%s", desired)
             else:
                 self.logger.warning("Unknown directive: %s", directive)
                 clean_lines.append(line)
