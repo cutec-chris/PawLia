@@ -73,6 +73,20 @@ async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "au
         return None
 
 
+def _bandpass_pcm(pcm: "np.ndarray", sample_rate: int, low_hz: float = 80.0, high_hz: float = 8000.0) -> "np.ndarray":
+    """FFT-based bandpass filter — removes wind/rumble (<80 Hz) and high-freq hiss (>8 kHz).
+
+    Pure numpy, no extra dependencies.
+    """
+    import numpy as np
+
+    spectrum = np.fft.rfft(pcm)
+    freqs = np.fft.rfftfreq(len(pcm), d=1.0 / sample_rate)
+    spectrum[(freqs < low_hz) | (freqs > high_hz)] = 0.0
+    filtered = np.fft.irfft(spectrum, n=len(pcm))
+    return filtered.astype(np.float32)
+
+
 async def transcribe_pcm(
     pcm_float32: "np.ndarray",
     sample_rate: int,
@@ -87,6 +101,7 @@ async def transcribe_pcm(
 
     import numpy as np
 
+    pcm_float32 = _bandpass_pcm(pcm_float32, sample_rate)
     pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)
 
     buf = io.BytesIO()
@@ -116,7 +131,7 @@ async def _transcribe_api(audio_bytes: bytes, provider: str, cfg: Dict, mime: st
     if not base_url:
         raise ValueError(f"transcription: no base_url for provider '{provider}'")
 
-    data: Dict[str, Any] = {"model": model}
+    data: Dict[str, Any] = {"model": model, "temperature": "0"}
     if language:
         data["language"] = language
 
@@ -160,7 +175,7 @@ async def _transcribe_local(audio_bytes: bytes, cfg: Dict, mime: str) -> Optiona
 
         try:
             model = WhisperModel(model_size, device=device, compute_type=compute_type)
-            kw: Dict[str, Any] = {}
+            kw: Dict[str, Any] = {"temperature": 0, "no_speech_threshold": 0.6}
             if language:
                 kw["language"] = language
             segments, _ = model.transcribe(tmp_path, **kw)
