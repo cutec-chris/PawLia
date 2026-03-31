@@ -339,7 +339,7 @@ class ChatAgent(BaseAgent):
                 runner = self.skill_runner_factory(skill)
                 runner.on_step = _on_skill_step
                 result = await runner.run(query=query)
-                result = self._process_directives(result)
+                result = self._process_directives(result, thread_id)
                 if _on_skill_done:
                     try:
                         await _on_skill_done(skill_name)
@@ -517,7 +517,7 @@ class ChatAgent(BaseAgent):
                 runner = self.skill_runner_factory(skill)
                 runner.on_step = _on_skill_step
                 skill_result = await runner.run(query=query)
-                skill_result = self._process_directives(skill_result)
+                skill_result = self._process_directives(skill_result, thread_id)
                 if _on_skill_done:
                     try:
                         await _on_skill_done(skill_name)
@@ -606,7 +606,7 @@ class ChatAgent(BaseAgent):
 
     _DIRECTIVE_RE = re.compile(r'\{"__directive__"\s*:.*\}')
 
-    def _process_directives(self, result: str) -> str:
+    def _process_directives(self, result: str, thread_id: Optional[str] = None) -> str:
         """Extract and handle ``__directive__`` JSON lines from skill output.
 
         Returns the result string with directive lines removed.
@@ -626,10 +626,12 @@ class ChatAgent(BaseAgent):
             if directive == "set_model":
                 model = obj.get("model")
                 if model and self.memory and self.session:
-                    if self._model_name_resolver:
-                        model = self._model_name_resolver(model)
-                    self.memory.set_model_override(self.session, model)
-                    self.logger.info("Directive: model override set to '%s'", model)
+                    if thread_id:
+                        self.memory.set_thread_model_override(self.session, thread_id, model)
+                        self.logger.info("Directive: thread '%s' model override set to '%s'", thread_id, model)
+                    else:
+                        self.memory.set_model_override(self.session, model)
+                        self.logger.info("Directive: model override set to '%s'", model)
                     if self.on_model_change:
                         self.on_model_change(model)
             else:
