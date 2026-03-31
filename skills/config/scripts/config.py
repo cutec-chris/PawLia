@@ -154,29 +154,11 @@ def cmd_model(args) -> None:
 
 
 def cmd_private(args) -> None:
-    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
-    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
-    if not user_id or not session_dir:
-        _out({"success": False, "error": "user-id and session-dir required"})
-        return
-    memory_dir = os.path.join(session_dir, user_id, "memory")
-    os.makedirs(memory_dir, exist_ok=True)
-
-    if args.thread:
-        path = os.path.join(memory_dir, f"private_thread_{args.thread}")
-    else:
-        path = os.path.join(memory_dir, "private_session")
-
     scope = f"Thread {args.thread}" if args.thread else "Session"
+    private = not args.off
 
-    if args.off:
-        if os.path.isfile(path):
-            os.remove(path)
-        _out({"success": True, "private": False, "scope": scope})
-    else:
-        with open(path, "w") as f:
-            f.write("")
-        _out({"success": True, "private": True, "scope": scope})
+    _out({"__directive__": "set_private", "private": private, "thread": args.thread})
+    _out({"success": True, "private": private, "scope": scope})
 
 
 def cmd_set(args) -> None:
@@ -226,8 +208,6 @@ def main():
     p = sub.add_parser("private")
     p.add_argument("--thread", default=None, help="Thread ID (omit for session-level)")
     p.add_argument("--off", action="store_true", help="Disable private mode")
-    p.add_argument("--user-id", default=None)
-    p.add_argument("--session-dir", default=None)
 
     args = parser.parse_args()
     if not args.cmd:
