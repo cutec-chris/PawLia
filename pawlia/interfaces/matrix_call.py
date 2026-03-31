@@ -225,7 +225,7 @@ class CallSession:
     """Manages a single active VoIP call."""
 
     # Silence detection: RMS below this → silence
-    SILENCE_THRESHOLD = 0.015
+    SILENCE_THRESHOLD = 0.02
     # Seconds of silence that end a speech chunk
     SILENCE_SECONDS = 1.5
     # Minimum seconds of speech before we transcribe (filter short noise bursts)
