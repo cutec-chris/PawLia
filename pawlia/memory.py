@@ -228,6 +228,7 @@ class MemoryManager:
             return self._sessions[user_id]
 
         self._memory_dir(user_id)  # ensure dirs exist
+        self._ensure_identity_files(self._workspace_dir(user_id))
 
         session = Session(user_id)
         session.daily_history = self._read(self._daily_path(user_id, session.current_date_str))
@@ -357,7 +358,7 @@ class MemoryManager:
         parts: list[str] = []
 
         # Only include the identity files that define the assistant's persona
-        _IDENTITY_FILES = ("identity.md", "user.md", "soul.md", "memory.md")
+        _IDENTITY_FILES = ("bootstrap.md", "identity.md", "user.md", "soul.md", "memory.md")
         ws_files = [f for f in _IDENTITY_FILES
                     if os.path.isfile(os.path.join(workspace, f))]
 

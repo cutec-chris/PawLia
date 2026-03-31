@@ -40,6 +40,7 @@ _FAKE_TOOL_CALL_NUDGE = (
     "Use a real tool call now."
 )
 _MAX_FAKE_TOOL_RETRIES = 5
+_EMPTY_TURN2_NUDGE = "The tool finished. Please respond to the user now."
 
 
 def _split_sentences(text: str) -> Tuple[List[str], str]:
@@ -366,6 +367,14 @@ class ChatAgent(BaseAgent):
         final = await self._invoke(messages, llm=unbound_llm)
         self.logger.debug("Turn 2 response: content=%s",
                           repr(final.content[:200]) if final.content else "(empty)")
+        if not final.content:
+            self.logger.warning("Turn 2 returned empty response, nudging LLM")
+            final = await self._invoke(
+                messages + [final, HumanMessage(content=_EMPTY_TURN2_NUDGE)],
+                llm=unbound_llm,
+            )
+            self.logger.debug("Turn 2 nudge response: content=%s",
+                              repr(final.content[:200]) if final.content else "(empty)")
         result = self.extract_text(final)
         if _override_notice:
             result = _override_notice + result
