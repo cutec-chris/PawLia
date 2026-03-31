@@ -313,6 +313,65 @@ class TestBuildSystemPrompt:
             assert "Conversation Mode: Phone Call" not in prompt
 
 
+class TestBootstrapCopying:
+    """Verify bootstrap.md is copied into the workspace on new sessions."""
+
+    def test_bootstrap_copied_when_identity_files_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_bootstrap")
+            ws = mm._workspace_dir("u_bootstrap")
+            assert os.path.exists(os.path.join(ws, "bootstrap.md")), \
+                "bootstrap.md should be copied into workspace when identity files are missing"
+
+    def test_bootstrap_included_in_system_prompt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_boot_prompt")
+            ws = mm._workspace_dir("u_boot_prompt")
+            # Write a recognizable bootstrap.md
+            with open(os.path.join(ws, "bootstrap.md"), "w") as f:
+                f.write("# Bootstrap\nWelcome, this is setup guidance.")
+            # Remove identity files so bootstrap stays present
+            for fname in ("soul.md", "identity.md", "user.md"):
+                path = os.path.join(ws, fname)
+                if os.path.exists(path):
+                    os.remove(path)
+            prompt = mm.build_system_prompt(session)
+            assert "setup guidance" in prompt, \
+                "bootstrap.md content should appear in the system prompt"
+
+    def test_bootstrap_not_duplicated_on_second_load(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            mm.load_session("u_boot2")
+            ws = mm._workspace_dir("u_boot2")
+            bootstrap_path = os.path.join(ws, "bootstrap.md")
+            mtime1 = os.path.getmtime(bootstrap_path)
+
+            mm.load_session("u_boot2")
+            mtime2 = os.path.getmtime(bootstrap_path)
+            assert mtime1 == mtime2, "bootstrap.md should not be overwritten on second load"
+
+    def test_bootstrap_removed_after_all_customized(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            mm.load_session("u_done")
+            ws = mm._workspace_dir("u_done")
+
+            # Write content that differs from templates for all three files
+            for fname in ("soul.md", "identity.md", "user.md"):
+                with open(os.path.join(ws, fname), "w") as f:
+                    f.write(f"# Custom {fname}\n- fully customized\n")
+
+            # Simulate a fresh process/restart — new MemoryManager, no cache
+            mm2 = MemoryManager(tmpdir)
+            mm2.load_session("u_done")
+
+            assert not os.path.exists(os.path.join(ws, "bootstrap.md")), \
+                "bootstrap.md should be removed once all identity files are customized"
+
+
 class TestSystemPromptIdentityFiles:
     """Verify soul.md, identity.md, and user.md are all present in the prompt."""
 
@@ -365,23 +424,26 @@ class TestSystemPromptIdentityFiles:
             assert "Chris" in prompt, "user.md missing from prompt"
 
     def test_identity_files_order(self):
-        """Identity files appear in defined order: identity, user, soul."""
+        """Identity files appear in defined order: bootstrap, identity, user, soul."""
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)
             session = mm.load_session("u_order")
             ws = mm._workspace_dir("u_order")
-            with open(os.path.join(ws, "soul.md"), "w") as f:
-                f.write("MARKER_SOUL")
+            # Write bootstrap.md manually; keep soul.md absent so _ensure_identity_files
+            # leaves bootstrap.md in place (missing files → bootstrap stays)
+            with open(os.path.join(ws, "bootstrap.md"), "w") as f:
+                f.write("MARKER_BOOTSTRAP")
             with open(os.path.join(ws, "identity.md"), "w") as f:
                 f.write("MARKER_IDENTITY")
             with open(os.path.join(ws, "user.md"), "w") as f:
                 f.write("MARKER_USER")
+            # soul.md will be copied from template by _ensure_identity_files
             prompt = mm.build_system_prompt(session)
+            pos_boot = prompt.index("MARKER_BOOTSTRAP")
             pos_id = prompt.index("MARKER_IDENTITY")
             pos_usr = prompt.index("MARKER_USER")
-            pos_soul = prompt.index("MARKER_SOUL")
-            assert pos_id < pos_usr < pos_soul, \
-                f"Expected identity < user < soul, got {pos_id}, {pos_usr}, {pos_soul}"
+            assert pos_boot < pos_id < pos_usr, \
+                f"Expected bootstrap < identity < user, got {pos_boot}, {pos_id}, {pos_usr}"
 
 
 class TestExchangesInMessageHistory:
