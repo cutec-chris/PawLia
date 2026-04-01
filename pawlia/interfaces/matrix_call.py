@@ -25,6 +25,7 @@ Dependencies: aiortc, av, numpy  (optional: edge-tts or piper for TTS)
 import asyncio
 import fractions
 import logging
+import os
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -542,7 +543,6 @@ class CallSession:
         # Debug mode: save audio chunk to disk for inspection
         if logger.isEnabledFor(logging.DEBUG):
             try:
-                import io
                 import wave
                 from datetime import datetime
                 debug_dir = os.path.join(
