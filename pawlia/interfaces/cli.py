@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 import time
@@ -72,8 +73,36 @@ async def start_cli(app: "App") -> None:
         signal.signal(signal.SIGINT, lambda *_: _on_sigint())
 
     async def _readline() -> str:
-        """Read a line from stdin asynchronously so Ctrl+C can cancel it."""
-        return await loop.run_in_executor(None, sys.stdin.readline)
+        """Read a line from stdin asynchronously.
+
+        On POSIX systems stdin is registered with the event loop so that
+        Ctrl+C (SIGINT) can immediately cancel the wait without requiring
+        an extra Enter keystroke.  On Windows (or if stdin is not a real
+        tty) we fall back to a thread-executor.
+        """
+        if sys.platform == "win32" or not os.isatty(sys.stdin.fileno()):
+            return await loop.run_in_executor(None, sys.stdin.readline)
+
+        fut: asyncio.Future[str] = loop.create_future()
+        buf: list[str] = []
+
+        def _on_readable() -> None:
+            try:
+                chunk = sys.stdin.readline()
+            except Exception as exc:
+                if not fut.done():
+                    fut.set_exception(exc)
+                return
+            loop.remove_reader(sys.stdin.fileno())
+            if not fut.done():
+                fut.set_result(chunk)
+
+        loop.add_reader(sys.stdin.fileno(), _on_readable)
+        try:
+            return await fut
+        except asyncio.CancelledError:
+            loop.remove_reader(sys.stdin.fileno())
+            raise
 
     while True:
         sys.stdout.write("You: ")
