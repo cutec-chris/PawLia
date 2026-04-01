@@ -539,6 +539,30 @@ class CallSession:
             logger.error("call %s: missing dependency: %s", self.call_id[:8], e)
             return
 
+        # Debug mode: save audio chunk to disk for inspection
+        if logger.isEnabledFor(logging.DEBUG):
+            try:
+                import io
+                import wave
+                from datetime import datetime
+                debug_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                    "log", "debug_audio",
+                )
+                os.makedirs(debug_dir, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                fname = f"{ts}_{self.call_id[:8]}.wav"
+                fpath = os.path.join(debug_dir, fname)
+                pcm_int16 = (np.clip(pcm, -1.0, 1.0) * 32767).astype(np.int16)
+                with wave.open(fpath, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(pcm_int16.tobytes())
+                logger.debug("call %s: debug audio saved to %s", self.call_id[:8], fpath)
+            except Exception as e:
+                logger.debug("call %s: could not save debug audio: %s", self.call_id[:8], e)
+
         text = await transcribe_pcm(pcm, sample_rate, self._app.config)
         if not text:
             logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
