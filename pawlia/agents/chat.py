@@ -657,11 +657,17 @@ class ChatAgent(BaseAgent):
     ) -> Tuple[Any, Any]:
         """Return (bound_llm, unbound_llm) for this call.
 
-        Checks for a thread-specific model override first; falls back to the
-        agent's default LLMs.
+        Checks for a thread-specific model override first, then a session-level
+        override, and finally falls back to the agent's default LLMs.
+        Both overrides are resolved dynamically so directive-based changes
+        (set_model) take effect without requiring an agent restart.
         """
-        if thread_id and self._llm_resolver and self.memory and self.session:
-            model = self.memory.get_thread_model_override(self.session, thread_id)
+        if self._llm_resolver and self.memory and self.session:
+            model: Optional[str] = None
+            if thread_id:
+                model = self.memory.get_thread_model_override(self.session, thread_id)
+            if not model:
+                model = self.session.model_override
             if model:
                 llm = self._llm_resolver(model)
                 bound = llm.bind_tools(self._skill_specs, tool_choice="auto") if self._skill_specs else llm
