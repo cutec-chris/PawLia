@@ -20,6 +20,7 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from pawlia.prompt_utils import load_system_prompt
+from pawlia.utils import ensure_dir
 
 # Summarization trigger thresholds
 MAX_EXCHANGES_BEFORE_SUMMARY = 10
@@ -69,7 +70,7 @@ class MemoryManager:
     def __init__(self, session_dir: str, logger: Optional[logging.Logger] = None):
         self.session_dir = session_dir
         self.logger = logger or logging.getLogger("pawlia.memory")
-        os.makedirs(session_dir, exist_ok=True)
+        ensure_dir(session_dir)
         self._sessions: Dict[str, Session] = {}  # cached session instances
 
     # ------------------------------------------------------------------
@@ -78,13 +79,11 @@ class MemoryManager:
 
     def _workspace_dir(self, user_id: str) -> str:
         path = os.path.join(self.session_dir, user_id, "workspace")
-        os.makedirs(path, exist_ok=True)
-        return path
+        return ensure_dir(path)
 
     def _memory_dir(self, user_id: str) -> str:
         path = os.path.join(self._workspace_dir(user_id), "memory")
-        os.makedirs(path, exist_ok=True)
-        return path
+        return ensure_dir(path)
 
     def _daily_path(self, user_id: str, date_str: str) -> str:
         return os.path.join(self._memory_dir(user_id), f"{date_str}.md")

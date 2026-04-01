@@ -95,9 +95,27 @@ def load_json(path: str) -> list:
 
 def save_json(path: str, data: list) -> None:
     """Write a JSON array to *path*, creating parent directories as needed."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    ensure_dir(os.path.dirname(path))
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def ensure_dir(path: str) -> str:
+    """Ensure *path* exists as a directory, accepting symlinks to directories."""
+    if os.path.isdir(path):
+        return path
+
+    try:
+        os.makedirs(path, exist_ok=True)
+    except FileExistsError:
+        if os.path.isdir(path):
+            return path
+        raise
+
+    if not os.path.isdir(path):
+        raise NotADirectoryError(path)
+
+    return path
 
 
 # ---------------------------------------------------------------------------

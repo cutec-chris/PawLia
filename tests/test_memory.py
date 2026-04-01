@@ -4,6 +4,8 @@ import os
 import tempfile
 from datetime import datetime, timedelta
 
+import pytest
+
 from pawlia.memory import (
     FORCE_SUMMARY_EXCHANGES,
     KEEP_RECENT_EXCHANGES,
@@ -78,6 +80,28 @@ class TestMemoryManager:
             mm = self._make_mm(tmpdir)
             mm.load_session("u1")
             assert os.path.isdir(os.path.join(tmpdir, "u1", "workspace", "memory"))
+
+    def test_load_session_with_symlinked_workspace(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            real_workspace = os.path.join(tmpdir, "real_workspace")
+            os.makedirs(real_workspace)
+
+            user_dir = os.path.join(tmpdir, "u_symlink")
+            os.makedirs(user_dir)
+            workspace_link = os.path.join(user_dir, "workspace")
+
+            try:
+                os.symlink(real_workspace, workspace_link, target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                pytest.skip(f"symlinks unavailable in test environment: {exc}")
+
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u_symlink")
+
+            assert session.user_id == "u_symlink"
+            assert os.path.islink(workspace_link)
+            assert os.path.isdir(workspace_link)
+            assert os.path.isdir(os.path.join(real_workspace, "memory"))
 
     def test_append_exchange(self):
         with tempfile.TemporaryDirectory() as tmpdir:
