@@ -13,6 +13,8 @@ import json
 import os
 import sys
 
+from pawlia.utils import ensure_dir
+
 
 # ---------------------------------------------------------------------------
 # Sandbox helpers
@@ -20,8 +22,7 @@ import sys
 
 def _workdir(user_id: str, session_dir: str) -> str:
     path = os.path.join(session_dir, user_id, "workspace")
-    os.makedirs(path, exist_ok=True)
-    return path
+    return ensure_dir(path)
 
 
 def _safe_path(workdir: str, filename: str) -> str:
