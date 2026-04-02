@@ -226,6 +226,7 @@ agents:
 
 ## Development Guidelines
 
+- **Always use the virtualenv:** `.venv/bin/python` (not `python` directly)
 - Run tests: `.venv/bin/python -m pytest tests/ -x -q`
 - Keep it simple — PawLia targets small models on local hardware
 - Skills are isolated: own directory, own config, no shared state
