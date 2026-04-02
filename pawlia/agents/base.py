@@ -8,13 +8,21 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, List, Optional
 
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_openai import ChatOpenAI
 
 
 _RE_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
 # Chat-template tokens that some models leak into their output
 _RE_CHAT_TOKENS = re.compile(r"<\|.*?\|>.*", re.DOTALL)
+# Pattern for tool call in failed_generation from API errors
+_RE_TOOL_CALL = re.compile(r'\{.*?"name"\s*:.*?"args"\s*:.*?\}', re.DOTALL)
 
 _LOG_DIR: Optional[str] = None  # set by enable_prompt_logging()
 
@@ -62,10 +70,13 @@ class BaseAgent(ABC):
         """Execute the agent's main task and return a text result."""
 
     async def _invoke(self, messages: List[BaseMessage],
-                      llm: Optional[ChatOpenAI] = None) -> AIMessage:
+                      llm: Optional[ChatOpenAI] = None,
+                      max_retries: int = 3) -> AIMessage:
         """Invoke an LLM (default: self.llm) with the given messages.
 
         Runs synchronous ``llm.invoke`` in a thread to keep the event loop free.
+        Retries up to *max_retries* times when the model calls a tool despite
+        ``tool_choice="none"`` — a common failure mode for smaller models.
         """
         log_prompt(messages, name=self.log_name)
         target = llm or self.llm
@@ -78,7 +89,55 @@ class BaseAgent(ABC):
                 # into a Future; wrap it so asyncio.to_thread works.
                 raise RuntimeError("LLM invoke exhausted iterator") from exc
 
-        return await asyncio.to_thread(_call)
+        retries = 0
+        while True:
+            try:
+                return await asyncio.to_thread(_call)
+            except Exception as exc:
+                error_str = str(exc)
+                # Detect "tool use failed" errors from OpenAI-compatible APIs.
+                # This happens when the model embeds a tool call as JSON text
+                # instead of using the structured tool_calls mechanism — or when
+                # the model tries to call a tool despite tool_choice="none".
+                if ("tool_use_failed" in error_str or
+                    ("Tool choice is none" in error_str and "called a tool" in error_str)):
+                    retries += 1
+                    if retries >= max_retries:
+                        self.logger.warning(
+                            "Max retries (%d) reached for tool-use-failed error", max_retries)
+                        raise
+
+                    tool_name = self._extract_failed_tool_call(error_str) or "unknown_tool"
+                    self.logger.info(
+                        "Model output a tool call as JSON: '%s' (attempt %d/%d), "
+                        "injecting tool result", tool_name, retries, max_retries)
+
+                    # Add a ToolMessage to messages (not HumanMessage — the model
+                    # responds with text when it "sees" a tool result in context)
+                    tool_call_id = f"synthetic_{retries}"
+                    messages = list(messages) + [
+                        ToolMessage(
+                            content=(
+                                f"Tool '{tool_name}' was called but cannot be executed "
+                                f"at this stage. The previous tool output is already "
+                                f"complete — just answer the user with plain text now."
+                            ),
+                            tool_call_id=tool_call_id,
+                        ),
+                    ]
+                    continue
+
+                # Re-raise any other exceptions
+                raise
+
+    @staticmethod
+    def _extract_failed_tool_call(error_str: str) -> Optional[str]:
+        """Extract the failed tool call name from an error message."""
+        # Look for "name": "something" pattern in the failed_generation
+        name_match = re.search(r'"name"\s*:\s*"([^"]+)"', error_str)
+        if name_match:
+            return name_match.group(1)
+        return None
 
     @staticmethod
     def strip_thinking(text: str) -> str:

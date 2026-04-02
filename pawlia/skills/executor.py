@@ -22,6 +22,21 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _is_tool_choice_error(exc: Exception) -> bool:
+    """Check if an exception is a tool-choice error from the API."""
+    error_str = str(exc)
+    return ("tool_use_failed" in error_str or
+            ("Tool choice is none" in error_str and "called a tool" in error_str))
+
+
+def _extract_tool_name(error_str: str) -> str:
+    """Extract the tool name from the failed_generation error."""
+    name_match = re.search(r'"name"\s*:\s*"([^"]+)"', error_str)
+    return name_match.group(1) if name_match else ""
+
 from pawlia.agents.base import log_prompt
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.skills.workflow_schema import (
@@ -94,10 +109,22 @@ class WorkflowExecutor:
         ]
         log_prompt(messages, name=self.log_name)
 
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 response = await bound.ainvoke(messages)
             except Exception as exc:
+                if _is_tool_choice_error(exc) and attempt < 2:
+                    self.logger.info(
+                        "Model output a tool call as text in workflow select "
+                        "(attempt %d/3), retrying", attempt + 1)
+                    messages = messages + [
+                        HumanMessage(
+                            content="Do NOT output tool calls as text or JSON. "
+                            "Select a workflow by using the proper tool call mechanism. "
+                            "Call exactly one of the available workflow tools."
+                        ),
+                    ]
+                    continue
                 self.logger.error("LLM error selecting workflow: %s", exc)
                 return None
 
@@ -145,10 +172,37 @@ class WorkflowExecutor:
         outputs: List[str] = []
 
         for step in range(workflow.max_steps):
-            try:
-                response = await bound_llm.ainvoke(messages)
-            except Exception as exc:
-                self.logger.error("LLM error in workflow step %d: %s", step, exc)
+            step_retries = 0
+            max_step_retries = 3
+            while True:
+                try:
+                    response = await bound_llm.ainvoke(messages)
+                    break
+                except Exception as exc:
+                    if _is_tool_choice_error(exc) and step_retries < max_step_retries:
+                        step_retries += 1
+                        self.logger.info(
+                            "Model output a tool call as text in workflow step %d "
+                            "(retry %d/%d)", step, step_retries, max_step_retries)
+                        messages = messages + [
+                            HumanMessage(
+                                content="Do NOT output tool calls as text or JSON. "
+                                "Use the proper tool_calls mechanism, or respond with "
+                                "plain text when the workflow is complete."
+                            ),
+                        ]
+                        continue
+                    step_retries += 1
+                    self.logger.error("LLM error in workflow step %d (attempt %d): %s",
+                                      step, step_retries, exc)
+                    break
+
+            # If we still have no response from a successful invoke, move on
+            if 'response' not in dir() or response is None:
+                step_retries = 0
+                response = None
+
+            if response is None:
                 break
 
             # No tool calls → LLM is done, return its text

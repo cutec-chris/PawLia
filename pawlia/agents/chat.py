@@ -364,7 +364,34 @@ class ChatAgent(BaseAgent):
         # Turn 2: LLM formulates final answer incorporating skill results
         # Use unbound LLM (no tools) for the final response
         self.logger.debug("Turn 2: sending %d messages to LLM for final answer", len(messages))
-        final = await self._invoke(messages, llm=unbound_llm)
+        try:
+            final = await self._invoke(messages, llm=unbound_llm)
+        except Exception as exc:
+            error_str = str(exc)
+            if "tool_use_failed" in error_str or \
+               ("Tool choice is none" in error_str and "called a tool" in error_str):
+                # Model output tool calls as JSON. Give it the tool results again
+                # with a clear hint that no more tool calls are needed.
+                self.logger.warning("Turn 2: model output tool calls as JSON, "
+                                    "retrying with explicit guidance")
+                result_summary = "\n".join(
+                    f"[{tc['name']}] {tc['result'][:200]}"
+                    for tc in tool_calls_info if tc['result']
+                )
+                guidance = (
+                    f"The tools have been executed. Here are the results:\n\n"
+                    f"{result_summary}\n\n"
+                    f"No more tool calls are needed. "
+                    f"Now respond to the user with a natural text answer "
+                    f"based on these results."
+                )
+                retry_messages = messages + [
+                    HumanMessage(content=guidance),
+                ]
+                final = await self._invoke(retry_messages, llm=unbound_llm)
+            else:
+                raise
+
         self.logger.debug("Turn 2 response: content=%s",
                           repr(final.content[:200]) if final.content else "(empty)")
         if not final.content:
@@ -538,9 +565,24 @@ class ChatAgent(BaseAgent):
             ))
 
         # ---- Stream turn 2 (final answer) ----
-        accumulated2, raw_text2 = await self._stream_with_sentences(
-            messages, unbound_llm, on_sentence,
-        )
+        try:
+            accumulated2, raw_text2 = await self._stream_with_sentences(
+                messages, unbound_llm, on_sentence,
+            )
+        except Exception as exc:
+            error_str = str(exc)
+            if "tool_use_failed" in error_str or \
+               ("Tool choice is none" in error_str and "called a tool" in error_str):
+                self.logger.warning("Streamed turn 2: model output tool calls as JSON")
+                result_parts = []
+                for tc_info in tool_calls_info:
+                    res = tc_info["result"]
+                    if res and not res.startswith("Error:"):
+                        result_parts.append(f"[{tc_info['name']}] {res[:300]}")
+                raw_text2 = "\n".join(result_parts) if result_parts else \
+                    "Task completed. (Model was unable to generate a text response.)"
+            else:
+                raise
 
         result = self.strip_thinking(raw_text2)
         if _override_notice:
