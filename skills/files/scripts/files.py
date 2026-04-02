@@ -13,6 +13,11 @@ import json
 import os
 import sys
 
+# Add the project root to the Python path so we can import pawlia modules
+# __file__ = skills/files/scripts/files.py -> up 4 levels to project root
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, project_root)
+
 from pawlia.utils import ensure_dir
 
 
