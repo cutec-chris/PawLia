@@ -11,6 +11,13 @@ import pawlia.interfaces.matrix_call as matrix_call
 from pawlia.interfaces.matrix_call import CallSession
 
 
+def _make_pcm_from_frame_levels(levels, frame_size=960):
+    return np.concatenate([
+        np.full(frame_size, level, dtype=np.float32)
+        for level in levels
+    ])
+
+
 @pytest.mark.asyncio
 async def test_process_speech_uses_call_system_prompt():
     pcm = MagicMock()
@@ -95,6 +102,102 @@ async def test_process_speech_writes_debug_wav(tmp_path):
     files = list(debug_dir.glob("*.wav"))
     assert len(files) == 1
     assert files[0].stat().st_size > 44
+
+
+def test_should_transcribe_chunk_rejects_background_noise():
+    session = CallSession(
+        call_id="call-noise",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-noise",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    levels = [0.0] * 80
+    for idx in (5, 22, 39, 57):
+        levels[idx] = 0.05
+    pcm = _make_pcm_from_frame_levels(levels)
+
+    assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+
+
+def test_should_transcribe_chunk_accepts_sustained_speech():
+    session = CallSession(
+        call_id="call-speech",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-speech",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    levels = [0.0] * 25 + [0.035] * 12 + [0.028] * 6 + [0.0] * 37
+    pcm = _make_pcm_from_frame_levels(levels)
+
+    assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
+
+
+def test_call_session_loads_voip_audio_thresholds_from_config():
+    session = CallSession(
+        call_id="call-config",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-config",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}),
+        cfg={
+            "voip": {
+                "silence_threshold": 0.03,
+                "silence_seconds": 2.2,
+                "min_speech_seconds": 0.7,
+                "min_active_speech_ratio": 0.25,
+                "min_consecutive_speech_frames": 11,
+            }
+        },
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    assert session.SILENCE_THRESHOLD == pytest.approx(0.03)
+    assert session.SILENCE_SECONDS == pytest.approx(2.2)
+    assert session.MIN_SPEECH_SECONDS == pytest.approx(0.7)
+    assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(0.25)
+    assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == 11
+
+
+def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
+    session = CallSession(
+        call_id="call-config-default",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-config-default",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}),
+        cfg={
+            "voip": {
+                "silence_threshold": -1,
+                "silence_seconds": "bad",
+                "min_speech_seconds": 0,
+                "min_active_speech_ratio": 1.5,
+                "min_consecutive_speech_frames": 0,
+            }
+        },
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    assert session.SILENCE_THRESHOLD == pytest.approx(CallSession.SILENCE_THRESHOLD)
+    assert session.SILENCE_SECONDS == pytest.approx(CallSession.SILENCE_SECONDS)
+    assert session.MIN_SPEECH_SECONDS == pytest.approx(CallSession.MIN_SPEECH_SECONDS)
+    assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(CallSession.MIN_ACTIVE_SPEECH_RATIO)
+    assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECH_FRAMES
 
 
 def test_load_hold_audio_uses_ndarray_resampling():

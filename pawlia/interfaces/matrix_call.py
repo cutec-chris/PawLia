@@ -231,6 +231,9 @@ class CallSession:
     SILENCE_SECONDS = 1.5
     # Minimum seconds of speech before we transcribe (filter short noise bursts)
     MIN_SPEECH_SECONDS = 0.4
+    # Chunk-level guard: require enough active speech frames before STT
+    MIN_ACTIVE_SPEECH_RATIO = 0.12
+    MIN_CONSECUTIVE_SPEECH_FRAMES = 8
     # Maximum call duration in seconds (auto-hangup)
     MAX_CALL_SECONDS = 600
 
@@ -262,6 +265,121 @@ class CallSession:
         self._pending_candidates: List[Dict] = []
         self._speaking = False
         self._ice_reconnect_task: Optional[asyncio.Task] = None
+        self._load_voip_audio_config()
+
+    def _load_voip_audio_config(self) -> None:
+        """Apply per-instance VAD/STT gating thresholds from matrix config."""
+        voip_cfg = self._cfg.get("voip", {}) if isinstance(self._cfg, dict) else {}
+        if not isinstance(voip_cfg, dict):
+            logger.warning("call %s: ignoring non-dict matrix.voip config", self.call_id[:8])
+            voip_cfg = {}
+
+        self.SILENCE_THRESHOLD = self._get_float_config(
+            voip_cfg,
+            "silence_threshold",
+            self.SILENCE_THRESHOLD,
+            minimum=0.0,
+        )
+        self.SILENCE_SECONDS = self._get_float_config(
+            voip_cfg,
+            "silence_seconds",
+            self.SILENCE_SECONDS,
+            minimum=0.1,
+        )
+        self.MIN_SPEECH_SECONDS = self._get_float_config(
+            voip_cfg,
+            "min_speech_seconds",
+            self.MIN_SPEECH_SECONDS,
+            minimum=0.1,
+        )
+        self.MIN_ACTIVE_SPEECH_RATIO = self._get_float_config(
+            voip_cfg,
+            "min_active_speech_ratio",
+            self.MIN_ACTIVE_SPEECH_RATIO,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.MIN_CONSECUTIVE_SPEECH_FRAMES = self._get_int_config(
+            voip_cfg,
+            "min_consecutive_speech_frames",
+            self.MIN_CONSECUTIVE_SPEECH_FRAMES,
+            minimum=1,
+        )
+
+    def _get_float_config(
+        self,
+        cfg: Dict[str, Any],
+        key: str,
+        default: float,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+    ) -> float:
+        value = cfg.get(key, default)
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "call %s: invalid matrix.voip.%s=%r, using default %s",
+                self.call_id[:8],
+                key,
+                value,
+                default,
+            )
+            return default
+
+        if minimum is not None and value < minimum:
+            logger.warning(
+                "call %s: matrix.voip.%s=%s below minimum %s, using default %s",
+                self.call_id[:8],
+                key,
+                value,
+                minimum,
+                default,
+            )
+            return default
+        if maximum is not None and value > maximum:
+            logger.warning(
+                "call %s: matrix.voip.%s=%s above maximum %s, using default %s",
+                self.call_id[:8],
+                key,
+                value,
+                maximum,
+                default,
+            )
+            return default
+        return value
+
+    def _get_int_config(
+        self,
+        cfg: Dict[str, Any],
+        key: str,
+        default: int,
+        minimum: Optional[int] = None,
+    ) -> int:
+        value = cfg.get(key, default)
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "call %s: invalid matrix.voip.%s=%r, using default %s",
+                self.call_id[:8],
+                key,
+                value,
+                default,
+            )
+            return default
+
+        if minimum is not None and value < minimum:
+            logger.warning(
+                "call %s: matrix.voip.%s=%s below minimum %s, using default %s",
+                self.call_id[:8],
+                key,
+                value,
+                minimum,
+                default,
+            )
+            return default
+        return value
 
     # ------------------------------------------------------------------
     # Public API
@@ -434,6 +552,55 @@ class CallSession:
     # Internal: audio pipeline
     # ------------------------------------------------------------------
 
+    def _analyze_speech_chunk(
+        self,
+        pcm: "np.ndarray",
+        sample_rate: int,
+        fps: int,
+    ) -> Dict[str, float]:
+        """Summarize frame-level activity for a completed speech chunk."""
+        frame_size = max(sample_rate // fps, 1)
+        usable = len(pcm) // frame_size * frame_size
+        if usable < frame_size:
+            return {
+                "frame_count": 0.0,
+                "active_frames": 0.0,
+                "active_ratio": 0.0,
+                "longest_run": 0.0,
+                "p90_rms": 0.0,
+            }
+
+        framed = pcm[:usable].reshape(-1, frame_size)
+        frame_rms = np.sqrt(np.mean(framed ** 2, axis=1))
+        active_mask = frame_rms > self.SILENCE_THRESHOLD
+
+        longest_run = 0
+        current_run = 0
+        for is_active in active_mask:
+            current_run = current_run + 1 if is_active else 0
+            longest_run = max(longest_run, current_run)
+
+        return {
+            "frame_count": float(len(frame_rms)),
+            "active_frames": float(np.count_nonzero(active_mask)),
+            "active_ratio": float(np.mean(active_mask)),
+            "longest_run": float(longest_run),
+            "p90_rms": float(np.percentile(frame_rms, 90)),
+        }
+
+    def _should_transcribe_chunk(
+        self,
+        pcm: "np.ndarray",
+        sample_rate: int,
+        fps: int,
+    ) -> bool:
+        """Return True only when a chunk contains sustained speech-like activity."""
+        stats = self._analyze_speech_chunk(pcm, sample_rate, fps)
+        return (
+            stats["active_ratio"] >= self.MIN_ACTIVE_SPEECH_RATIO
+            and stats["longest_run"] >= self.MIN_CONSECUTIVE_SPEECH_FRAMES
+        )
+
     async def _audio_pipeline(self, track) -> None:
         """Continuously read audio frames, detect speech, transcribe, respond."""
         SAMPLE_RATE = 48000
@@ -517,11 +684,28 @@ class CallSession:
                         silence_count = 0
 
                         if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
-                            logger.info("call %s: sending chunk for transcription",
-                                        self.call_id[:8])
-                            asyncio.ensure_future(
-                                self._process_speech(chunk, SAMPLE_RATE)
-                            )
+                            chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
+                            if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
+                                logger.info(
+                                    "call %s: sending chunk for transcription "
+                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                    self.call_id[:8],
+                                    chunk_stats["active_ratio"],
+                                    int(chunk_stats["longest_run"]),
+                                    chunk_stats["p90_rms"],
+                                )
+                                asyncio.ensure_future(
+                                    self._process_speech(chunk, SAMPLE_RATE)
+                                )
+                            else:
+                                logger.info(
+                                    "call %s: skipping chunk as background noise "
+                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                    self.call_id[:8],
+                                    chunk_stats["active_ratio"],
+                                    int(chunk_stats["longest_run"]),
+                                    chunk_stats["p90_rms"],
+                                )
                         else:
                             logger.info("call %s: chunk too short (%.1fs), skipping",
                                         self.call_id[:8], duration)

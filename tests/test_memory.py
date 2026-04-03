@@ -103,6 +103,22 @@ class TestMemoryManager:
             assert os.path.isdir(workspace_link)
             assert os.path.isdir(os.path.join(real_workspace, "memory"))
 
+    def test_load_session_with_broken_workspace_symlink_raises_clear_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            user_dir = os.path.join(tmpdir, "u_broken_symlink")
+            os.makedirs(user_dir)
+            workspace_link = os.path.join(user_dir, "workspace")
+
+            try:
+                os.symlink(os.path.join(tmpdir, "missing_workspace"), workspace_link, target_is_directory=True)
+            except (NotImplementedError, OSError) as exc:
+                pytest.skip(f"symlinks unavailable in test environment: {exc}")
+
+            mm = self._make_mm(tmpdir)
+
+            with pytest.raises(NotADirectoryError, match="symlink but is not a usable directory"):
+                mm.load_session("u_broken_symlink")
+
     def test_append_exchange(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = self._make_mm(tmpdir)

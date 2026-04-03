@@ -10,6 +10,16 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+def _raise_invalid_dir(path: str) -> None:
+    if os.path.islink(path):
+        target = os.readlink(path)
+        raise NotADirectoryError(
+            f"{path} exists as a symlink but is not a usable directory. "
+            f"Target inside current runtime: {target}"
+        )
+    raise NotADirectoryError(f"{path} exists but is not a directory")
+
+
 # ---------------------------------------------------------------------------
 # YAML frontmatter parsing
 # ---------------------------------------------------------------------------
@@ -105,15 +115,18 @@ def ensure_dir(path: str) -> str:
     if os.path.isdir(path):
         return path
 
+    if os.path.lexists(path):
+        _raise_invalid_dir(path)
+
     try:
         os.makedirs(path, exist_ok=True)
     except FileExistsError:
         if os.path.isdir(path):
             return path
-        raise
+        _raise_invalid_dir(path)
 
     if not os.path.isdir(path):
-        raise NotADirectoryError(path)
+        _raise_invalid_dir(path)
 
     return path
 
