@@ -17,7 +17,7 @@ Flow
 6. While the agent is thinking, a configurable **hold audio** loop
    (default ``assets/keyboard.m4a``) is played to the caller and a
    Matrix typing indicator is kept alive
-7. Call ends on ``m.call.hangup`` or timeout
+7. Call ends on ``m.call.hangup`` or prolonged inactivity
 
 Dependencies: aiortc, av, numpy  (optional: edge-tts or piper for TTS)
 """
@@ -234,8 +234,9 @@ class CallSession:
     # Chunk-level guard: require enough active speech frames before STT
     MIN_ACTIVE_SPEECH_RATIO = 0.12
     MIN_CONSECUTIVE_SPEECH_FRAMES = 8
-    # Maximum call duration in seconds (auto-hangup)
-    MAX_CALL_SECONDS = 600
+    # End calls when no speech chunk has been sent to STT for too long.
+    CALL_INACTIVITY_SECONDS = 180
+    WATCHDOG_POLL_SECONDS = 5.0
 
     def __init__(
         self,
@@ -265,13 +266,19 @@ class CallSession:
         self._pending_candidates: List[Dict] = []
         self._speaking = False
         self._ice_reconnect_task: Optional[asyncio.Task] = None
+        self._last_activity_at = time.monotonic()
         self._load_voip_audio_config()
 
+    def _mark_activity(self) -> None:
+        """Record user or bot activity to keep the call alive."""
+        self._last_activity_at = time.monotonic()
+
     def _load_voip_audio_config(self) -> None:
-        """Apply per-instance VAD/STT gating thresholds from matrix config."""
-        voip_cfg = self._cfg.get("voip", {}) if isinstance(self._cfg, dict) else {}
+        """Apply per-instance VAD/STT gating thresholds from shared VoIP config."""
+        app_cfg = self._app.config if isinstance(self._app.config, dict) else {}
+        voip_cfg = app_cfg.get("voip", {}) if isinstance(app_cfg, dict) else {}
         if not isinstance(voip_cfg, dict):
-            logger.warning("call %s: ignoring non-dict matrix.voip config", self.call_id[:8])
+            logger.warning("call %s: ignoring non-dict voip config", self.call_id[:8])
             voip_cfg = {}
 
         self.SILENCE_THRESHOLD = self._get_float_config(
@@ -305,6 +312,12 @@ class CallSession:
             self.MIN_CONSECUTIVE_SPEECH_FRAMES,
             minimum=1,
         )
+        self.CALL_INACTIVITY_SECONDS = self._get_int_config(
+            voip_cfg,
+            "call_inactivity_seconds",
+            self.CALL_INACTIVITY_SECONDS,
+            minimum=1,
+        )
 
     def _get_float_config(
         self,
@@ -319,7 +332,7 @@ class CallSession:
             value = float(value)
         except (TypeError, ValueError):
             logger.warning(
-                "call %s: invalid matrix.voip.%s=%r, using default %s",
+                "call %s: invalid voip.%s=%r, using default %s",
                 self.call_id[:8],
                 key,
                 value,
@@ -329,7 +342,7 @@ class CallSession:
 
         if minimum is not None and value < minimum:
             logger.warning(
-                "call %s: matrix.voip.%s=%s below minimum %s, using default %s",
+                "call %s: voip.%s=%s below minimum %s, using default %s",
                 self.call_id[:8],
                 key,
                 value,
@@ -339,7 +352,7 @@ class CallSession:
             return default
         if maximum is not None and value > maximum:
             logger.warning(
-                "call %s: matrix.voip.%s=%s above maximum %s, using default %s",
+                "call %s: voip.%s=%s above maximum %s, using default %s",
                 self.call_id[:8],
                 key,
                 value,
@@ -361,7 +374,7 @@ class CallSession:
             value = int(value)
         except (TypeError, ValueError):
             logger.warning(
-                "call %s: invalid matrix.voip.%s=%r, using default %s",
+                "call %s: invalid voip.%s=%r, using default %s",
                 self.call_id[:8],
                 key,
                 value,
@@ -371,7 +384,7 @@ class CallSession:
 
         if minimum is not None and value < minimum:
             logger.warning(
-                "call %s: matrix.voip.%s=%s below minimum %s, using default %s",
+                "call %s: voip.%s=%s below minimum %s, using default %s",
                 self.call_id[:8],
                 key,
                 value,
@@ -694,6 +707,7 @@ class CallSession:
                                     int(chunk_stats["longest_run"]),
                                     chunk_stats["p90_rms"],
                                 )
+                                self._mark_activity()
                                 asyncio.ensure_future(
                                     self._process_speech(chunk, SAMPLE_RATE)
                                 )
@@ -909,13 +923,27 @@ class CallSession:
                            self.call_id[:8], e)
 
     async def _watchdog(self) -> None:
-        """Auto-hangup after MAX_CALL_SECONDS."""
-        try:
-            await asyncio.wait_for(self._done.wait(), timeout=self.MAX_CALL_SECONDS)
-        except asyncio.TimeoutError:
-            logger.info("call %s: max duration reached, hanging up", self.call_id[:8])
-            await self.hangup()
-            await self._send_hangup_event()
+        """Auto-hangup after prolonged call inactivity."""
+        while not self._done.is_set():
+            idle_for = time.monotonic() - self._last_activity_at
+            remaining = self.CALL_INACTIVITY_SECONDS - idle_for
+            if remaining <= 0:
+                logger.info(
+                    "call %s: inactive for %.1fs, hanging up",
+                    self.call_id[:8],
+                    idle_for,
+                )
+                await self.hangup()
+                await self._send_hangup_event()
+                return
+
+            try:
+                await asyncio.wait_for(
+                    self._done.wait(),
+                    timeout=min(remaining, self.WATCHDOG_POLL_SECONDS),
+                )
+            except asyncio.TimeoutError:
+                continue
 
     @staticmethod
     def _parse_candidate_string(candidate_str: str) -> Optional[Dict]:
