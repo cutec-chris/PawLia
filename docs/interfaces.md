@@ -106,6 +106,9 @@ interfaces:
     stun_servers:
       - stun:stun.l.google.com:19302
 
+voip:
+  call_inactivity_seconds: 180
+
 tts:
   provider: piper
   piper:

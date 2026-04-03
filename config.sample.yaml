@@ -61,12 +61,14 @@ interfaces:
   #   # always_thread: true                  # always reply in a new thread (default: false)
   #   # stun_servers:                        # STUN for VoIP (optional)
   #   #   - stun:stun.l.google.com:19302
-  #   # voip:
-  #   #   silence_threshold: 0.02           # frame RMS above this counts as speech
-  #   #   silence_seconds: 1.5              # trailing silence that ends a chunk
-  #   #   min_speech_seconds: 0.4           # shorter chunks are discarded early
-  #   #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
-  #   #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
+
+# voip:
+#   silence_threshold: 0.02           # frame RMS above this counts as speech
+#   silence_seconds: 1.5              # trailing silence that ends a chunk
+#   min_speech_seconds: 0.4           # shorter chunks are discarded early
+#   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
+#   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
+#   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
 
 # Speech-to-text transcription (voice messages + VoIP calls).
 # Any OpenAI-compatible /audio/transcriptions endpoint works.

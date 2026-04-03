@@ -7,8 +7,16 @@ Config (in config.yaml under "interfaces.matrix"):
       user_id: "@yourbot:matrix.org"
       password: YOUR_PASSWORD
       # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
-      # stun_servers:            # for VoIP calls (optional)
-      #   - stun:stun.l.google.com:19302
+            # stun_servers:            # transport-specific STUN/TURN endpoints
+            #   - stun:stun.l.google.com:19302
+
+        voip:
+            # silence_threshold: 0.02
+            # silence_seconds: 1.5
+            # min_speech_seconds: 0.4
+            # min_active_speech_ratio: 0.12
+            # min_consecutive_speech_frames: 8
+            # call_inactivity_seconds: 180
 """
 
 import asyncio
