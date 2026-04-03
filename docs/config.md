@@ -99,22 +99,34 @@ interfaces:
     # always_thread: true                  # always reply in a new thread (default: false)
     # stun_servers:
     #   - stun:stun.l.google.com:19302   # for VoIP calls
-    # voip:
-    #   silence_threshold: 0.02
-    #   silence_seconds: 1.5
-    #   min_speech_seconds: 0.4
-    #   min_active_speech_ratio: 0.12
-    #   min_consecutive_speech_frames: 8
 
 | Key | Description |
 |-----|-------------|
 | `always_thread` | When `true`, every message is answered in its own Matrix thread (default: `false`) |
 | `stun_servers` | STUN/TURN server URIs for VoIP calls |
+
+## VoIP
+
+Shared VoIP behavior is configured globally so the same settings can be reused by Matrix today and other call transports later.
+
+```yaml
+voip:
+  silence_threshold: 0.02
+  silence_seconds: 1.5
+  min_speech_seconds: 0.4
+  min_active_speech_ratio: 0.12
+  min_consecutive_speech_frames: 8
+  call_inactivity_seconds: 180
+```
+
+| Key | Description |
+|-----|-------------|
 | `voip.silence_threshold` | Per-frame RMS threshold above which incoming audio counts as speech |
 | `voip.silence_seconds` | Silence duration that closes the current VoIP speech chunk |
 | `voip.min_speech_seconds` | Minimum chunk duration before deeper speech/noise analysis runs |
 | `voip.min_active_speech_ratio` | Minimum share of active 20 ms frames required before a chunk is sent to STT |
 | `voip.min_consecutive_speech_frames` | Minimum sustained run of active 20 ms frames required before a chunk is sent to STT |
+| `voip.call_inactivity_seconds` | Hang up the VoIP call when no speech chunk has been sent to STT for this many seconds |
 
   webhook:
     port: 8080

@@ -65,6 +65,52 @@ async def test_process_speech_uses_call_system_prompt():
     assert send_cb.await_args_list[1].args[0] == "Kurze Antwort"
 
 
+def test_mark_activity_updates_last_activity_timestamp():
+    session = CallSession(
+        call_id="call-activity",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-activity",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    session._last_activity_at = 10.0
+
+    with patch("pawlia.interfaces.matrix_call.time.monotonic", return_value=42.0):
+        session._mark_activity()
+
+    assert session._last_activity_at == pytest.approx(42.0)
+
+
+@pytest.mark.asyncio
+async def test_watchdog_hangs_up_after_call_inactivity():
+    session = CallSession(
+        call_id="call-idle",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-idle",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    session._last_activity_at = 0.0
+    session.hangup = AsyncMock()
+    session._send_hangup_event = AsyncMock()
+
+    with patch("pawlia.interfaces.matrix_call.time.monotonic", return_value=181.0):
+        await session._watchdog()
+
+    session.hangup.assert_awaited_once()
+    session._send_hangup_event.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_process_speech_writes_debug_wav(tmp_path):
     app = SimpleNamespace(config={})
@@ -151,16 +197,17 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
         caller_id="@user:test",
         thread_id="thread-config",
         client=SimpleNamespace(),
-        app=SimpleNamespace(config={}),
-        cfg={
+        app=SimpleNamespace(config={
             "voip": {
                 "silence_threshold": 0.03,
                 "silence_seconds": 2.2,
                 "min_speech_seconds": 0.7,
                 "min_active_speech_ratio": 0.25,
                 "min_consecutive_speech_frames": 11,
+                "call_inactivity_seconds": 240,
             }
-        },
+        }),
+        cfg={},
         agent=MagicMock(),
         send_cb=AsyncMock(),
     )
@@ -170,6 +217,7 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
     assert session.MIN_SPEECH_SECONDS == pytest.approx(0.7)
     assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(0.25)
     assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == 11
+    assert session.CALL_INACTIVITY_SECONDS == 240
 
 
 def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
@@ -179,16 +227,17 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
         caller_id="@user:test",
         thread_id="thread-config-default",
         client=SimpleNamespace(),
-        app=SimpleNamespace(config={}),
-        cfg={
+        app=SimpleNamespace(config={
             "voip": {
                 "silence_threshold": -1,
                 "silence_seconds": "bad",
                 "min_speech_seconds": 0,
                 "min_active_speech_ratio": 1.5,
                 "min_consecutive_speech_frames": 0,
+                "call_inactivity_seconds": 0,
             }
-        },
+        }),
+        cfg={},
         agent=MagicMock(),
         send_cb=AsyncMock(),
     )
@@ -198,6 +247,7 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
     assert session.MIN_SPEECH_SECONDS == pytest.approx(CallSession.MIN_SPEECH_SECONDS)
     assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(CallSession.MIN_ACTIVE_SPEECH_RATIO)
     assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECH_FRAMES
+    assert session.CALL_INACTIVITY_SECONDS == CallSession.CALL_INACTIVITY_SECONDS
 
 
 def test_load_hold_audio_uses_ndarray_resampling():
