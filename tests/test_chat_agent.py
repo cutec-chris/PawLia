@@ -412,6 +412,73 @@ class TestChatAgentMultiSkill:
         runner_b.run.assert_called_once_with(query="query_b")
         assert "Combined result" in result
 
+    @pytest.mark.asyncio
+    async def test_sequential_skill_rounds_continue_until_done(self):
+        """ChatAgent should allow follow-up skill calls after earlier tool results."""
+        skill_a = _make_skill("skill_a", "Skill A")
+        skill_b = _make_skill("skill_b", "Skill B")
+
+        turn1 = _make_ai_message("First I need skill A.", tool_calls=[
+            {"id": "c1", "name": "skill_a", "args": {"query": "query_a"}},
+        ])
+        turn2 = _make_ai_message("Now I need skill B as well.", tool_calls=[
+            {"id": "c2", "name": "skill_b", "args": {"query": "query_b"}},
+        ])
+        turn3 = _make_ai_message("Combined result from A and B.")
+
+        llm = _mock_llm([turn1, turn2, turn3])
+
+        runner_a = MagicMock()
+        runner_a.run = AsyncMock(return_value="result_a")
+        runner_b = MagicMock()
+        runner_b.run = AsyncMock(return_value="result_b")
+        runners = {"skill_a": runner_a, "skill_b": runner_b}
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"skill_a": skill_a, "skill_b": skill_b},
+            skill_runner_factory=lambda s: runners[s.name],
+        )
+
+        result = await agent.run("Use both skills")
+
+        runner_a.run.assert_called_once_with(query="query_a")
+        runner_b.run.assert_called_once_with(query="query_b")
+        assert "Combined result" in result
+
+    @pytest.mark.asyncio
+    async def test_plain_text_tool_intent_is_nudged_into_real_skill_call(self):
+        """A textual 'I'll search' response should be retried until a real tool call happens."""
+        skill = _make_skill("searxng", "Web search")
+
+        turn1 = _make_ai_message("I will search the web for that now.")
+        turn2 = _make_ai_message("", tool_calls=[
+            {"id": "c1", "name": "searxng", "args": {"query": "Python tutorials"}},
+        ])
+        turn3 = _make_ai_message("Here are some Python tutorials.")
+
+        llm = _mock_llm([turn1, turn2, turn3])
+
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value="1. Tutorial A\n2. Tutorial B")
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"searxng": skill},
+            skill_runner_factory=lambda s: mock_runner,
+        )
+
+        result = await agent.run("Search for Python tutorials")
+
+        mock_runner.run.assert_called_once_with(query="Python tutorials")
+        assert "Python tutorials" in result
+        second_call_messages = llm.invoke.call_args_list[1][0][0]
+        assert any(
+            isinstance(msg, HumanMessage)
+            and "If you need a skill, call it now" in msg.content
+            for msg in second_call_messages
+        )
+
 
 class TestSkillRunnerAgent:
     @pytest.mark.asyncio
