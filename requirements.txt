@@ -11,5 +11,6 @@ python-telegram-bot>=20.0
 PyYAML>=6.0
 requests>=2.32
 networkx>=3.0
+beautifulsoup4>=4.12
 
 # VoIP / telephony extras → see requirements-voip.txt
