@@ -41,6 +41,19 @@ _FAKE_TOOL_CALL_NUDGE = (
 )
 _MAX_FAKE_TOOL_RETRIES = 5
 _EMPTY_TURN2_NUDGE = "The tool finished. Please respond to the user now."
+_CHAT_CONTINUE_NUDGE = (
+    "The task is not complete yet. If you need a skill, call it now instead of describing "
+    "what you plan to do. Only answer the user once the requested work is actually done."
+)
+_MAX_CHAT_TOOL_TURNS = 8
+_MAX_CHAT_NUDGES = 3
+_DEFERRED_TOOL_INTENT_RE = re.compile(
+    r"(?:\b(?:let me|i(?:'ll| will| am going to)|first\s*,?\s*i(?:'ll| will)|now\s+i(?:'ll| will)|"
+    r"ich\s+(?:werde|schaue|suche|pruefe|prüfe|checke|oeffne|öffne)|lass\s+mich)\b.{0,140}"
+    r"\b(?:search|look\s+up|check|browse|inspect|open|use|call|run|internet|web|online|browser|tool|skill|script|"
+    r"recherch(?:e|ieren)?|suche|schaue|prüfe|pruefe|checke|öffne|oeffne|internet|online|tool|skill|skript)\b)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _split_sentences(text: str) -> Tuple[List[str], str]:
@@ -296,120 +309,101 @@ class ChatAgent(BaseAgent):
             active_llm = bound_llm
             response, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
 
-        self.logger.debug("LLM response: tool_calls=%s, content=%s",
-                          bool(response.tool_calls),
-                          repr(response.content[:200]) if response.content else "(empty)")
-
-        if not response.tool_calls:
-            result = self.extract_text(response)
-            if _override_notice:
-                result = _override_notice + result
-            await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
-            return result
-
-        # Send interim message if the LLM included text alongside tool calls
-        interim = self.extract_text(response)
-        if interim and self.on_interim:
-            try:
-                await self.on_interim(interim)
-            except Exception as exc:
-                self.logger.debug("on_interim callback error: %s", exc)
-
-        # Skill calls detected -> execute via SkillRunners
-        messages.append(response)  # AIMessage with tool_calls
-
-        # Collect tool call information for persistent storage
         tool_calls_info: List[Dict[str, Any]] = []
+        final = response
+        nudge_count = 0
 
-        for tool_call in response.tool_calls:
-            skill_name, normalized_args, error = self._decode_skill_call(tool_call)
-            query = normalized_args.get("query", "")
-            skill = self.skills.get(skill_name)
+        for turn in range(_MAX_CHAT_TOOL_TURNS):
+            self.logger.debug(
+                "Chat tool loop turn %d: tool_calls=%s, content=%s",
+                turn,
+                bool(final.tool_calls),
+                repr(final.content[:200]) if final.content else "(empty)",
+            )
 
-            if error:
-                self.logger.warning("Skill call rejected: %s", error)
-                result = error
-            elif skill:
-                self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
-                if _on_skill_start:
-                    try:
-                        await _on_skill_start(skill_name, query)
-                    except Exception as exc:
-                        self.logger.debug("on_skill_start error: %s", exc)
-                runner = self.skill_runner_factory(skill)
-                runner.on_step = _on_skill_step
-                result = await runner.run(query=query)
-                result = self._process_directives(result, thread_id)
-                if _on_skill_done:
-                    try:
-                        await _on_skill_done(skill_name)
-                    except Exception as exc:
-                        self.logger.debug("on_skill_done error: %s", exc)
-            else:
-                self.logger.warning("Unknown skill called: %s", skill_name)
-                result = f"Error: Unknown skill '{skill_name}'."
+            if not final.tool_calls:
+                result = self.extract_text(final)
+                if self._should_nudge_for_incomplete_task(
+                    result,
+                    has_tool_history=bool(tool_calls_info),
+                ) and nudge_count < _MAX_CHAT_NUDGES:
+                    nudge_count += 1
+                    self.logger.warning(
+                        "ChatAgent received deferred-action text without tool call; nudging "
+                        "model to continue (nudge %d/%d)",
+                        nudge_count,
+                        _MAX_CHAT_NUDGES,
+                    )
+                    messages = messages + [final, HumanMessage(content=_CHAT_CONTINUE_NUDGE)]
+                    final, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
+                    continue
+                break
 
-            # Store tool call info for persistent storage
-            tool_calls_info.append({
-                "name": skill_name,
-                "args": normalized_args,
-                "result": result,
-            })
+            interim = self.extract_text(final)
+            if interim and self.on_interim:
+                try:
+                    await self.on_interim(interim)
+                except Exception as exc:
+                    self.logger.debug("on_interim callback error: %s", exc)
 
-            messages.append(ToolMessage(
-                content=result,
-                tool_call_id=tool_call.get("id", ""),
-            ))
+            messages.append(final)
 
-        # Turn 2: LLM formulates final answer incorporating skill results
-        # Use unbound LLM (no tools) for the final response
-        self.logger.debug("Turn 2: sending %d messages to LLM for final answer", len(messages))
-        try:
-            final = await self._invoke(messages, llm=unbound_llm)
-        except Exception as exc:
-            error_str = str(exc)
-            if "tool_use_failed" in error_str or \
-               ("Tool choice is none" in error_str and "called a tool" in error_str):
-                # Model output tool calls as JSON. Give it the tool results again
-                # with a clear hint that no more tool calls are needed.
-                self.logger.warning("Turn 2: model output tool calls as JSON, "
-                                    "retrying with explicit guidance")
-                result_summary = "\n".join(
-                    f"[{tc['name']}] {tc['result'][:200]}"
-                    for tc in tool_calls_info if tc['result']
-                )
-                guidance = (
-                    f"The tools have been executed. Here are the results:\n\n"
-                    f"{result_summary}\n\n"
-                    f"No more tool calls are needed. "
-                    f"Now respond to the user with a natural text answer "
-                    f"based on these results."
-                )
-                retry_messages = messages + [
-                    HumanMessage(content=guidance),
-                ]
-                final = await self._invoke(retry_messages, llm=unbound_llm)
-            else:
-                raise
+            for tool_call in final.tool_calls:
+                skill_name, normalized_args, error = self._decode_skill_call(tool_call)
+                query = normalized_args.get("query", "")
+                skill = self.skills.get(skill_name)
 
-        self.logger.debug("Turn 2 response: content=%s",
-                          repr(final.content[:200]) if final.content else "(empty)")
-        if not final.content:
-            self.logger.warning("Turn 2 returned empty response, nudging LLM")
+                if error:
+                    self.logger.warning("Skill call rejected: %s", error)
+                    result = error
+                elif skill:
+                    self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
+                    if _on_skill_start:
+                        try:
+                            await _on_skill_start(skill_name, query)
+                        except Exception as exc:
+                            self.logger.debug("on_skill_start error: %s", exc)
+                    runner = self.skill_runner_factory(skill)
+                    runner.on_step = _on_skill_step
+                    result = await runner.run(query=query)
+                    result = self._process_directives(result, thread_id)
+                    if _on_skill_done:
+                        try:
+                            await _on_skill_done(skill_name)
+                        except Exception as exc:
+                            self.logger.debug("on_skill_done error: %s", exc)
+                else:
+                    self.logger.warning("Unknown skill called: %s", skill_name)
+                    result = f"Error: Unknown skill '{skill_name}'."
+
+                tool_calls_info.append({
+                    "name": skill_name,
+                    "args": normalized_args,
+                    "result": result,
+                })
+
+                messages.append(ToolMessage(
+                    content=result,
+                    tool_call_id=tool_call.get("id", ""),
+                ))
+
+            final, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
+        else:
+            self.logger.warning("Max chat tool turns reached, forcing final response")
             final = await self._invoke(
-                messages + [final, HumanMessage(content=_EMPTY_TURN2_NUDGE)],
+                messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)],
                 llm=unbound_llm,
             )
-            self.logger.debug("Turn 2 nudge response: content=%s",
-                              repr(final.content[:200]) if final.content else "(empty)")
+
         result = self.extract_text(final)
         if _override_notice:
             result = _override_notice + result
+        used_skills = bool(tool_calls_info)
         await self._persist(
             user_input, result,
-            track_similarity=False,
+            track_similarity=not used_skills,
             thread_id=thread_id,
-            tool_calls_info=tool_calls_info,
+            tool_calls_info=tool_calls_info if used_skills else None,
         )
         return result
 
@@ -564,34 +558,86 @@ class ChatAgent(BaseAgent):
                 tool_call_id=tool_call.get("id", ""),
             ))
 
-        # ---- Stream turn 2 (final answer) ----
-        try:
+        # ---- Continue tool loop until the task is actually complete ----
+        raw_text2 = ""
+        nudge_count = 0
+        final_response: Optional[AIMessage] = None
+
+        for _turn in range(_MAX_CHAT_TOOL_TURNS):
+            next_response, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
+
+            if not next_response.tool_calls:
+                text = self.extract_text(next_response)
+                if self._should_nudge_for_incomplete_task(text, has_tool_history=True) \
+                   and nudge_count < _MAX_CHAT_NUDGES:
+                    nudge_count += 1
+                    messages = messages + [next_response, HumanMessage(content=_CHAT_CONTINUE_NUDGE)]
+                    continue
+                final_response = next_response
+                raw_text2 = text
+                break
+
+            messages.append(next_response)
+            for tool_call in next_response.tool_calls:
+                skill_name, normalized_args, error = self._decode_skill_call(tool_call)
+                query = normalized_args.get("query", "")
+                skill = self.skills.get(skill_name)
+
+                if error:
+                    self.logger.warning("Skill call rejected: %s", error)
+                    skill_result = error
+                elif skill:
+                    self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
+                    if _on_skill_start:
+                        try:
+                            await _on_skill_start(skill_name, query)
+                        except Exception:
+                            pass
+                    runner = self.skill_runner_factory(skill)
+                    runner.on_step = _on_skill_step
+                    skill_result = await runner.run(query=query)
+                    skill_result = self._process_directives(skill_result, thread_id)
+                    if _on_skill_done:
+                        try:
+                            await _on_skill_done(skill_name)
+                        except Exception:
+                            pass
+                else:
+                    self.logger.warning("Unknown skill called: %s", skill_name)
+                    skill_result = f"Error: Unknown skill '{skill_name}'."
+
+                tool_calls_info.append({
+                    "name": skill_name,
+                    "args": normalized_args,
+                    "result": skill_result,
+                })
+                messages.append(ToolMessage(
+                    content=skill_result,
+                    tool_call_id=tool_call.get("id", ""),
+                ))
+        else:
             accumulated2, raw_text2 = await self._stream_with_sentences(
-                messages, unbound_llm, on_sentence,
+                messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)], unbound_llm, on_sentence,
             )
-        except Exception as exc:
-            error_str = str(exc)
-            if "tool_use_failed" in error_str or \
-               ("Tool choice is none" in error_str and "called a tool" in error_str):
-                self.logger.warning("Streamed turn 2: model output tool calls as JSON")
-                result_parts = []
-                for tc_info in tool_calls_info:
-                    res = tc_info["result"]
-                    if res and not res.startswith("Error:"):
-                        result_parts.append(f"[{tc_info['name']}] {res[:300]}")
-                raw_text2 = "\n".join(result_parts) if result_parts else \
-                    "Task completed. (Model was unable to generate a text response.)"
-            else:
-                raise
+            final_response = accumulated2 if isinstance(accumulated2, AIMessage) else None
+
+        if on_sentence and raw_text2.strip():
+            sentences, remainder = _split_sentences(raw_text2)
+            for sentence in sentences:
+                if sentence.strip():
+                    await on_sentence(sentence)
+            if remainder.strip():
+                await on_sentence(remainder.strip())
 
         result = self.strip_thinking(raw_text2)
         if _override_notice:
             result = _override_notice + result
+        used_skills = bool(tool_calls_info)
         await self._persist(
             user_input, result,
-            track_similarity=False,
+            track_similarity=not used_skills,
             thread_id=thread_id,
-            tool_calls_info=tool_calls_info,
+            tool_calls_info=tool_calls_info if used_skills else None,
         )
         return result
 
@@ -774,6 +820,14 @@ class ChatAgent(BaseAgent):
             if first_token in skill_names:
                 return True
         return False
+
+    @staticmethod
+    def _should_nudge_for_incomplete_task(text: str, *, has_tool_history: bool) -> bool:
+        """Detect responses that describe the next action instead of doing it."""
+        stripped = text.strip()
+        if not stripped:
+            return has_tool_history
+        return bool(_DEFERRED_TOOL_INTENT_RE.search(stripped))
 
     async def _invoke_with_tool_retry(
         self,
