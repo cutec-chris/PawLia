@@ -654,7 +654,13 @@ async def start_web(app: "App", cfg: Dict) -> None:
 
     # ── Build & start ────────────────────────────────────────────────────────
 
+    # ── Health check (no auth) ────────────────────────────────────────────────
+
+    async def handle_health(request: web.Request) -> web.Response:
+        return web.json_response({"status": "ok"})
+
     webapp = web.Application()
+    webapp.router.add_get("/health",              handle_health)
     webapp.router.add_get("/",                    handle_index)
     webapp.router.add_post("/api/auth",           handle_auth)
     webapp.router.add_post("/api/logout",         handle_logout)
