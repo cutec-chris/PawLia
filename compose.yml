@@ -24,8 +24,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.voip
-    restart: unless-stopped
+    restart: on-failure
     network_mode: host
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8888/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     ports:
       - "127.0.0.1:8888:8888"   # Web UI
       # - "127.0.0.1:8080:8080" # Webhooks
