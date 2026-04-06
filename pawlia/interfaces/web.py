@@ -657,7 +657,19 @@ async def start_web(app: "App", cfg: Dict) -> None:
     # ── Health check (no auth) ────────────────────────────────────────────────
 
     async def handle_health(request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
+        checks: Dict[str, str] = {}
+        ok = True
+
+        # Scheduler task alive?
+        sched_task = app.scheduler._task
+        if sched_task is None or sched_task.done():
+            checks["scheduler"] = "stopped"
+            ok = False
+        else:
+            checks["scheduler"] = "ok"
+
+        status = 200 if ok else 503
+        return web.json_response({"status": "ok" if ok else "unhealthy", "checks": checks}, status=status)
 
     webapp = web.Application()
     webapp.router.add_get("/health",              handle_health)
