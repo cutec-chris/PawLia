@@ -23,7 +23,7 @@ async def test_process_speech_uses_call_system_prompt():
     pcm = MagicMock()
     pcm.__len__.return_value = 48000
 
-    app = SimpleNamespace(config={})
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     client = SimpleNamespace(room_typing=AsyncMock())
     agent = MagicMock()
     agent.build_system_prompt.return_value = "CALL PROMPT"
@@ -72,7 +72,7 @@ def test_mark_activity_updates_last_activity_timestamp():
         caller_id="@user:test",
         thread_id="thread-activity",
         client=SimpleNamespace(),
-        app=SimpleNamespace(config={}),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
         cfg={},
         agent=MagicMock(),
         send_cb=AsyncMock(),
@@ -94,7 +94,7 @@ async def test_watchdog_hangs_up_after_call_inactivity():
         caller_id="@user:test",
         thread_id="thread-idle",
         client=SimpleNamespace(),
-        app=SimpleNamespace(config={}),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
         cfg={},
         agent=MagicMock(),
         send_cb=AsyncMock(),
@@ -113,7 +113,7 @@ async def test_watchdog_hangs_up_after_call_inactivity():
 
 @pytest.mark.asyncio
 async def test_process_speech_writes_debug_wav(tmp_path):
-    app = SimpleNamespace(config={})
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     client = SimpleNamespace(room_typing=AsyncMock())
     agent = MagicMock()
     send_cb = AsyncMock()
@@ -157,7 +157,7 @@ def test_should_transcribe_chunk_rejects_background_noise():
         caller_id="@user:test",
         thread_id="thread-noise",
         client=SimpleNamespace(),
-        app=SimpleNamespace(config={}),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
         cfg={},
         agent=MagicMock(),
         send_cb=AsyncMock(),
@@ -178,7 +178,7 @@ def test_should_transcribe_chunk_accepts_sustained_speech():
         caller_id="@user:test",
         thread_id="thread-speech",
         client=SimpleNamespace(),
-        app=SimpleNamespace(config={}),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
         cfg={},
         agent=MagicMock(),
         send_cb=AsyncMock(),
@@ -291,7 +291,7 @@ def test_load_hold_audio_uses_mono_wav_default_without_m4a_fallback():
         caller_id="@user:test",
         thread_id="thread-3",
         client=SimpleNamespace(),
-        app=SimpleNamespace(config={}),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
         cfg={},
         agent=MagicMock(),
         send_cb=AsyncMock(),

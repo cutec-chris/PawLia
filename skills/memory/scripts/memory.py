@@ -2,12 +2,14 @@
 """Memory skill — query long-term conversation memory via the configured RAG backend.
 
 Indexing is handled automatically by the scheduler. This script is the
-query interface and provides manual index/status commands for debugging.
+query interface and provides manual index/status/dream/lint commands.
 
 Usage:
     memory.py <user_id> search <question>
     memory.py <user_id> index          # manual trigger (debug)
     memory.py <user_id> consolidate    # merge duplicate topic files
+    memory.py <user_id> dream          # manual dream wiki trigger
+    memory.py <user_id> lint           # wiki health check
     memory.py <user_id> status
 """
 
@@ -115,14 +117,42 @@ async def cmd_consolidate(user_id: str):
         print(json.dumps({"error": "Kein Index vorhanden"}))
         sys.exit(1)
 
-    from pawlia.rag_backend import create_backend, MarkdownTopicBackend
-    backend = create_backend(str(index_path), CFG)
-    if not isinstance(backend, MarkdownTopicBackend):
-        print(json.dumps({"error": "consolidate ist nur für das markdown-Backend verfügbar"}))
+    from pawlia.dream_wiki import DreamWikiBackend
+    backend = DreamWikiBackend(str(index_path), CFG)
+    await backend.consolidate()
+    print(json.dumps({"status": "ok", "message": "Konsolidierung abgeschlossen"}))
+
+
+async def cmd_dream(user_id: str):
+    """Manually trigger Dream Wiki: process unprocessed daily logs into wiki pages."""
+    full_cfg = {}
+    for candidate in (_PROJECT_ROOT / "config.yaml", _PROJECT_ROOT / "config.yml"):
+        if candidate.is_file():
+            with open(candidate, encoding="utf-8") as f:
+                full_cfg = yaml.safe_load(f) or {}
+            break
+
+    from pawlia.memory_indexer import MemoryIndexer
+    indexer = MemoryIndexer(str(_SESSION_DIR), full_cfg)
+    if not indexer.enabled:
+        print(json.dumps({"error": "Memory indexer not configured"}))
         sys.exit(1)
 
-    await backend._consolidate_topics()
-    print(json.dumps({"status": "ok", "message": "Konsolidierung abgeschlossen"}))
+    await indexer.process_user(user_id)
+    print(json.dumps({"status": "ok", "message": "Dream Wiki Verarbeitung abgeschlossen"}))
+
+
+async def cmd_lint(user_id: str):
+    """Run wiki health check: merge overlapping pages, fix links, detect orphans."""
+    index_path = _SESSION_DIR / user_id / "memory_index"
+    if not index_path.exists():
+        print(json.dumps({"error": "Kein Wiki vorhanden"}))
+        sys.exit(1)
+
+    from pawlia.dream_wiki import DreamWikiBackend
+    backend = DreamWikiBackend(str(index_path), CFG)
+    await backend.consolidate()
+    print(json.dumps({"status": "ok", "message": "Wiki Lint abgeschlossen"}))
 
 
 async def cmd_status(user_id: str):
@@ -158,7 +188,7 @@ async def main():
     env_user_id = os.environ.get("PAWLIA_USER_ID")
 
     if env_user_id and len(sys.argv) >= 2 and sys.argv[1] in (
-        "search", "index", "status", "consolidate"
+        "search", "index", "status", "consolidate", "dream", "lint"
     ):
         user_id = env_user_id
         command = sys.argv[1]
@@ -181,6 +211,10 @@ async def main():
         await cmd_index(user_id)
     elif command == "consolidate":
         await cmd_consolidate(user_id)
+    elif command == "dream":
+        await cmd_dream(user_id)
+    elif command == "lint":
+        await cmd_lint(user_id)
     elif command == "status":
         await cmd_status(user_id)
     else:
