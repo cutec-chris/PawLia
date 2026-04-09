@@ -107,9 +107,12 @@ models:
     think: true
 
 agents:
-  default: smart        # global fallback
+  default: smart,fast   # runtime fallback order
+  chat: smart,fast      # main chat agent
   skill_runner: fast    # model for skill sub-agents
 ```
+
+Agent model values can be comma-separated. PawLia tries them in order and falls back automatically on invocation errors.
 
 ### Enabling interfaces
 
