@@ -212,10 +212,34 @@ skill-config:
 
 | Backend | Default | Description |
 |---------|---------|-------------|
-| `markdown` | **yes** | LLM extracts topics from conversations and writes one Markdown file per topic. Retrieval via keyword matching — no embeddings, no extra dependencies. |
+| `markdown` | **yes** | **Dream Wiki** — LLM builds a structured, interlinked wiki from conversations. Pages have YAML frontmatter, `[[wikilinks]]`, and cross-references. Runs automatically overnight when idle. No embeddings required. |
 | `lightrag` | | Knowledge-graph RAG (powerful, slow). Requires `lightrag-hku`. |
 | `simple` | | Chunk + embed + cosine similarity. Fast, numpy only. |
 | `mem0` | | Fact extraction via mem0. Requires `mem0ai` + `chromadb`. |
+
+### Dream Wiki (default `markdown` backend)
+
+The default memory backend implements Karpathy's [LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) pattern. When the user has been idle for 20 minutes (typically overnight), the scheduler processes new daily chat logs and:
+
+1. **Analyzes** each conversation log via LLM — extracts topics, entities, decisions, facts
+2. **Creates/updates** wiki pages with structured Markdown, YAML frontmatter, and `[[wikilinks]]`
+3. **Rebuilds** `index.md` (catalog of all pages) and `log.md` (chronological audit log)
+4. **Consolidates** — merges overlapping pages, adds missing cross-references
+
+Storage per user (`session/{user}/memory_index/wiki/`):
+```
+wiki/
+  index.md              # Catalog of all pages
+  log.md                # Chronological audit log
+  dreamed_files.json    # Tracking: which logs have been processed
+  topics/
+    projekt-thalia.md   # One wiki page per topic/entity
+    linux-admin.md
+```
+
+Manual commands via the memory skill:
+- `dream` — trigger wiki consolidation immediately
+- `lint` — health check: merge overlapping pages, fix missing links
 
 | Key | Used by | Description |
 |-----|---------|-------------|
