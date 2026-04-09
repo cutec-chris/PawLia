@@ -69,8 +69,8 @@ Assign a specific model to a skill in `config.yaml`:
 ```yaml
 agents:
   skills:
-    searxng: groq-fast    # use the groq-fast model for the searxng skill
-    browser: smart
+    searxng: groq-fast,fast    # use groq-fast first, then fast as fallback
+    browser: smart,fast
 ```
 
 Falls back to `agents.skill_runner` → `agents.default` if not set. See [config.md](config.md#agents) for the full fallback chain.

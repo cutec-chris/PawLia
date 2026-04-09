@@ -47,7 +47,7 @@ provider is used.
 """
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from langchain_core.messages import BaseMessage, SystemMessage
 from langchain_ollama import ChatOllama
@@ -90,6 +90,82 @@ class _NoThinkWrapper:
         return getattr(self._llm, name)
 
 
+class _FallbackLLMWrapper:
+    """Wrap multiple LLMs and fail over to the next one on runtime errors."""
+
+    def __init__(self, llms: List[Any], labels: List[str]):
+        if not llms:
+            raise ValueError("Fallback wrapper requires at least one LLM")
+        self._llms = llms
+        self._labels = labels
+
+    def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        last_exc: Optional[Exception] = None
+        for idx, llm in enumerate(self._llms):
+            try:
+                return llm.invoke(messages, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                if idx < len(self._llms) - 1:
+                    logger.warning(
+                        "LLM fallback: model '%s' failed (%s), trying '%s'",
+                        self._labels[idx],
+                        exc,
+                        self._labels[idx + 1],
+                    )
+        assert last_exc is not None
+        raise last_exc
+
+    async def ainvoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        last_exc: Optional[Exception] = None
+        for idx, llm in enumerate(self._llms):
+            try:
+                return await llm.ainvoke(messages, **kwargs)
+            except Exception as exc:
+                last_exc = exc
+                if idx < len(self._llms) - 1:
+                    logger.warning(
+                        "LLM fallback: model '%s' failed (%s), trying '%s'",
+                        self._labels[idx],
+                        exc,
+                        self._labels[idx + 1],
+                    )
+        assert last_exc is not None
+        raise last_exc
+
+    def bind_tools(self, *args: Any, **kwargs: Any) -> "_FallbackLLMWrapper":
+        return _FallbackLLMWrapper(
+            [llm.bind_tools(*args, **kwargs) for llm in self._llms],
+            self._labels,
+        )
+
+    async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        last_exc: Optional[Exception] = None
+        for idx, llm in enumerate(self._llms):
+            yielded_any = False
+            try:
+                async for chunk in llm.astream(messages, **kwargs):
+                    yielded_any = True
+                    yield chunk
+                return
+            except Exception as exc:
+                if yielded_any:
+                    raise
+                last_exc = exc
+                if idx < len(self._llms) - 1:
+                    logger.warning(
+                        "LLM fallback(stream): model '%s' failed (%s), trying '%s'",
+                        self._labels[idx],
+                        exc,
+                        self._labels[idx + 1],
+                    )
+        assert last_exc is not None
+        raise last_exc
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._llms[0], name)
+
+
 class LLMFactory:
     """Creates and caches LangChain LLM instances from config."""
 
@@ -106,10 +182,15 @@ class LLMFactory:
 
     def get(self, agent_type: str = "chat") -> Any:
         """Return a (cached) LLM for the given agent type."""
-        model_cfg = self._resolve_agent(agent_type)
-        key = self._cache_key(model_cfg)
+        model_cfgs = self._resolve_agent_candidates(agent_type)
+        if len(model_cfgs) == 1:
+            return self._get_or_build_model(model_cfgs[0])
+
+        key = ("fallback", tuple(self._cache_key(cfg) for cfg in model_cfgs))
         if key not in self._cache:
-            self._cache[key] = self._build(model_cfg)
+            llms = [self._get_or_build_model(cfg) for cfg in model_cfgs]
+            labels = [str(cfg.get("model", "unknown")) for cfg in model_cfgs]
+            self._cache[key] = _FallbackLLMWrapper(llms, labels)
         return self._cache[key]
 
     def resolve_model_name(self, name: str) -> str:
@@ -175,28 +256,73 @@ class LLMFactory:
               chat:
                 model: qwen3.5:latest
         """
+        candidates = self._resolve_agent_candidates(agent_type)
+        return candidates[0]
+
+    def _resolve_agent_candidates(
+        self,
+        agent_type: str,
+        _visited: Optional[Set[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Resolve one or more model configs for an agent type.
+
+        Agent entries may contain comma-separated model references, e.g.
+        ``chat: smart,fast``. Models are tried in that order.
+        """
+        visited = _visited or set()
+        if agent_type in visited:
+            return []
+        visited = set(visited)
+        visited.add(agent_type)
+
         value = self._agent_value(agent_type)
-
-        if isinstance(value, dict):
-            # Legacy: inline model config
-            return value
-
-        if isinstance(value, str) and value in self.models:
-            # New: named model key
-            return self.models[value]
+        resolved = self._resolve_agent_value(value)
+        if resolved:
+            return resolved
 
         # Not found or unresolvable — walk up the fallback chain
         fallback = self._fallback_agent(agent_type)
         if fallback:
-            return self._resolve_agent(fallback)
+            fallback_resolved = self._resolve_agent_candidates(fallback, visited)
+            if fallback_resolved:
+                return fallback_resolved
 
         # Last resort: use the first defined model in config
         if self.models:
-            return next(iter(self.models.values()))
+            return [next(iter(self.models.values()))]
 
         raise RuntimeError(
             f"Cannot resolve agent '{agent_type}': no models defined in config"
         )
+
+    def _resolve_agent_value(self, value: Any) -> List[Dict[str, Any]]:
+        """Resolve a raw agent config value into model config dicts."""
+        if isinstance(value, dict):
+            # Legacy: inline model config
+            return [value]
+
+        if not isinstance(value, str):
+            return []
+
+        parts = [p.strip() for p in value.split(",") if p.strip()]
+        if not parts:
+            return []
+
+        configs: List[Dict[str, Any]] = []
+        template = next(iter(self.models.values()), {}) if self.models else {}
+        for part in parts:
+            if part in self.models:
+                configs.append(self.models[part])
+                continue
+
+            # Allow raw model names in agents config.
+            raw_cfg = dict(template)
+            raw_cfg["model"] = part
+            raw_cfg.setdefault("provider", self._default_provider_name())
+            raw_cfg.setdefault("temperature", 0.7)
+            configs.append(raw_cfg)
+
+        return configs
 
     def _agent_value(self, agent_type: str) -> Any:
         """Return the raw value assigned to an agent type (string key or inline dict)."""
@@ -322,6 +448,12 @@ class LLMFactory:
             return self._resolve_agent(model_or_agent)
         except RuntimeError:
             return None
+
+    def _get_or_build_model(self, model_cfg: Dict[str, Any]) -> Any:
+        key = self._cache_key(model_cfg)
+        if key not in self._cache:
+            self._cache[key] = self._build(model_cfg)
+        return self._cache[key]
 
     def _cache_key(self, model_cfg: Dict[str, Any]) -> Tuple:
         provider_name = model_cfg.get("provider") or self._default_provider_name()

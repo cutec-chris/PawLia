@@ -63,13 +63,15 @@ Assign model keys to agent types. Only configure what you want to override — t
 ```yaml
 agents:
   default: smart        # global fallback — required
-  chat: smart           # main conversation agent
+  chat: smart,fast      # main conversation agent (runtime failover)
   skill_runner: fast    # default for all skill sub-agents
   vision: vision        # used when the user sends an image
   skills:               # per-skill overrides
-    searxng: groq-fast
-    browser: smart
+    searxng: groq-fast,fast
+    browser: smart,fast
 ```
+
+If an agent value contains a comma-separated list, models are tried in order when an invocation fails (for example provider timeout or network/API errors).
 
 ### Fallback chain
 
