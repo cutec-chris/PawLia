@@ -526,7 +526,20 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
         from pawlia.transcription import transcribe
 
-        text = await transcribe(resp.body, app.config, mime=mime)
+        # Resolve the active model (respects session + thread overrides)
+        session_id = f"mx_{room.room_id}"
+        session = app.memory.load_session(session_id)
+        thread_id_pre = _resolve_thread_root(getattr(event, "source", None), thread_events)
+        active_model = (
+            (app.memory.get_thread_model_override(session, thread_id_pre) if thread_id_pre else None)
+            or session.model_override
+        )
+        audio_info = app.llm.audio_model_info(active_model or "chat")
+        if audio_info:
+            from pawlia.transcription import transcribe_via_model
+            text = await transcribe_via_model(resp.body, audio_info[0], audio_info[1], mime=mime)
+        else:
+            text = await transcribe(resp.body, app.config, mime=mime)
         if not text:
             logger.warning("Matrix: transcription returned nothing for %s", event.body)
             await _send_text(room.room_id, "*(Sprachnachricht konnte nicht transkribiert werden)*")

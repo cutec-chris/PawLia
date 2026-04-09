@@ -27,6 +27,11 @@ models:
   #   model: qwen3:4b
   #   provider: groq
   #   temperature: 0.3
+  # gemma4:
+  #   model: gemma4:latest
+  #   provider: ollama
+  #   temperature: 0.3
+  #   audio_input: true    # native audio — skips STT, sends audio directly to the model
 
 # Assign a model (by key) to each agent type.
 # Fallback chain: chat/vision/skill_runner → default
