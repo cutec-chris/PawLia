@@ -45,6 +45,11 @@ _PROVIDER_BASE_URLS: Dict[str, str] = {
 }
 _DEFAULT_MODEL = "whisper-large-v3-turbo"
 
+_NATIVE_AUDIO_PROMPT = (
+    "Transkribiere diese Audiodatei wörtlich. "
+    "Antworte NUR mit dem gesprochenen Text, ohne Erklärungen oder Formatierung."
+)
+
 
 async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "audio/ogg") -> Optional[str]:
     """Transcribe *audio_bytes* to text.
@@ -112,6 +117,81 @@ async def transcribe_pcm(
         wf.writeframes(pcm_int16.tobytes())
 
     return await transcribe(buf.getvalue(), config, mime="audio/wav")
+
+
+async def transcribe_via_model(
+    audio_bytes: bytes,
+    ollama_base: str,
+    model: str,
+    mime: str = "audio/wav",
+    prompt: Optional[str] = None,
+) -> Optional[str]:
+    """Transcribe audio using a model with native audio support (e.g. Gemma4).
+
+    Calls the Ollama ``/api/chat`` endpoint directly — the ``images`` field
+    accepts any binary attachment including audio.
+
+    *ollama_base* is the Ollama base URL **without** ``/v1`` (e.g.
+    ``http://localhost:11434``).
+    """
+    import base64
+    import httpx
+
+    audio_b64 = base64.b64encode(audio_bytes).decode()
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt or _NATIVE_AUDIO_PROMPT,
+                "images": [audio_b64],
+            }
+        ],
+        "stream": False,
+    }
+    url = f"{ollama_base.rstrip('/')}/api/chat"
+    logger.info("transcribe_via_model: sending audio (%d bytes) to %s model=%s", len(audio_bytes), url, model)
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=payload, timeout=120)
+            resp.raise_for_status()
+            data = resp.json()
+            text = data.get("message", {}).get("content", "").strip()
+            logger.info("transcribe_via_model: result: %s", text[:120] if text else "(empty)")
+            return text or None
+    except Exception as e:
+        logger.error("transcribe_via_model: error: %s", e, exc_info=True)
+        return None
+
+
+async def transcribe_pcm_via_model(
+    pcm_float32: "np.ndarray",
+    sample_rate: int,
+    ollama_base: str,
+    model: str,
+    prompt: Optional[str] = None,
+) -> Optional[str]:
+    """Transcribe raw float32 PCM via a native-audio model.
+
+    Wraps PCM in WAV and delegates to :func:`transcribe_via_model`.
+    """
+    import io
+    import wave
+
+    import numpy as np
+
+    pcm_float32 = _bandpass_pcm(pcm_float32, sample_rate)
+    pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_int16.tobytes())
+
+    return await transcribe_via_model(buf.getvalue(), ollama_base, model, mime="audio/wav", prompt=prompt)
 
 
 # ---------------------------------------------------------------------------
