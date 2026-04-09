@@ -1,7 +1,7 @@
 """Abstract RAG backend interface and implementations.
 
 Supported backends:
-  - markdown  (default) — LLM-based topic extraction → one Markdown file per topic
+  - markdown  (default) — Dream Wiki: LLM builds structured, interlinked wiki
   - lightrag            — LightRAG knowledge-graph RAG, powerful but slow
   - simple              — chunking + embedding + cosine similarity, no extra deps
   - mem0                — mem0 fact-extraction (requires: pip install mem0ai chromadb)
@@ -1076,7 +1076,7 @@ def create_backend(
     """Instantiate the configured RAG backend.
 
     Select via ``cfg["rag_backend"]``:
-      - ``"markdown"`` (default) — LLM topic extraction → Markdown files
+      - ``"markdown"`` (default) — Dream Wiki: structured, interlinked wiki
       - ``"lightrag"``           — LightRAG knowledge-graph
       - ``"simple"``             — chunking + cosine similarity (numpy only)
       - ``"mem0"``               — mem0 fact extraction (requires mem0ai + chromadb)
@@ -1090,11 +1090,13 @@ def create_backend(
         Override config defaults (useful for query-only instances that can
         afford higher concurrency).
     """
+    from pawlia.dream_wiki import DreamWikiBackend
+
     backend_name = cfg.get("rag_backend", "markdown")
 
     if backend_name == "markdown":
-        logger.debug("Using Markdown-topic backend at %s", index_path)
-        return MarkdownTopicBackend(index_path, cfg, llm_busy_check)
+        logger.debug("Using Dream Wiki backend at %s", index_path)
+        return DreamWikiBackend(index_path, cfg, llm_busy_check)
 
     if backend_name == "simple":
         logger.debug("Using SimpleVector backend at %s", index_path)
@@ -1111,3 +1113,7 @@ def create_backend(
         max_async_llm=max_async_llm,
         max_async_embedding=max_async_embedding,
     )
+
+
+# Legacy alias — existing code that references MarkdownTopicBackend keeps working.
+MarkdownTopicBackend = None  # replaced by DreamWikiBackend; import from dream_wiki if needed

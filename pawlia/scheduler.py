@@ -26,7 +26,7 @@ EVENT_REMINDER_MINUTES = 15  # notify this many minutes before an event
 # in progress.
 IDLE_SUMMARIZE_MIN = 5    # conversation summarization
 IDLE_BACKGROUND_MIN = 10  # deferred /background tasks
-IDLE_MEMORY_MIN = 20      # LightRAG memory indexing
+IDLE_MEMORY_MIN = 20      # Memory indexing (RAG / Dream Wiki)
 
 # Type for notification callbacks: async def send(user_id, message) -> None
 NotifyCallback = Callable[[str, str], Coroutine[Any, Any, None]]
@@ -220,7 +220,9 @@ class Scheduler:
                 except Exception as e:
                     logger.error("Background task failed for %s: %s", user_id, e)
 
-            # Prio 3: Memory indexing (configurable idle, default 20 min)
+            # Prio 3: Memory indexing / Dream Wiki (configurable idle, default 20 min)
+            #   When rag_backend=markdown, this triggers Dream Wiki consolidation.
+            #   When rag_backend=lightrag/mem0/simple, this triggers RAG indexing.
             skill_config = self._config.get("skill-config") or {}
             memory_config = skill_config.get("memory") or {}
             idle_memory_min = int(memory_config.get("idle_minutes", IDLE_MEMORY_MIN))
