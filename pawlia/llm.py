@@ -284,6 +284,45 @@ class LLMFactory:
     # Helpers
     # ------------------------------------------------------------------
 
+    def audio_model_info(self, model_or_agent: Optional[str] = None) -> Optional[Tuple[str, str]]:
+        """Return ``(ollama_base_url, model_name)`` if the model supports native audio, else ``None``.
+
+        *model_or_agent* can be:
+        - a model config key (e.g. ``"gemma4"``)
+        - a raw model name (e.g. ``"gemma4:e4b"``)
+        - an agent type (e.g. ``"chat"``)
+        - ``None`` → resolves ``"chat"`` agent type
+
+        The model config must have ``audio_input: true`` to be eligible.
+        """
+        model_cfg = self._resolve_audio_cfg(model_or_agent)
+        if model_cfg is None or not model_cfg.get("audio_input"):
+            return None
+        model = model_cfg.get("model", "")
+        provider_name = model_cfg.get("provider") or self._default_provider_name()
+        provider_cfg = self._get_provider(provider_name)
+        api_base = provider_cfg.get("apiBase", "").rstrip("/")
+        # Strip /v1 suffix — native Ollama endpoint lives at /api/chat
+        ollama_base = api_base.removesuffix("/v1") or "http://localhost:11434"
+        return ollama_base, model
+
+    def _resolve_audio_cfg(self, model_or_agent: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Resolve a model_or_agent string to its model config dict."""
+        if model_or_agent is None:
+            return self._resolve_agent("chat")
+        # Direct model config key
+        if model_or_agent in self.models:
+            return self.models[model_or_agent]
+        # Reverse lookup by raw model name
+        for _key, cfg in self.models.items():
+            if cfg.get("model") == model_or_agent:
+                return cfg
+        # Agent type fallback
+        try:
+            return self._resolve_agent(model_or_agent)
+        except RuntimeError:
+            return None
+
     def _cache_key(self, model_cfg: Dict[str, Any]) -> Tuple:
         provider_name = model_cfg.get("provider") or self._default_provider_name()
         provider_cfg = self._get_provider(provider_name)

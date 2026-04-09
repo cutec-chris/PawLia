@@ -761,7 +761,14 @@ class CallSession:
             except Exception as e:
                 logger.debug("call %s: could not save debug audio: %s", self.call_id[:8], e)
 
-        text = await transcribe_pcm(pcm, sample_rate, self._app.config)
+        # Resolve the active model for this call context
+        active_model = self._agent._active_override_model(self.thread_id)
+        audio_info = self._app.llm.audio_model_info(active_model or "chat")
+        if audio_info:
+            from pawlia.transcription import transcribe_pcm_via_model
+            text = await transcribe_pcm_via_model(pcm, sample_rate, audio_info[0], audio_info[1])
+        else:
+            text = await transcribe_pcm(pcm, sample_rate, self._app.config)
         if not text:
             logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
             return

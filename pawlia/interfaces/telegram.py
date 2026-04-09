@@ -283,7 +283,15 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
         from pawlia.transcription import transcribe
 
-        text = await transcribe(data, app.config, mime="audio/ogg")
+        # Resolve the active model for this user (respects session overrides)
+        session = app.memory.load_session(user_id)
+        active_model = session.model_override
+        audio_info = app.llm.audio_model_info(active_model or "chat")
+        if audio_info:
+            from pawlia.transcription import transcribe_via_model
+            text = await transcribe_via_model(data, audio_info[0], audio_info[1], mime="audio/ogg")
+        else:
+            text = await transcribe(data, app.config, mime="audio/ogg")
         if not text:
             logger.warning("Telegram: transcription returned nothing")
             await update.message.reply_text(
