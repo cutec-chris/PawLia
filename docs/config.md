@@ -184,6 +184,30 @@ tts:
 | `provider` | `piper` (local) or `edge` (Microsoft Edge TTS, requires internet) |
 | `hold_audio` | Path to audio file (wav/mp3/m4a) played to caller while waiting. Default: `assets/keyboard.m4a` |
 
+## Workspace
+
+The workspace directory (`session/<user>/workspace/`) serves as an Obsidian vault. Optional Git integration auto-commits changes and keeps the repo compact with daily/weekly squash.
+
+```yaml
+workspace:
+  git:
+    enabled: true                  # auto-commit workspace changes
+    daily_squash_time: "23:00"     # squash daily commits into one
+    weekly_squash_day: 6           # 0=Mon..6=Sun (default: Sunday)
+    weekly_squash_time: "23:30"    # squash weekly commits into one
+    push: false                    # push to remote after squash
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Enable workspace Git auto-commit and squash |
+| `daily_squash_time` | `23:00` | Time to squash all daily commits into one |
+| `weekly_squash_day` | `6` | Day of week for weekly squash (0=Mon, 6=Sun) |
+| `weekly_squash_time` | `23:30` | Time for weekly squash |
+| `push` | `false` | Push to remote after squash (`--force-with-lease`) |
+
+Auto-commits are throttled to max 1 per 5 minutes. See [automation.md](automation.md#workspace-git-sync) for details.
+
 ## Skill Configuration
 
 Per-skill settings (URLs, API keys, etc.). Keys match the skill name.

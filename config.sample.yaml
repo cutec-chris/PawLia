@@ -118,6 +118,17 @@ interfaces:
 #
 #   # hold_audio: /app/assets/keyboard.m4a   # background sound while waiting for agent (default: assets/keyboard.m4a)
 
+# Workspace settings — the workspace directory (session/<user>/workspace/) is
+# an Obsidian vault.  Enable git to auto-commit changes and keep the repo small
+# with daily/weekly squash.
+workspace:
+  git:
+    enabled: false                 # auto-commit workspace changes via git
+    # daily_squash_time: "23:00"   # squash all daily commits into one (default: 23:00)
+    # weekly_squash_day: 6         # 0=Mon..6=Sun (default: 6 = Sunday)
+    # weekly_squash_time: "23:30"  # squash all weekly commits into one (default: 23:30)
+    # push: false                  # push to remote after squash (uses --force-with-lease)
+
 skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload
   allow_workspace: false   # load skills from session/<user>/workspace/skills/ (default: false)

@@ -300,6 +300,40 @@ print("Heute 3 neue E-Mails, 2 offene Tasks, keine Termine.")
 2. `scripts/<script>` — global project scripts
 3. `skills/*/scripts/<script>` — skill scripts
 
+## Workspace Git Sync
+
+The workspace can be kept in a Git repository for syncing (e.g. to a remote for backup or multi-device access). Enable in `config.yaml`:
+
+```yaml
+workspace:
+  git:
+    enabled: true
+    daily_squash_time: "23:00"     # squash all daily commits into one
+    weekly_squash_day: 6           # 0=Mon..6=Sun (default: Sunday)
+    weekly_squash_time: "23:30"    # squash all weekly commits into one
+    push: false                    # push to remote after squash
+```
+
+### How it works
+
+1. **Auto-commit** — every scheduler tick (60s), uncommitted changes are committed. Throttled to max 1 commit per 5 minutes to avoid noise.
+2. **Daily squash** — at the configured time (default 23:00), all commits from today are squashed into one `Daily: YYYY-MM-DD` commit.
+3. **Weekly squash** — on the configured day (default Sunday) at the configured time (default 23:30), all commits from this week are squashed into one `Week: YYYY-Www` commit.
+4. **Push** — if `push: true` and a remote is configured, pushes after each squash using `--force-with-lease`.
+
+### Setting up a remote
+
+```bash
+cd session/<user>/workspace
+git remote add origin git@github.com:you/vault.git
+```
+
+The scheduler will auto-push after squash if `push: true`.
+
+### What gets committed
+
+Everything in `workspace/` — wiki pages, calendar events, tasks, identity files, memory logs. Internal state files (`scheduler_state.json`, `automations/jobs.json`) live outside the workspace and are not tracked.
+
 ## Notification Pipeline
 
 All notifications pass through this pipeline:

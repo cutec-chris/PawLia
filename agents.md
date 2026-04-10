@@ -148,7 +148,8 @@ session/{user_id}/
 │   ├── IDENTITY.md                 # agent identity (from template)
 │   ├── USER.md                     # user context (from template)
 │   ├── bootstrap.md                # onboarding (removed once identity files are filled)
-│   └── skills/                     # workspace skills (with allow_workspace: true)
+│   ├── skills/                     # workspace skills (with allow_workspace: true)
+│   └── .git/                       # optional: auto-managed by workspace git sync
 ├── scheduler_state.json            # internal scheduler flags (notified, fired, etc.)
 ├── automations/
 │   └── jobs.json                   # scheduled automation jobs
