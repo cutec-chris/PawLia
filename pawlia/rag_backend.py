@@ -1072,6 +1072,7 @@ def create_backend(
     think: Optional[bool] = False,
     max_async_llm: Optional[int] = None,
     max_async_embedding: Optional[int] = None,
+    wiki_dir: Optional[str] = None,
 ) -> RagBackend:
     """Instantiate the configured RAG backend.
 
@@ -1096,7 +1097,7 @@ def create_backend(
 
     if backend_name == "markdown":
         logger.debug("Using Dream Wiki backend at %s", index_path)
-        return DreamWikiBackend(index_path, cfg, llm_busy_check)
+        return DreamWikiBackend(index_path, cfg, llm_busy_check, wiki_dir=wiki_dir)
 
     if backend_name == "simple":
         logger.debug("Using SimpleVector backend at %s", index_path)

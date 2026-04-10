@@ -141,6 +141,10 @@ session/{user_id}/
 │   ├── IDENTITY.md                # agent identity (from template)
 │   ├── USER.md                    # user context (from template)
 │   ├── bootstrap.md               # onboarding (removed once identity files are filled)
+│   ├── wiki/                     # Dream Wiki (structured knowledge base)
+│   │   ├── index.md              # catalog of all pages
+│   │   ├── log.md                # chronological audit log
+│   │   └── topics/               # one .md page per topic/entity
 │   └── skills/                   # workspace skills (with allow_workspace: true)
 ├── reminders.json                 # proactive reminders (managed by Scheduler)
 └── calendar/

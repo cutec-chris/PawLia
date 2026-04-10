@@ -228,7 +228,7 @@ The default memory backend implements Karpathy's [LLM Wiki](https://gist.github.
 3. **Rebuilds** `index.md` (catalog of all pages) and `log.md` (chronological audit log)
 4. **Consolidates** — merges overlapping pages, adds missing cross-references
 
-Storage per user (`session/{user}/memory_index/wiki/`):
+Storage per user (`session/{user}/workspace/wiki/`):
 ```
 wiki/
   index.md              # Catalog of all pages
