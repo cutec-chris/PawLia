@@ -16,7 +16,7 @@ When the user sends a message, the dispatcher (ChatAgent) decides whether to cal
 | `perplexica` | AI-powered search via Perplexica | `skill-config.perplexica.url` |
 | `browser` | Browse and extract content from web pages | — |
 | `files` | Read, write, and manage files in the workspace | — |
-| `organizer` | Calendar and task management | — |
+| `organizer` | Calendar events (Full Calendar), tasks (Obsidian Tasks), reminders, scheduled jobs — Obsidian vault native | — |
 
 ## Custom skills
 

@@ -2,20 +2,25 @@
 
 PawLia's automation system follows the principle **"LLM plans, system executes"**. The LLM creates events, tasks and jobs with concrete automation rules. The system then processes them automatically at the right time — no LLM needed at runtime.
 
-All notifications (reminders, script results, etc.) are routed through the LLM for a personalized response before delivery. If the LLM fails (timeout is controlled by the provider's `timeout` setting in config), the raw message is delivered as fallback.
+All data visible to the user is stored as **Obsidian-compatible Markdown** in `workspace/`. The workspace directory functions as an [Obsidian](https://obsidian.md) vault — events use the [Full Calendar](https://github.com/obsidian-community/obsidian-full-calendar) plugin format, tasks use the [Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) emoji format.
+
+Internal scheduler state (notification flags, checklist execution status) is stored separately in `scheduler_state.json` outside the vault.
+
+All notifications (reminders, script results, etc.) are routed through the LLM for a personalized response before delivery. If the LLM fails, the raw message is delivered as fallback.
 
 ## Overview
 
 | Feature | Storage | Trigger | LLM involved? |
 |---------|---------|---------|---------------|
-| Simple reminders | `reminders.json` | Fixed time or relative (`10m`, `2h`) | Only for formatting output |
-| Event checklists | `calendar/events.json` → `checklist[]` | Relative to event start | Only for formatting output |
-| Task reminders | `tasks/tasks.json` → `reminders[]` | Relative to due date | Only for formatting output |
+| Simple reminders | `workspace/tasks.md` (🔔 prefix + ⏳ scheduled date) | Fixed time or relative (`10m`, `2h`) | Only for formatting output |
+| Calendar events | `workspace/calendar/<date> <title>.md` (Full Calendar frontmatter) | 15 min before start | Only for formatting output |
+| Event checklists | Event frontmatter `checklist:` + `scheduler_state.json` | Relative to event start | Only for formatting output |
+| Task reminders | `workspace/tasks.md` (📅 due date) + `scheduler_state.json` | Relative to due date | Only for formatting output |
 | Scheduled jobs | `automations/jobs.json` | Cron-like schedule | Only for formatting output |
 
 ## Simple Reminders
 
-Quick, one-off or recurring reminders.
+Quick, one-off or recurring reminders. Stored as scheduled tasks in `workspace/tasks.md` with a 🔔 prefix, compatible with the Obsidian Tasks plugin.
 
 ```
 "Erinnere mich in 10 Minuten an die Pizza"
@@ -24,87 +29,133 @@ Quick, one-off or recurring reminders.
 The LLM creates a reminder via the organizer skill:
 
 ```bash
-python organizer.py add-reminder --user-id <id> --session-dir <dir> \
-  --fire-at "10m" --message "Pizza aus dem Ofen!" --label "Pizza"
+python organizer.py add-reminder --fire-at "10m" --message "Pizza aus dem Ofen!" --label "Pizza"
 ```
 
-### Data model (`session/<user>/reminders.json`)
+### Format in `workspace/tasks.md`
 
-```json
-{
-  "id": "uuid",
-  "user_id": "cli_user",
-  "fire_at": "2026-03-20T18:30:00",
-  "message": "Pizza aus dem Ofen!",
-  "label": "Pizza",
-  "recurrence": "none",
-  "fired": false,
-  "created_at": "2026-03-20T18:20:00"
-}
+```markdown
+- [ ] 🔔 Pizza: Pizza aus dem Ofen! ⏳ 2026-03-20T18:30 ➕ 2026-03-20
 ```
 
-- `fire_at` — absolute ISO8601 datetime (relative times like `10m` are resolved at creation)
-- `recurrence` — `none`, `daily`, `weekly`, or `monthly`
-- `fired` — set to `true` after delivery (recurring reminders update `fire_at` instead)
+When fired, the scheduler marks it as done:
+```markdown
+- [x] 🔔 Pizza: Pizza aus dem Ofen! ⏳ 2026-03-20T18:30 ➕ 2026-03-20 ✅ 2026-03-20
+```
 
-## Event Checklists
+Recurring reminders use the 🔁 emoji and get rescheduled instead of completed:
+```markdown
+- [ ] 🔔 Daily: Wasser trinken! 🔁 every day ⏳ 2026-03-21T09:00 ➕ 2026-03-20
+```
 
-Events can have a checklist of automated preparation steps. Each item is either a **script** that gets executed or a **plain notification**.
+### Emoji reference
+
+| Emoji | Meaning |
+|-------|---------|
+| 🔔 | Reminder (prefix in title) |
+| ⏳ | Scheduled date/time |
+| 🔁 | Recurrence (`every day`, `every week`, `every month`) |
+| ➕ | Created date |
+| ✅ | Completed date |
+
+## Calendar Events
+
+Events are stored as individual Markdown files with YAML frontmatter compatible with the Obsidian [Full Calendar](https://github.com/obsidian-community/obsidian-full-calendar) plugin.
 
 ```
 "Termin am Freitag 14 Uhr, Kundenpräsentation in Hamburg"
 ```
 
-The LLM creates the event with a checklist:
+The LLM creates the event with a checklist via the organizer skill.
 
-```json
-{
-  "title": "Kundenpräsentation Hamburg",
-  "start": "2026-03-21T14:00:00",
-  "location": "Hamburg Innenstadt",
-  "checklist": [
-    {
-      "id": "chk-a1b2c3d4",
-      "script": "",
-      "trigger": "relative",
-      "trigger_offset": "-1d",
-      "message": "Morgen: Kundenpräsentation in Hamburg. Unterlagen vorbereiten!",
-      "status": "pending"
-    },
-    {
-      "id": "chk-e5f6g7h8",
-      "script": "route_plan.py",
-      "trigger": "relative",
-      "trigger_offset": "-90m",
-      "params": {"from": "home", "to": "Hamburg Innenstadt"},
-      "notify": true,
-      "status": "pending"
-    },
-    {
-      "id": "chk-i9j0k1l2",
-      "script": "check_traffic.py",
-      "trigger": "relative",
-      "trigger_offset": "-60m",
-      "params": {"destination": "Hamburg"},
-      "notify": true,
-      "status": "pending"
-    }
-  ]
-}
+### File format (`workspace/calendar/2026-03-21 Kundenpräsentation Hamburg.md`)
+
+```yaml
+---
+title: Kundenpräsentation Hamburg
+allDay: false
+date: '2026-03-21'
+endDate: null
+startTime: '14:00'
+endTime: '16:00'
+location: Hamburg Innenstadt
+type: single
+checklist:
+- id: chk-a1b2c3d4
+  message: 'Morgen: {title} in {location}. Unterlagen vorbereiten!'
+  trigger: relative
+  trigger_offset: '-1d'
+- id: chk-e5f6g7h8
+  notify: true
+  params:
+    from: home
+    to: Hamburg Innenstadt
+  script: route_plan.py
+  trigger: relative
+  trigger_offset: '-90m'
+---
+
+Kundenpräsentation für Projekt Alpha.
+
+## Checkliste
+- [ ] Morgen: {title} in {location}. Unterlagen vorbereiten! (-1d)
+- [ ] route_plan.py (-90m)
 ```
+
+The frontmatter contains both standard Full Calendar fields and the `checklist` automation config. The body is for human-readable notes — the checklist in the body is informational, the scheduler reads only from frontmatter.
+
+### Full Calendar frontmatter fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `title` | string | Event title |
+| `date` | string | Start date (`YYYY-MM-DD`) |
+| `startTime` | string | Start time (`HH:MM`) — omit for all-day |
+| `endTime` | string | End time (`HH:MM`) |
+| `endDate` | string/null | End date if multi-day |
+| `allDay` | boolean | All-day event flag |
+| `type` | string | `single` (or `recurring` with `rrule`) |
+| `location` | string | Location |
+| `completed` | boolean/null | For task-type events |
+
+### Event notifications
+
+The scheduler automatically notifies 15 minutes before an event starts. The notification state is tracked in `scheduler_state.json` (not in the .md file).
+
+### Event ID
+
+The event ID is the filename (e.g. `2026-03-21 Kundenpräsentation Hamburg.md`). Delete and list operations use this filename (`.md` extension optional).
+
+## Event Checklists
+
+Events can have a checklist of automated preparation steps in their frontmatter. Each item is either a **script** that gets executed or a **plain notification**.
 
 ### Checklist item fields
 
 | Field | Description |
 |-------|-------------|
+| `id` | Unique identifier (e.g. `chk-a1b2c3d4`) |
 | `script` | Path to automation script. Empty = pure notification. |
 | `trigger` | `relative` (offset from event start), `on_create` (immediately), `absolute` (fixed time) |
 | `trigger_offset` | e.g. `-2h`, `-1d`, `-30m` (negative = before event) |
 | `message` | Plain text notification. Supports placeholders: `{title}`, `{location}`, `{start}`, `{description}` |
-| `params` | JSON object passed to the script via `AUTOMATION_PARAMS` env var |
+| `params` | Object passed to the script via `AUTOMATION_PARAMS` env var |
 | `notify` | Whether to send the result to the user (default: `true`) |
-| `status` | `pending` → `done` or `failed` |
-| `result` | Script stdout (on success) or stderr (on failure), set after execution |
+
+### Checklist state tracking
+
+Checklist execution state (done/failed, result, timestamp) is stored in `scheduler_state.json`, not in the event file:
+
+```json
+{
+  "checklist_state": {
+    "2026-03-21 Kundenpräsentation Hamburg.md": {
+      "chk-a1b2c3d4": {"status": "done", "executed_at": "2026-03-20T14:00:00"},
+      "chk-e5f6g7h8": {"status": "done", "result": "ICE 1523 ab 11:15...", "executed_at": "2026-03-21T12:30:00"}
+    }
+  }
+}
+```
 
 ### Execution timeline example
 
@@ -115,43 +166,70 @@ T-60m    📋 check_traffic.py → "Keine Verspätungen, alles planmäßig"
 T-15m    📅 Standard event notification (built-in)
 ```
 
-## Task Reminders
+## Tasks
 
-Tasks with a due date get automatic reminders based on priority.
+Tasks are stored in Obsidian [Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) emoji format in `workspace/tasks.md`.
+
+```
+"Erstell eine Aufgabe: Bericht schreiben, fällig Freitag, Priorität hoch"
+```
+
+### Format in `workspace/tasks.md`
+
+```markdown
+- [ ] Bericht schreiben ⏫ 📅 2026-03-22 ➕ 2026-03-19
+- [ ] Server migrieren 🔼 📅 2026-04-15 ➕ 2026-04-01
+- [x] Backup prüfen 🔽 📅 2026-03-20 ➕ 2026-03-18 ✅ 2026-03-19
+```
+
+### Task emoji reference
+
+| Emoji | Meaning |
+|-------|---------|
+| 🔺 | Highest priority |
+| ⏫ | High priority |
+| 🔼 | Medium priority |
+| 🔽 | Low priority |
+| ⏬ | Lowest priority |
+| 📅 | Due date |
+| 🛫 | Start date |
+| ⏳ | Scheduled date |
+| ➕ | Created date |
+| ✅ | Completed date |
+| ❌ | Cancelled date |
+| 🔁 | Recurrence |
+
+### Task ID
+
+Tasks are identified by their title (or a substring match). Complete and delete operations use title matching.
+
+### Task reminders
+
+Reminder rules are stored in `scheduler_state.json` (not in the task line). The LLM sets them when creating a task:
 
 ```json
 {
-  "title": "Bericht schreiben",
-  "due_date": "2026-03-22",
-  "priority": "high",
-  "status": "pending",
-  "reminders": [
-    {"offset": "-3d", "message": "In 3 Tagen fällig: {title}", "fired": false},
-    {"offset": "-1d", "message": "Morgen fällig: {title}", "fired": false},
-    {"offset": "-2h", "message": "In 2 Stunden fällig: {title}", "fired": false}
-  ]
+  "task_reminders": {
+    "bericht schreiben": [
+      {"offset": "-3d", "message": "In 3 Tagen fällig: {title}", "fired": false},
+      {"offset": "-1d", "message": "Morgen fällig: {title}", "fired": false},
+      {"offset": "-2h", "message": "In 2 Stunden fällig: {title}", "fired": false}
+    ]
+  }
 }
 ```
 
-The LLM sets the reminder strategy when creating the task. Suggested defaults:
+Suggested reminder defaults by priority:
 
 | Priority | Reminders |
 |----------|-----------|
-| high | 3d, 1d, 2h before |
+| highest/high | 3d, 1d, 2h before |
 | medium | 1d, 2h before |
-| low | 2h before |
-
-### Reminder fields
-
-| Field | Description |
-|-------|-------------|
-| `offset` | Relative to `due_date`, e.g. `-3d`, `-1d`, `-2h` |
-| `message` | Notification text. Placeholders: `{title}`, `{due_date}` |
-| `fired` | Set to `true` after delivery |
+| low/lowest | 2h before |
 
 ## Scheduled Jobs
 
-For recurring automated tasks the LLM writes a script and registers it as a job.
+For recurring automated tasks the LLM writes a script and registers it as a job. Jobs are stored in `automations/jobs.json` (outside the workspace) since they are scheduler-internal automation config.
 
 ### Workflow
 
@@ -160,8 +238,7 @@ For recurring automated tasks the LLM writes a script and registers it as a job.
 3. LLM registers the job via organizer:
 
 ```bash
-python organizer.py add-job --user-id <id> --session-dir <dir> \
-  --name "Tagesbericht" --script "daily_report.py" --schedule "16:00"
+python organizer.py add-job --name "Tagesbericht" --script "daily_report.py" --schedule "16:00"
 ```
 
 4. Every day at 16:00, the scheduler executes the script and sends the output as notification.
@@ -257,32 +334,37 @@ The LLM receives the raw data and the user's context (memory, preferences) to pr
 │                                                           │
 │  ── High priority (every tick) ──────────────────────    │
 │                                                           │
-│  ┌──────────┐ ┌───────────┐ ┌────────────────┐          │
-│  │ Reminders│ │ Checklist │ │ Task Reminders │          │
-│  │          │ │ Processor │ │   Processor    │          │
-│  └────┬─────┘ └─────┬─────┘ └──────┬─────────┘          │
-│       │             │              │                      │
-│       │    ┌────────┴────────┐     │                      │
-│       │    │  Script Executor│     │                      │
-│       │    └────────┬────────┘     │                      │
-│       │             │              │                      │
-│  ┌────┴─────────────┴──────────────┴──────────────────┐  │
-│  │            _notify (LLM formatter)                 │  │
-│  └────────────────────┬───────────────────────────────┘  │
-│                       │                                   │
-│  ┌────────────────────┴───────────────────────────────┐  │
-│  │         Job Runner (cron-like schedule)             │  │
-│  └────────────────────────────────────────────────────┘  │
+│  workspace/tasks.md        workspace/calendar/*.md        │
+│  ┌──────────┐              ┌───────────┐                  │
+│  │ Reminders│              │  Events   │                  │
+│  │  (🔔⏳)  │              │(frontmatter│                 │
+│  └────┬─────┘              └─────┬─────┘                  │
+│       │                          │                        │
+│       │  ┌───────────┐ ┌────────┴────────┐                │
+│       │  │ Task Rem. │ │  Checklist Proc │                │
+│       │  │ Processor │ │  (scripts)      │                │
+│       │  └─────┬─────┘ └────────┬────────┘                │
+│       │        │                │                         │
+│  ┌────┴────────┴────────────────┴──────────────────────┐  │
+│  │       scheduler_state.json (flags, results)         │  │
+│  └─────────────────────┬──────────────────────────────┘  │
+│                        │                                  │
+│  ┌─────────────────────┴──────────────────────────────┐  │
+│  │          _notify (LLM formatter)                    │  │
+│  └─────────────────────┬──────────────────────────────┘  │
+│                        │                                  │
+│  ┌─────────────────────┴──────────────────────────────┐  │
+│  │   automations/jobs.json → Job Runner (cron-like)    │  │
+│  └─────────────────────────────────────────────────────┘  │
 │                                                           │
-│  ── Low priority (all users idle 20min + LLM free) ──   │
+│  ── Low priority (idle + LLM free) ──────────────────    │
 │                                                           │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  Background Tasks (deferred agent.run via /background)│
-│  └────────────────────┬───────────────────────────────┘  │
-│                       │                                   │
-│  ┌────────────────────┴───────────────────────────────┐  │
-│  │  Memory Indexer (LightRAG knowledge graph)         │  │
-│  └────────────────────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────┐  │
+│  │  Background Tasks (deferred agent.run)              │  │
+│  └─────────────────────┬──────────────────────────────┘  │
+│  ┌─────────────────────┴──────────────────────────────┐  │
+│  │  Memory Indexer / Dream Wiki                        │  │
+│  └─────────────────────────────────────────────────────┘  │
 │                                                           │
 └───────────────────────┬──────────────────────────────────┘
                         │
@@ -295,29 +377,37 @@ The LLM receives the raw data and the user's context (memory, preferences) to pr
 
 ```
 session/<user>/
-├── reminders.json              # Simple reminders
-├── calendar/
-│   └── events.json             # Events with checklist[]
-├── tasks/
-│   └── tasks.json              # Tasks with reminders[]
+├── workspace/                      # Obsidian vault
+│   ├── calendar/                   # Full Calendar plugin events
+│   │   ├── 2026-03-21 Meeting.md   # one .md per event
+│   │   └── 2026-03-22 Standup.md
+│   ├── tasks.md                    # Obsidian Tasks emoji format
+│   ├── wiki/                       # Dream Wiki knowledge base
+│   │   ├── index.md
+│   │   ├── log.md
+│   │   └── topics/
+│   ├── memory/                     # Daily chat logs
+│   ├── soul.md / IDENTITY.md / ... # Identity files
+│   └── skills/                     # Workspace skills
+├── scheduler_state.json            # Internal: notified/fired/checklist state
 ├── automations/
-│   ├── jobs.json               # Scheduled job definitions
-│   ├── daily_report.py         # User automation scripts
-│   └── check_traffic.py        # (written by LLM)
+│   ├── jobs.json                   # Scheduled job definitions
+│   ├── daily_report.py             # User automation scripts
+│   └── check_traffic.py
 ├── background_tasks/
-│   └── <task_id>.json          # Deferred agent.run() tasks
-├── memory_index/               # LightRAG knowledge graph index
-│   └── indexed_files.json      # Tracks which chat logs have been indexed
-└── researches/                 # Research skill output
+│   └── <task_id>.json
+└── memory_index/                   # RAG backend index
+    └── dreamed_files.json
 ```
 
 ## Related modules
 
 | Module | Role |
 |--------|------|
-| [`pawlia/scheduler.py`](../pawlia/scheduler.py) | Main loop, notification pipeline with LLM formatting, priority gate |
+| [`pawlia/scheduler.py`](../pawlia/scheduler.py) | Main loop, reads workspace Markdown, manages scheduler_state.json |
 | [`pawlia/automation.py`](../pawlia/automation.py) | Script executor, checklist/job/task processors |
 | [`pawlia/background_tasks.py`](../pawlia/background_tasks.py) | Background task queue (deferred agent.run) |
-| [`pawlia/memory_indexer.py`](../pawlia/memory_indexer.py) | LightRAG-based knowledge graph indexing of chat logs |
+| [`pawlia/memory_indexer.py`](../pawlia/memory_indexer.py) | Memory indexing / Dream Wiki processing |
+| [`pawlia/dream_wiki.py`](../pawlia/dream_wiki.py) | Dream Wiki backend (Karpathy's LLM Wiki) |
 | [`skills/organizer/`](../skills/organizer/) | LLM-facing skill for creating events, tasks, reminders, jobs |
 | [`pawlia/app.py`](../pawlia/app.py) | Wires LLM formatter and app reference into scheduler |

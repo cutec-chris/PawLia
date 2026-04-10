@@ -4,14 +4,25 @@ checklist items, task reminders, scheduled automation jobs, and memory indexing.
 Runs as an asyncio task alongside the interfaces. Every CHECK_INTERVAL seconds
 it scans all user sessions for due items, then calls registered notification
 callbacks to deliver messages proactively.
+
+Data sources:
+  - Events:    workspace/calendar/*.md  (Full Calendar frontmatter)
+  - Tasks:     workspace/tasks.md       (Obsidian Tasks emoji format)
+  - Reminders: workspace/tasks.md       (scheduled tasks with 🔔 prefix)
+  - Jobs:      automations/jobs.json    (scheduler-internal)
+  - State:     scheduler_state.json     (internal flags: notified, fired, etc.)
 """
 
 import asyncio
+import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Coroutine, Dict, List, Optional
+
+import yaml
 
 from pawlia.automation import ChecklistProcessor, JobRunner, TaskReminderProcessor
 from pawlia.prompt_utils import load_system_prompt
@@ -21,21 +32,171 @@ CHECK_INTERVAL = 60  # seconds between checks
 EVENT_REMINDER_MINUTES = 15  # notify this many minutes before an event
 
 # ── Idle-based priority tiers (minutes) ──
-# Lower = higher priority.  Each task only runs when the user has been idle
-# for at least this many minutes AND no high-priority (chat) LLM request is
-# in progress.
-IDLE_SUMMARIZE_MIN = 5    # conversation summarization
-IDLE_BACKGROUND_MIN = 10  # deferred /background tasks
-IDLE_MEMORY_MIN = 20      # Memory indexing (RAG / Dream Wiki)
+IDLE_SUMMARIZE_MIN = 5
+IDLE_BACKGROUND_MIN = 10
+IDLE_MEMORY_MIN = 20
 
-# Type for notification callbacks: async def send(user_id, message) -> None
 NotifyCallback = Callable[[str, str], Coroutine[Any, Any, None]]
-
-# Type for LLM formatter: async def format(user_id, raw_message) -> str
 LLMFormatter = Callable[[str, str], Coroutine[Any, Any, str]]
 
 logger = logging.getLogger("pawlia.scheduler")
 
+
+# ---------------------------------------------------------------------------
+# Scheduler state I/O (separate from workspace to keep vault clean)
+# ---------------------------------------------------------------------------
+
+def _state_path(session_dir: str, user_id: str) -> str:
+    return os.path.join(session_dir, user_id, "scheduler_state.json")
+
+
+def _load_state(session_dir: str, user_id: str) -> dict:
+    path = _state_path(session_dir, user_id)
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_state(session_dir: str, user_id: str, state: dict) -> None:
+    path = _state_path(session_dir, user_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Markdown event parsing
+# ---------------------------------------------------------------------------
+
+def _read_event_frontmatter(filepath: str) -> dict | None:
+    """Parse frontmatter from an event .md file."""
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return None
+    if not text.lstrip().startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    try:
+        fm = yaml.safe_load(parts[1]) or {}
+    except Exception:
+        return None
+    fm["_filename"] = os.path.basename(filepath)
+    return fm
+
+
+def _list_workspace_events(session_dir: str, user_id: str) -> list[dict]:
+    """List all events from workspace/calendar/*.md."""
+    cal_dir = os.path.join(session_dir, user_id, "workspace", "calendar")
+    if not os.path.isdir(cal_dir):
+        return []
+    events = []
+    for f in os.listdir(cal_dir):
+        if f.endswith(".md"):
+            fm = _read_event_frontmatter(os.path.join(cal_dir, f))
+            if fm:
+                events.append(fm)
+    return events
+
+
+# ---------------------------------------------------------------------------
+# Markdown task/reminder parsing
+# ---------------------------------------------------------------------------
+
+_TASK_RE = re.compile(r"^- \[([ xX\-])\] (.+)$")
+
+
+def _parse_tasks_md(session_dir: str, user_id: str) -> list[dict]:
+    """Parse workspace/tasks.md into task dicts."""
+    path = os.path.join(session_dir, user_id, "workspace", "tasks.md")
+    if not os.path.exists(path):
+        return []
+    tasks = []
+    with open(path, encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            line = line.rstrip()
+            m = _TASK_RE.match(line)
+            if not m:
+                continue
+            check = m.group(1)
+            rest = m.group(2)
+            task = {
+                "_line": i,
+                "_raw": line,
+                "status": "completed" if check in ("x", "X") else ("cancelled" if check == "-" else "pending"),
+                "is_reminder": "\U0001f514" in rest,  # 🔔
+            }
+            # Extract scheduled time (⏳)
+            sm = re.search(r"\u23f3\s+([\d\-T:]+)", rest)
+            if sm:
+                task["scheduled"] = sm.group(1)
+            # Extract due date (📅)
+            dm = re.search(r"\U0001f4c5\s+([\d\-]+)", rest)
+            if dm:
+                task["due_date"] = dm.group(1)
+            # Extract recurrence (🔁)
+            rm = re.search(r"\U0001f501\s+(.+?)(?=\s[\u23f3\U0001f6eb\U0001f4c5\u2795\u2705\u274c\U0001f53a\u23eb\U0001f53c\U0001f53d\u23ec]|$)", rest)
+            if rm:
+                task["recurrence"] = rm.group(1).strip()
+            # Extract title (everything before first emoji)
+            title = rest
+            for emoji in ("\U0001f53a", "\u23eb", "\U0001f53c", "\U0001f53d", "\u23ec",
+                          "\U0001f501", "\u23f3", "\U0001f6eb", "\U0001f4c5", "\u2795", "\u2705", "\u274c"):
+                if emoji in title:
+                    title = title[:title.index(emoji)]
+            task["title"] = title.strip()
+            tasks.append(task)
+    return tasks
+
+
+def _mark_task_done(session_dir: str, user_id: str, line_idx: int) -> None:
+    """Mark a task line as completed in tasks.md."""
+    path = os.path.join(session_dir, user_id, "workspace", "tasks.md")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    if line_idx < len(lines):
+        lines[line_idx] = lines[line_idx].replace("- [ ]", "- [x]", 1)
+        # Add done date if not present
+        done_date = datetime.now().strftime("%Y-%m-%d")
+        if "\u2705" not in lines[line_idx]:
+            lines[line_idx] = lines[line_idx].rstrip() + f" \u2705 {done_date}\n"
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def _reschedule_reminder(session_dir: str, user_id: str, line_idx: int, recurrence: str) -> None:
+    """Reschedule a recurring reminder to the next occurrence."""
+    path = os.path.join(session_dir, user_id, "workspace", "tasks.md")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+    if line_idx >= len(lines):
+        return
+
+    line = lines[line_idx]
+    # Find and replace the scheduled date
+    sm = re.search(r"(\u23f3\s+)([\d\-T:]+)", line)
+    if not sm:
+        return
+    try:
+        old_dt = datetime.fromisoformat(sm.group(2))
+    except ValueError:
+        return
+    new_dt = _next_occurrence(old_dt, recurrence)
+    lines[line_idx] = line[:sm.start(2)] + new_dt.strftime("%Y-%m-%dT%H:%M") + line[sm.end(2):]
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
 
 
 class Scheduler:
@@ -44,28 +205,22 @@ class Scheduler:
     def __init__(self, session_dir: str, config: Optional[Dict] = None):
         self.session_dir = session_dir
         self._config = config or {}
-        self._app: Optional[Any] = None  # set via set_app()
+        self._app: Optional[Any] = None
         self._callbacks: List[NotifyCallback] = []
         self._task: Optional[asyncio.Task] = None
         self._llm_formatter: Optional[LLMFormatter] = None
 
-        # Automation processors (initialized lazily after callbacks are registered)
         self._checklist: Optional[ChecklistProcessor] = None
         self._jobs: Optional[JobRunner] = None
         self._task_reminders: Optional[TaskReminderProcessor] = None
 
-        # Memory indexer (initialized lazily)
         self._memory_indexer: Optional[Any] = None
-        # Background task queue (initialized lazily)
         self._bg_tasks: Optional[Any] = None
-        # Track last user activity for idle-based background work
-        # Start with current time so background work doesn't fire immediately on boot
         self._boot_time = time.monotonic()
         self._last_activity: Dict[str, float] = {}
 
     @property
     def memory_indexer(self):
-        """Lazily initialize and return the memory indexer."""
         if self._memory_indexer is None:
             from pawlia.memory_indexer import MemoryIndexer
             self._memory_indexer = MemoryIndexer(
@@ -74,49 +229,36 @@ class Scheduler:
         return self._memory_indexer
 
     def set_app(self, app: Any) -> None:
-        """Set reference to the App (needed for background task processing)."""
         self._app = app
 
     def register(self, callback: NotifyCallback) -> None:
-        """Register a notification callback (one per interface)."""
         self._callbacks.append(callback)
 
     @property
     def bg_tasks(self):
-        """Lazy-init and return the BackgroundTaskQueue."""
         if self._bg_tasks is None:
             from pawlia.background_tasks import BackgroundTaskQueue
             self._bg_tasks = BackgroundTaskQueue(self.session_dir)
         return self._bg_tasks
 
     def touch_activity(self, user_id: str) -> None:
-        """Mark a user as active now (resets the idle timer for memory indexing)."""
         self._last_activity[user_id] = time.monotonic()
 
     def set_llm_formatter(self, formatter: LLMFormatter) -> None:
-        """Set the LLM formatter for personalizing notifications.
-
-        The formatter receives (user_id, raw_message) and returns a
-        personalized message.  If it fails or times out, the raw message
-        is used as fallback.
-        """
         self._llm_formatter = formatter
 
     def start(self) -> None:
-        """Start the scheduler as a background asyncio task."""
         if self._task and not self._task.done():
             return
         self._task = asyncio.create_task(self._loop())
         logger.info("Scheduler started (interval=%ds)", CHECK_INTERVAL)
 
     def stop(self) -> None:
-        """Cancel the scheduler task."""
         if self._task and not self._task.done():
             self._task.cancel()
             logger.info("Scheduler stopped")
 
     async def _loop(self) -> None:
-        """Main scheduler loop."""
         try:
             while True:
                 await asyncio.sleep(CHECK_INTERVAL)
@@ -128,30 +270,18 @@ class Scheduler:
             pass
 
     def _ensure_processors(self) -> None:
-        """Lazily initialize automation processors on first use."""
         if self._checklist is None:
             self._checklist = ChecklistProcessor(self.session_dir, self._notify)
             self._jobs = JobRunner(self.session_dir, self._notify)
             self._task_reminders = TaskReminderProcessor(self.session_dir, self._notify)
-        # Ensure memory indexer via property
         _ = self.memory_indexer
 
     def _user_idle_minutes(self, user_id: str) -> float:
-        """Return how many minutes a user has been idle."""
         now = time.monotonic()
         last = self._last_activity.get(user_id, self._boot_time)
         return (now - last) / 60.0
 
     async def _check_all(self) -> None:
-        """Scan all user sessions for due items.
-
-        High-priority tasks (reminders, events, automation) run every tick.
-        Low-priority tasks are gated by per-user idle time (in minutes):
-          5 min  → conversation summarization
-          10 min → background tasks (/background)
-          20 min → memory indexing (LightRAG)
-        All low-priority tasks require the LLM to be free (no active chat).
-        """
         if not os.path.isdir(self.session_dir):
             return
 
@@ -162,15 +292,10 @@ class Scheduler:
             if os.path.isdir(os.path.join(self.session_dir, uid))
         ]
 
-        # ── High priority (every tick, no idle requirement) ──
+        # ── High priority (every tick) ──
         for user_id in user_ids:
-            user_dir = os.path.join(self.session_dir, user_id)
-
-            reminders_path = os.path.join(user_dir, "reminders.json")
-            await self._check_reminders(user_id, reminders_path)
-
-            events_path = os.path.join(user_dir, "calendar", "events.json")
-            await self._check_events(user_id, events_path)
+            await self._check_reminders(user_id)
+            await self._check_events(user_id)
 
             if self._checklist:
                 try:
@@ -191,7 +316,6 @@ class Scheduler:
                     logger.error("Job processing failed for %s: %s", user_id, e)
 
         # ── Force-summarize when exchange count exceeds hard limit ──
-        # This runs even when the user is active to prevent unbounded growth.
         if self._app and self._app.memory:
             from pawlia.memory import FORCE_SUMMARY_EXCHANGES
             for user_id in user_ids:
@@ -202,27 +326,22 @@ class Scheduler:
                     except Exception as e:
                         logger.error("Forced summarization failed for %s: %s", user_id, e)
 
-        # ── Low priority (idle-based, ordered by priority) ──
+        # ── Low priority (idle-based) ──
         for user_id in user_ids:
             idle = self._user_idle_minutes(user_id)
 
-            # Prio 1: Summarization (5 min idle)
             if idle >= IDLE_SUMMARIZE_MIN and self._app:
                 try:
                     await self._summarize_user(user_id)
                 except Exception as e:
                     logger.error("Summarization failed for %s: %s", user_id, e)
 
-            # Prio 2: Background tasks (10 min idle)
             if idle >= IDLE_BACKGROUND_MIN and self._app:
                 try:
                     await self._process_background_tasks(user_id)
                 except Exception as e:
                     logger.error("Background task failed for %s: %s", user_id, e)
 
-            # Prio 3: Memory indexing / Dream Wiki (configurable idle, default 20 min)
-            #   When rag_backend=markdown, this triggers Dream Wiki consolidation.
-            #   When rag_backend=lightrag/mem0/simple, this triggers RAG indexing.
             skill_config = self._config.get("skill-config") or {}
             memory_config = skill_config.get("memory") or {}
             idle_memory_min = int(memory_config.get("idle_minutes", IDLE_MEMORY_MIN))
@@ -234,12 +353,6 @@ class Scheduler:
                         logger.error("Memory indexing failed for %s: %s", user_id, e)
 
     async def _summarize_user(self, user_id: str) -> None:
-        """Summarize a user's conversation if needed.
-
-        Uses the MemoryManager to check whether summarization is due
-        (exchange limit, repetition, or idle) and runs it through the
-        chat LLM.
-        """
         if not self._app or not self._app.memory:
             return
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -268,11 +381,9 @@ class Scheduler:
         ]
 
         if not self._app or not self._app.llm:
-            logger.warning("Cannot summarize %s: app or llm not available", user_id)
             return
         llm = self._app.llm.get("chat")
         if not llm:
-            logger.warning("Cannot summarize %s: chat LLM not configured", user_id)
             return
 
         try:
@@ -288,7 +399,6 @@ class Scheduler:
             logger.info("Conversation summarized for %s", user_id)
 
     async def _process_background_tasks(self, user_id: str) -> None:
-        """Run one pending background task for a user."""
         if not self._app:
             return
         tasks = self.bg_tasks.list_tasks(user_id)
@@ -296,7 +406,7 @@ class Scheduler:
         if not pending:
             return
 
-        task = pending[0]  # oldest first
+        task = pending[0]
         task_id = task["id"]
         message = task["message"]
         thread_id = task["thread_id"]
@@ -309,73 +419,70 @@ class Scheduler:
             response = await agent.run(message, thread_id=thread_id)
             self.bg_tasks.mark_done(user_id, task_id)
             await self._notify(user_id, f"**[Hintergrund {task_id[:8]}]**\n{response}")
-            logger.info("Background task done: %s/%s", user_id, task_id)
         except Exception as e:
             self.bg_tasks.mark_error(user_id, task_id, str(e))
-            await self._notify(user_id, f"**[Hintergrund {task_id[:8]}]** ❌ Fehler: {e}")
-            logger.error("Background task failed: %s/%s: %s", user_id, task_id, e)
+            await self._notify(user_id, f"**[Hintergrund {task_id[:8]}]** Fehler: {e}")
 
-    async def _check_reminders(self, user_id: str, path: str) -> None:
-        """Fire due reminders and handle recurrence."""
-        reminders = load_json(path)
+    async def _check_reminders(self, user_id: str) -> None:
+        """Fire due reminders from workspace/tasks.md (lines with 🔔 and ⏳)."""
+        tasks = _parse_tasks_md(self.session_dir, user_id)
+        reminders = [t for t in tasks if t.get("is_reminder") and t.get("status") == "pending"]
         if not reminders:
             return
 
         now = datetime.now()
-        changed = False
 
-        for reminder in reminders:
-            if not reminder:
+        for rem in reminders:
+            scheduled = rem.get("scheduled", "")
+            if not scheduled:
                 continue
-            if reminder.get("fired"):
-                continue
-
             try:
-                fire_at = datetime.fromisoformat(reminder["fire_at"])
-                # Ensure naive comparison — strip timezone if present
+                fire_at = datetime.fromisoformat(scheduled)
                 if fire_at.tzinfo is not None:
                     fire_at = fire_at.replace(tzinfo=None)
-            except (ValueError, KeyError):
+            except ValueError:
                 continue
 
             if fire_at <= now:
-                label = reminder.get("label", "Reminder")
-                message = reminder.get("message", "")
-                text = f"🔔 {label}: {message}"
+                title = rem.get("title", "Reminder")
+                await self._notify(user_id, f"\U0001f514 {title}")
 
-                await self._notify(user_id, text)
-
-                recurrence = reminder.get("recurrence", "none")
-                if recurrence == "none":
-                    reminder["fired"] = True
+                recurrence = rem.get("recurrence", "")
+                if recurrence:
+                    _reschedule_reminder(self.session_dir, user_id, rem["_line"], recurrence)
                 else:
-                    reminder["fire_at"] = _next_occurrence(fire_at, recurrence).isoformat()
+                    _mark_task_done(self.session_dir, user_id, rem["_line"])
 
-                changed = True
-
-        if changed:
-            save_json(path, reminders)
-
-    async def _check_events(self, user_id: str, path: str) -> None:
-        """Notify about upcoming events within the reminder window."""
-        events = load_json(path)
+    async def _check_events(self, user_id: str) -> None:
+        """Notify about upcoming events from workspace/calendar/*.md."""
+        events = _list_workspace_events(self.session_dir, user_id)
         if not events:
             return
 
+        state = _load_state(self.session_dir, user_id)
+        notified = set(state.get("notified_events", []))
         now = datetime.now()
         window = now + timedelta(minutes=EVENT_REMINDER_MINUTES)
+        changed = False
 
         for event in events:
-            if not event:
+            filename = event.get("_filename", "")
+            if filename in notified:
                 continue
-            if event.get("_notified"):
+
+            date_str = event.get("date", "")
+            start_time = event.get("startTime", "")
+            if not date_str:
                 continue
 
             try:
-                start = datetime.fromisoformat(event["start"])
+                if start_time:
+                    start = datetime.fromisoformat(f"{date_str}T{start_time}")
+                else:
+                    start = datetime.fromisoformat(date_str)
                 if start.tzinfo is not None:
                     start = start.replace(tzinfo=None)
-            except (ValueError, KeyError):
+            except ValueError:
                 continue
 
             if now <= start <= window:
@@ -383,30 +490,24 @@ class Scheduler:
                 location = event.get("location", "")
                 minutes_left = int((start - now).total_seconds() / 60)
 
-                text = f"📅 In {minutes_left} Min: {title}"
+                text = f"\U0001f4c5 In {minutes_left} Min: {title}"
                 if location:
                     text += f" ({location})"
 
                 await self._notify(user_id, text)
-                event["_notified"] = True
+                notified.add(filename)
+                changed = True
 
-        # Persist the _notified flags
-        if any(e and e.get("_notified") for e in events):
-            save_json(path, events)
+        if changed:
+            state["notified_events"] = list(notified)
+            _save_state(self.session_dir, user_id, state)
 
     async def _notify(self, user_id: str, message: str) -> None:
-        """Send a notification to all registered interfaces.
-
-        If an LLM formatter is set, the raw message is first passed through
-        the LLM for a personalized response.  On failure or timeout, the raw
-        message is delivered as-is.
-        """
         formatted = message
         if self._llm_formatter:
             try:
                 formatted = await self._llm_formatter(user_id, message)
                 if not formatted or not formatted.strip():
-                    logger.warning("LLM returned empty response, using raw message")
                     formatted = message
             except Exception as e:
                 logger.warning("LLM formatting failed for %s: %s, using raw message", user_id, e)
@@ -421,11 +522,12 @@ class Scheduler:
 
 def _next_occurrence(fire_at: datetime, recurrence: str) -> datetime:
     """Calculate the next occurrence for a recurring reminder."""
-    if recurrence == "daily":
+    rec = recurrence.lower().strip()
+    if "day" in rec:
         return fire_at + timedelta(days=1)
-    elif recurrence == "weekly":
+    elif "week" in rec:
         return fire_at + timedelta(weeks=1)
-    elif recurrence == "monthly":
+    elif "month" in rec:
         month = fire_at.month % 12 + 1
         year = fire_at.year + (1 if month == 1 else 0)
         try:
@@ -433,5 +535,3 @@ def _next_occurrence(fire_at: datetime, recurrence: str) -> datetime:
         except ValueError:
             return fire_at.replace(year=year, month=month, day=28)
     return fire_at + timedelta(days=1)
-
-

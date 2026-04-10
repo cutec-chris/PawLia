@@ -23,6 +23,7 @@ PawLia brings persistent memory, multi-user sessions, and extensible skills to (
 - **Threads** — isolate side conversations in Telegram forum topics or Matrix threads, each with its own context and model
 - **Multi-user** — every user gets their own session with separate memory, history, and model settings
 - **Remembers** — conversation history and user facts persisted as Markdown, with automatic summarization and a Dream Wiki that compiles conversations into a structured, interlinked knowledge base overnight
+- **Obsidian vault** — the workspace is a native Obsidian vault: events use [Full Calendar](https://github.com/obsidian-community/obsidian-full-calendar) frontmatter, tasks use [Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) emoji format, the Dream Wiki creates interlinked topic pages
 - **Switch models on the fly** — `/model qwen3:4b` swaps the LLM at runtime, per-thread or session-wide
 - **Extensible** — drop a `SKILL.md` in `skills/user/` and the agent picks it up automatically
 - **Proactive** — built-in scheduler delivers reminders and calendar alerts through your active interface
@@ -65,6 +66,7 @@ Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and
 - [Interfaces](docs/interfaces.md) — CLI, Telegram, Matrix, Webhook, sessions, scheduler
 - [Configuration](docs/config.md) — providers, models, agents, fallback chain
 - [Skills](docs/skills.md) — bundled skills, custom skills, SKILL.md format
+- [Automation](docs/automation.md) — events, tasks, reminders, scheduled jobs, Obsidian vault
 - [Commands](docs/commands.md) — `/thread`, `/model`, `/private`
 
 ## Project Structure

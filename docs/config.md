@@ -228,15 +228,17 @@ The default memory backend implements Karpathy's [LLM Wiki](https://gist.github.
 3. **Rebuilds** `index.md` (catalog of all pages) and `log.md` (chronological audit log)
 4. **Consolidates** — merges overlapping pages, adds missing cross-references
 
-Storage per user (`session/{user}/workspace/wiki/`):
+Storage per user:
 ```
-wiki/
-  index.md              # Catalog of all pages
-  log.md                # Chronological audit log
-  dreamed_files.json    # Tracking: which logs have been processed
+workspace/wiki/                   # In the Obsidian vault
+  index.md                        # Catalog of all pages
+  log.md                          # Chronological audit log
   topics/
-    projekt-thalia.md   # One wiki page per topic/entity
+    projekt-thalia.md             # One wiki page per topic/entity
     linux-admin.md
+
+memory_index/                     # Outside the vault (internal tracking)
+  dreamed_files.json              # Which logs have been processed
 ```
 
 Manual commands via the memory skill:

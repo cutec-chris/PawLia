@@ -1,8 +1,10 @@
 """Automation engine — executes scripts for checklist items and scheduled jobs.
 
-The LLM *plans* by creating checklist items and jobs with script references.
-The automation engine *executes* them at the right time without LLM involvement.
-Notification output is routed through the LLM for personalized delivery.
+Data sources (Obsidian-native):
+  - Event checklists: workspace/calendar/*.md  (checklist in YAML frontmatter)
+  - Task reminders:   scheduler_state.json     (reminder offsets per task title)
+  - Jobs:             automations/jobs.json     (scheduler-internal)
+  - State:            scheduler_state.json      (checklist status, fired flags)
 
 Two execution contexts:
 - Checklist items: triggered relative to an event start time or on creation
@@ -13,15 +15,17 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable, Coroutine, Dict, List, Optional
+
+import yaml
 
 from pawlia.utils import load_json, resolve_script, save_json
 
 logger = logging.getLogger("pawlia.automation")
 
-# async def notify(user_id, message) -> None  (already LLM-formatted by Scheduler)
 NotifyFn = Callable[[str, str], Coroutine[Any, Any, None]]
 
 
@@ -41,6 +45,32 @@ def _parse_offset(offset: str) -> timedelta:
 
 
 # ---------------------------------------------------------------------------
+# Scheduler state helpers
+# ---------------------------------------------------------------------------
+
+def _state_path(session_dir: str, user_id: str) -> str:
+    return os.path.join(session_dir, user_id, "scheduler_state.json")
+
+
+def _load_state(session_dir: str, user_id: str) -> dict:
+    path = _state_path(session_dir, user_id)
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_state(session_dir: str, user_id: str, state: dict) -> None:
+    path = _state_path(session_dir, user_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
 # Script Executor
 # ---------------------------------------------------------------------------
 
@@ -55,19 +85,13 @@ _INTERPRETERS: Dict[str, str] = {
 class ScriptExecutor:
     """Runs scripts in a subprocess and returns their output."""
 
-    TIMEOUT = 120  # seconds
+    TIMEOUT = 120
 
     @staticmethod
     async def run(script_path: str, params: Optional[Dict[str, Any]] = None,
                   cwd: Optional[str] = None,
                   user_id: Optional[str] = None,
                   session_dir: Optional[str] = None) -> Dict[str, Any]:
-        """Execute a script and return {success, output, error}.
-
-        The script receives params as a JSON string via the AUTOMATION_PARAMS
-        environment variable, and the working directory is set to cwd.
-        User context is injected via PAWLIA_USER_ID and PAWLIA_SESSION_DIR.
-        """
         if not os.path.isfile(script_path):
             return {"success": False, "output": "", "error": f"Script not found: {script_path}"}
 
@@ -111,38 +135,60 @@ class ScriptExecutor:
 
 
 # ---------------------------------------------------------------------------
-# Checklist Processor
+# Checklist Processor (reads event frontmatter, state in scheduler_state.json)
 # ---------------------------------------------------------------------------
 
 class ChecklistProcessor:
-    """Processes event checklists — fires script-based items at the right time."""
+    """Processes event checklists from workspace/calendar/*.md frontmatter."""
 
     def __init__(self, session_dir: str, notify: NotifyFn):
         self.session_dir = session_dir
         self._notify = notify
 
     async def process_user(self, user_id: str) -> None:
-        """Check all events for this user and process due checklist items."""
-        events_path = os.path.join(self.session_dir, user_id, "calendar", "events.json")
-        events = load_json(events_path)
-        if not events:
+        cal_dir = os.path.join(self.session_dir, user_id, "workspace", "calendar")
+        if not os.path.isdir(cal_dir):
             return
 
+        state = _load_state(self.session_dir, user_id)
+        checklist_state = state.setdefault("checklist_state", {})
         now = datetime.now()
         changed = False
 
-        for event in events:
-            checklist = event.get("checklist", [])
+        for fname in os.listdir(cal_dir):
+            if not fname.endswith(".md"):
+                continue
+            filepath = os.path.join(cal_dir, fname)
+            fm = self._read_frontmatter(filepath)
+            if not fm:
+                continue
+
+            checklist = fm.get("checklist", [])
             if not checklist:
                 continue
 
+            # Parse event start time
+            date_str = fm.get("date", "")
+            start_time = fm.get("startTime", "")
+            if not date_str:
+                continue
             try:
-                event_start = datetime.fromisoformat(event["start"])
-            except (ValueError, KeyError):
+                if start_time:
+                    event_start = datetime.fromisoformat(f"{date_str}T{start_time}")
+                else:
+                    event_start = datetime.fromisoformat(date_str)
+            except ValueError:
                 continue
 
+            file_state = checklist_state.setdefault(fname, {})
+
             for item in checklist:
-                if item.get("status") != "pending":
+                item_id = item.get("id", "")
+                if not item_id:
+                    continue
+
+                item_state = file_state.get(item_id, {})
+                if item_state.get("status") in ("done", "failed"):
                     continue
 
                 # Determine if this item should fire now
@@ -156,7 +202,6 @@ class ChecklistProcessor:
                     try:
                         offset = _parse_offset(offset_str)
                     except ValueError:
-                        logger.error("Bad offset %r in event %s", offset_str, event.get("id"))
                         continue
                     fire_at = event_start + offset
                     should_fire = fire_at <= now
@@ -170,65 +215,85 @@ class ChecklistProcessor:
                 if not should_fire:
                     continue
 
-                # Execute the script
+                # Execute
                 script = item.get("script", "")
+                event_info = {
+                    "title": fm.get("title", ""),
+                    "start": f"{date_str}T{start_time}" if start_time else date_str,
+                    "location": fm.get("location", ""),
+                }
+
                 if not script:
-                    # Pure notification item (no script)
                     message = item.get("message", "")
                     if message:
-                        message = self._interpolate(message, event)
-                        await self._notify(user_id, f"📋 {event.get('title', 'Event')}: {message}")
-                    item["status"] = "done"
+                        message = self._interpolate(message, event_info)
+                        await self._notify(user_id, f"\U0001f4cb {event_info.get('title', 'Event')}: {message}")
+                    file_state[item_id] = {"status": "done", "executed_at": now.isoformat()}
                     changed = True
                     continue
 
-                # Resolve script path
                 script_path = resolve_script(self.session_dir, user_id, script)
                 params = dict(item.get("params", {}))
-                params["event"] = {
-                    "id": event.get("id"),
-                    "title": event.get("title"),
-                    "start": event.get("start"),
-                    "location": event.get("location", ""),
-                }
+                params["event"] = event_info
+                # Collect previous results from state
                 params["previous_results"] = {
-                    ci.get("id", ""): ci.get("result")
-                    for ci in checklist if ci.get("result") is not None
+                    iid: ist.get("result")
+                    for iid, ist in file_state.items()
+                    if isinstance(ist, dict) and ist.get("result") is not None
                 }
 
                 result = await ScriptExecutor.run(
                     script_path, params,
                     user_id=user_id, session_dir=self.session_dir,
                 )
-                item["result"] = result.get("output", "") if result["success"] else result.get("error", "")
-                item["status"] = "done" if result["success"] else "failed"
-                item["executed_at"] = now.isoformat()
+
+                file_state[item_id] = {
+                    "status": "done" if result["success"] else "failed",
+                    "result": result.get("output", "") if result["success"] else result.get("error", ""),
+                    "executed_at": now.isoformat(),
+                }
                 changed = True
 
                 if item.get("notify", True):
                     if result["success"]:
                         output = result["output"][:500] if result["output"] else "erledigt"
-                        await self._notify(user_id, f"📋 {event.get('title', '')}: {output}")
+                        await self._notify(user_id, f"\U0001f4cb {event_info.get('title', '')}: {output}")
                     else:
                         await self._notify(user_id,
-                            f"⚠️ {event.get('title', '')}: Script fehlgeschlagen — {result['error'][:200]}")
+                            f"\u26a0\ufe0f {event_info.get('title', '')}: Script fehlgeschlagen — {result['error'][:200]}")
 
-                logger.info("Checklist item %s for event %s: %s",
-                           item.get("id"), event.get("id"), item["status"])
+                logger.info("Checklist item %s for %s: %s", item_id, fname, file_state[item_id]["status"])
 
         if changed:
-            save_json(events_path, events)
+            state["checklist_state"] = checklist_state
+            _save_state(self.session_dir, user_id, state)
+
+    @staticmethod
+    def _read_frontmatter(filepath: str) -> dict | None:
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            return None
+        if not text.lstrip().startswith("---"):
+            return None
+        parts = text.split("---", 2)
+        if len(parts) < 3:
+            return None
+        try:
+            return yaml.safe_load(parts[1]) or {}
+        except Exception:
+            return None
 
     @staticmethod
     def _interpolate(message: str, event: dict) -> str:
-        """Replace {field} placeholders with event data."""
         for key in ("title", "start", "location", "description"):
             message = message.replace(f"{{{key}}}", event.get(key, ""))
         return message
 
 
 # ---------------------------------------------------------------------------
-# Job Runner (Cron-like scheduled scripts)
+# Job Runner (unchanged — reads automations/jobs.json)
 # ---------------------------------------------------------------------------
 
 class JobRunner:
@@ -239,7 +304,6 @@ class JobRunner:
         self._notify = notify
 
     async def process_user(self, user_id: str) -> None:
-        """Check and execute due jobs for this user."""
         jobs_path = os.path.join(self.session_dir, user_id, "automations", "jobs.json")
         jobs = load_json(jobs_path)
         if not jobs:
@@ -251,7 +315,6 @@ class JobRunner:
         for job in jobs:
             if not job.get("enabled", True):
                 continue
-
             if not self._is_due(job, now):
                 continue
 
@@ -277,24 +340,16 @@ class JobRunner:
             if job.get("notify", True):
                 if result["success"]:
                     output = result["output"][:500] if result["output"] else "erledigt"
-                    await self._notify(user_id, f"⚙️ {job.get('name', 'Job')}: {output}")
+                    await self._notify(user_id, f"\u2699\ufe0f {job.get('name', 'Job')}: {output}")
                 else:
                     await self._notify(user_id,
-                        f"⚠️ Job '{job.get('name', '')}' fehlgeschlagen: {result['error'][:200]}")
+                        f"\u26a0\ufe0f Job '{job.get('name', '')}' fehlgeschlagen: {result['error'][:200]}")
 
         if changed:
             save_json(jobs_path, jobs)
 
     @staticmethod
     def _is_due(job: dict, now: datetime) -> bool:
-        """Check if a job should run based on its schedule and last_run.
-
-        Supports simple schedule formats:
-        - 'HH:MM' — daily at that time
-        - 'weekly:DOW:HH:MM' — weekly on day-of-week (0=Mon)
-        - 'monthly:DD:HH:MM' — monthly on day DD
-        - 'interval:Nm' / 'interval:Nh' — every N minutes/hours
-        """
         schedule = job.get("schedule", "")
         if not schedule:
             return False
@@ -308,10 +363,8 @@ class JobRunner:
                 pass
 
         def _not_run_recently() -> bool:
-            """True if last_run is None or was >120 s ago (dedup guard)."""
             return last_run is None or (now - last_run).total_seconds() > 120
 
-        # interval:Nm or interval:Nh
         if schedule.startswith("interval:"):
             interval_str = schedule[len("interval:"):]
             try:
@@ -322,7 +375,6 @@ class JobRunner:
                 return True
             return now >= last_run + delta
 
-        # weekly:DOW:HH:MM  (DOW: 0=Mon..6=Sun)
         if schedule.startswith("weekly:"):
             parts = schedule.split(":")
             if len(parts) != 4:
@@ -335,7 +387,6 @@ class JobRunner:
                 return False
             return now.hour == hour and now.minute == minute and _not_run_recently()
 
-        # monthly:DD:HH:MM
         if schedule.startswith("monthly:"):
             parts = schedule.split(":")
             if len(parts) != 4:
@@ -348,7 +399,6 @@ class JobRunner:
                 return False
             return now.hour == hour and now.minute == minute and _not_run_recently()
 
-        # HH:MM — daily at that time
         try:
             parts = schedule.split(":")
             target_hour = int(parts[0])
@@ -360,71 +410,95 @@ class JobRunner:
 
 
 # ---------------------------------------------------------------------------
-# Task Reminder Processor
+# Task Reminder Processor (reads tasks.md + scheduler_state.json)
 # ---------------------------------------------------------------------------
 
+_TASK_RE = re.compile(r"^- \[([ xX\-])\] (.+)$")
+
+
 class TaskReminderProcessor:
-    """Fires task reminders based on due_date and reminder offsets."""
+    """Fires task reminders based on due_date and reminder config in scheduler_state."""
 
     def __init__(self, session_dir: str, notify: NotifyFn):
         self.session_dir = session_dir
         self._notify = notify
 
     async def process_user(self, user_id: str) -> None:
-        """Check all tasks for due reminders."""
-        tasks_path = os.path.join(self.session_dir, user_id, "tasks", "tasks.json")
-        tasks = load_json(tasks_path)
-        if not tasks:
+        """Check tasks.md for due tasks and fire reminders from scheduler_state."""
+        tasks_path = os.path.join(self.session_dir, user_id, "workspace", "tasks.md")
+        if not os.path.exists(tasks_path):
             return
 
+        state = _load_state(self.session_dir, user_id)
+        task_reminders = state.get("task_reminders", {})
         now = datetime.now()
         changed = False
 
-        for task in tasks:
-            if task.get("status") != "pending":
-                continue
+        with open(tasks_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.rstrip()
+                m = _TASK_RE.match(line)
+                if not m:
+                    continue
+                check = m.group(1)
+                if check != " ":
+                    continue  # only pending tasks
 
-            due_str = task.get("due_date", "")
-            if not due_str:
-                continue
-
-            try:
-                if "T" in due_str:
-                    due = datetime.fromisoformat(due_str)
-                else:
-                    due = datetime.fromisoformat(due_str + "T23:59:00")
-            except ValueError:
-                continue
-
-            reminders = task.get("reminders", [])
-            for reminder in reminders:
-                if reminder.get("fired", False):
+                rest = m.group(2)
+                # Skip reminders (🔔)
+                if "\U0001f514" in rest:
                     continue
 
-                offset_str = reminder.get("offset", "")
-                if not offset_str:
+                # Extract due date (📅)
+                dm = re.search(r"\U0001f4c5\s+([\d\-]+)", rest)
+                if not dm:
                     continue
+                due_str = dm.group(1)
 
                 try:
-                    offset = _parse_offset(offset_str)
+                    if "T" in due_str:
+                        due = datetime.fromisoformat(due_str)
+                    else:
+                        due = datetime.fromisoformat(due_str + "T23:59:00")
                 except ValueError:
                     continue
 
-                fire_at = due + offset
-                if fire_at <= now:
-                    message = reminder.get("message", f"Aufgabe fällig: {task.get('title', '')}")
-                    message = message.replace("{title}", task.get("title", ""))
-                    message = message.replace("{due_date}", due_str)
-                    await self._notify(user_id, f"📝 {message}")
-                    reminder["fired"] = True
-                    changed = True
+                # Extract title
+                title = rest
+                for emoji in ("\U0001f53a", "\u23eb", "\U0001f53c", "\U0001f53d", "\u23ec",
+                              "\U0001f501", "\u23f3", "\U0001f6eb", "\U0001f4c5", "\u2795", "\u2705", "\u274c"):
+                    if emoji in title:
+                        title = title[:title.index(emoji)]
+                title = title.strip()
+
+                # Check task-specific reminders from state
+                task_key = title.lower()
+                reminders = task_reminders.get(task_key, [])
+                for reminder in reminders:
+                    if reminder.get("fired", False):
+                        continue
+                    offset_str = reminder.get("offset", "")
+                    if not offset_str:
+                        continue
+                    try:
+                        offset = _parse_offset(offset_str)
+                    except ValueError:
+                        continue
+                    fire_at = due + offset
+                    if fire_at <= now:
+                        message = reminder.get("message", f"Aufgabe f\u00e4llig: {title}")
+                        message = message.replace("{title}", title).replace("{due_date}", due_str)
+                        await self._notify(user_id, f"\U0001f4dd {message}")
+                        reminder["fired"] = True
+                        changed = True
 
         if changed:
-            save_json(tasks_path, tasks)
+            state["task_reminders"] = task_reminders
+            _save_state(self.session_dir, user_id, state)
 
 
 # ---------------------------------------------------------------------------
-# Public helpers for creating checklist items and jobs
+# Public helpers
 # ---------------------------------------------------------------------------
 
 def create_checklist_item(
@@ -435,7 +509,6 @@ def create_checklist_item(
     message: str = "",
     notify: bool = True,
 ) -> Dict[str, Any]:
-    """Create a checklist item dict for an event."""
     return {
         "id": f"chk-{uuid.uuid4().hex[:8]}",
         "script": script,
@@ -443,8 +516,6 @@ def create_checklist_item(
         "trigger_offset": trigger_offset,
         "params": params or {},
         "message": message,
-        "status": "pending",
-        "result": None,
         "notify": notify,
     }
 
@@ -456,7 +527,6 @@ def create_job(
     params: Optional[Dict[str, Any]] = None,
     notify: bool = True,
 ) -> Dict[str, Any]:
-    """Create a scheduled job dict."""
     return {
         "id": f"job-{uuid.uuid4().hex[:8]}",
         "name": name,

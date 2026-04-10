@@ -1,4 +1,4 @@
-"""Tests for pawlia.scheduler."""
+"""Tests for pawlia.scheduler (Obsidian-native storage)."""
 
 import asyncio
 import json
@@ -7,35 +7,58 @@ import tempfile
 from datetime import datetime, timedelta
 
 import pytest
+import yaml
 
 from pawlia.scheduler import Scheduler, _next_occurrence
+
+
+def _write_event_md(cal_dir, filename, fm_dict, body=""):
+    """Helper: write a Full Calendar event .md file."""
+    os.makedirs(cal_dir, exist_ok=True)
+    content = f"---\n{yaml.dump(fm_dict, allow_unicode=True, default_flow_style=False).rstrip()}\n---\n"
+    if body:
+        content += f"\n{body}\n"
+    with open(os.path.join(cal_dir, filename), "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _write_tasks_md(workspace_dir, lines):
+    """Helper: write tasks.md with the given lines."""
+    os.makedirs(workspace_dir, exist_ok=True)
+    with open(os.path.join(workspace_dir, "tasks.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _read_tasks_md(workspace_dir):
+    """Helper: read tasks.md lines."""
+    with open(os.path.join(workspace_dir, "tasks.md"), encoding="utf-8") as f:
+        return f.read().strip().split("\n")
 
 
 class TestNextOccurrence:
     def test_daily(self):
         dt = datetime(2026, 3, 15, 10, 0)
-        result = _next_occurrence(dt, "daily")
+        result = _next_occurrence(dt, "every day")
         assert result == datetime(2026, 3, 16, 10, 0)
 
     def test_weekly(self):
         dt = datetime(2026, 3, 15, 10, 0)
-        result = _next_occurrence(dt, "weekly")
+        result = _next_occurrence(dt, "every week")
         assert result == datetime(2026, 3, 22, 10, 0)
 
     def test_monthly(self):
         dt = datetime(2026, 3, 15, 10, 0)
-        result = _next_occurrence(dt, "monthly")
+        result = _next_occurrence(dt, "every month")
         assert result == datetime(2026, 4, 15, 10, 0)
 
     def test_monthly_year_wrap(self):
         dt = datetime(2026, 12, 15, 10, 0)
-        result = _next_occurrence(dt, "monthly")
+        result = _next_occurrence(dt, "every month")
         assert result == datetime(2027, 1, 15, 10, 0)
 
     def test_monthly_day_overflow(self):
-        # Jan 31 -> Feb has no 31st, should fall back to 28
         dt = datetime(2026, 1, 31, 10, 0)
-        result = _next_occurrence(dt, "monthly")
+        result = _next_occurrence(dt, "every month")
         assert result.month == 2
         assert result.day == 28
 
@@ -46,25 +69,17 @@ class TestNextOccurrence:
 
 
 class TestSchedulerReminders:
+    """Reminders are stored as scheduled tasks in workspace/tasks.md."""
+
     @pytest.mark.asyncio
     async def test_fires_due_reminder(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a due reminder
-            user_dir = os.path.join(tmpdir, "test_user")
-            os.makedirs(user_dir)
-            reminders = [{
-                "id": "r1",
-                "fire_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
-                "message": "Take a break",
-                "label": "Break",
-                "recurrence": "none",
-                "fired": False,
-            }]
-            path = os.path.join(user_dir, "reminders.json")
-            with open(path, "w") as f:
-                json.dump(reminders, f)
+            workspace = os.path.join(tmpdir, "test_user", "workspace")
+            fire_at = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M")
+            _write_tasks_md(workspace, [
+                f"- [ ] \U0001f514 Break: Take a break \u23f3 {fire_at} \u2795 2026-04-10"
+            ])
 
-            # Set up scheduler
             notifications = []
 
             async def capture(user_id, message):
@@ -75,30 +90,21 @@ class TestSchedulerReminders:
             await scheduler._check_all()
 
             assert len(notifications) == 1
-            assert notifications[0][0] == "test_user"
-            assert "Break" in notifications[0][1]
+            assert "test_user" == notifications[0][0]
             assert "Take a break" in notifications[0][1]
 
-            # Reminder should be marked as fired
-            with open(path) as f:
-                data = json.load(f)
-            assert data[0]["fired"] is True
+            # Should be marked as done [x]
+            lines = _read_tasks_md(workspace)
+            assert "[x]" in lines[0]
 
     @pytest.mark.asyncio
-    async def test_skips_fired_reminder(self):
+    async def test_skips_completed_reminder(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            os.makedirs(user_dir)
-            reminders = [{
-                "id": "r1",
-                "fire_at": (datetime.now() - timedelta(minutes=5)).isoformat(),
-                "message": "old",
-                "label": "Old",
-                "recurrence": "none",
-                "fired": True,
-            }]
-            with open(os.path.join(user_dir, "reminders.json"), "w") as f:
-                json.dump(reminders, f)
+            workspace = os.path.join(tmpdir, "test_user", "workspace")
+            fire_at = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M")
+            _write_tasks_md(workspace, [
+                f"- [x] \U0001f514 Old: old reminder \u23f3 {fire_at} \u2705 2026-04-09"
+            ])
 
             notifications = []
 
@@ -114,18 +120,11 @@ class TestSchedulerReminders:
     @pytest.mark.asyncio
     async def test_skips_future_reminder(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            os.makedirs(user_dir)
-            reminders = [{
-                "id": "r1",
-                "fire_at": (datetime.now() + timedelta(hours=2)).isoformat(),
-                "message": "future",
-                "label": "Future",
-                "recurrence": "none",
-                "fired": False,
-            }]
-            with open(os.path.join(user_dir, "reminders.json"), "w") as f:
-                json.dump(reminders, f)
+            workspace = os.path.join(tmpdir, "test_user", "workspace")
+            fire_at = (datetime.now() + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M")
+            _write_tasks_md(workspace, [
+                f"- [ ] \U0001f514 Future: future reminder \u23f3 {fire_at}"
+            ])
 
             notifications = []
 
@@ -139,22 +138,13 @@ class TestSchedulerReminders:
             assert len(notifications) == 0
 
     @pytest.mark.asyncio
-    async def test_recurring_reminder_advances(self):
+    async def test_recurring_reminder_reschedules(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            os.makedirs(user_dir)
-            original_time = datetime.now() - timedelta(minutes=5)
-            reminders = [{
-                "id": "r1",
-                "fire_at": original_time.isoformat(),
-                "message": "daily check",
-                "label": "Daily",
-                "recurrence": "daily",
-                "fired": False,
-            }]
-            path = os.path.join(user_dir, "reminders.json")
-            with open(path, "w") as f:
-                json.dump(reminders, f)
+            workspace = os.path.join(tmpdir, "test_user", "workspace")
+            fire_at = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M")
+            _write_tasks_md(workspace, [
+                f"- [ ] \U0001f514 Daily: daily check \U0001f501 every day \u23f3 {fire_at}"
+            ])
 
             notifications = []
 
@@ -167,31 +157,33 @@ class TestSchedulerReminders:
 
             assert len(notifications) == 1
 
-            # Should NOT be fired, but advanced
-            with open(path) as f:
-                data = json.load(f)
-            assert data[0]["fired"] is False
-            next_fire = datetime.fromisoformat(data[0]["fire_at"])
-            assert next_fire > datetime.now()
+            # Should still be pending [ ] but with advanced date
+            lines = _read_tasks_md(workspace)
+            assert "[ ]" in lines[0]
+            # The scheduled time should be in the future now
+            import re
+            m = re.search(r"\u23f3\s+([\d\-T:]+)", lines[0])
+            assert m
+            new_dt = datetime.fromisoformat(m.group(1))
+            assert new_dt > datetime.now()
 
 
 class TestSchedulerEvents:
+    """Events are stored as .md files in workspace/calendar/."""
+
     @pytest.mark.asyncio
     async def test_upcoming_event_notified(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            cal_dir = os.path.join(user_dir, "calendar")
-            os.makedirs(cal_dir)
-
-            events = [{
-                "id": "e1",
+            cal_dir = os.path.join(tmpdir, "test_user", "workspace", "calendar")
+            start = datetime.now() + timedelta(minutes=10)
+            _write_event_md(cal_dir, "2026-04-10 Meeting.md", {
                 "title": "Meeting",
-                "start": (datetime.now() + timedelta(minutes=10)).isoformat(),
+                "date": start.strftime("%Y-%m-%d"),
+                "startTime": start.strftime("%H:%M"),
+                "allDay": False,
+                "type": "single",
                 "location": "Room 42",
-            }]
-            path = os.path.join(cal_dir, "events.json")
-            with open(path, "w") as f:
-                json.dump(events, f)
+            })
 
             notifications = []
 
@@ -206,25 +198,25 @@ class TestSchedulerEvents:
             assert "Meeting" in notifications[0][1]
             assert "Room 42" in notifications[0][1]
 
-            # _notified flag set
-            with open(path) as f:
-                data = json.load(f)
-            assert data[0]["_notified"] is True
+            # State should track notified event
+            state_path = os.path.join(tmpdir, "test_user", "scheduler_state.json")
+            assert os.path.exists(state_path)
+            with open(state_path) as f:
+                state = json.load(f)
+            assert "2026-04-10 Meeting.md" in state.get("notified_events", [])
 
     @pytest.mark.asyncio
     async def test_past_event_not_notified(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            cal_dir = os.path.join(user_dir, "calendar")
-            os.makedirs(cal_dir)
-
-            events = [{
-                "id": "e1",
+            cal_dir = os.path.join(tmpdir, "test_user", "workspace", "calendar")
+            start = datetime.now() - timedelta(hours=1)
+            _write_event_md(cal_dir, "2026-04-10 Old.md", {
                 "title": "Old meeting",
-                "start": (datetime.now() - timedelta(hours=1)).isoformat(),
-            }]
-            with open(os.path.join(cal_dir, "events.json"), "w") as f:
-                json.dump(events, f)
+                "date": start.strftime("%Y-%m-%d"),
+                "startTime": start.strftime("%H:%M"),
+                "allDay": False,
+                "type": "single",
+            })
 
             notifications = []
 
@@ -240,17 +232,15 @@ class TestSchedulerEvents:
     @pytest.mark.asyncio
     async def test_far_future_event_not_notified(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            cal_dir = os.path.join(user_dir, "calendar")
-            os.makedirs(cal_dir)
-
-            events = [{
-                "id": "e1",
+            cal_dir = os.path.join(tmpdir, "test_user", "workspace", "calendar")
+            start = datetime.now() + timedelta(hours=3)
+            _write_event_md(cal_dir, "2026-04-10 Far.md", {
                 "title": "Far away",
-                "start": (datetime.now() + timedelta(hours=3)).isoformat(),
-            }]
-            with open(os.path.join(cal_dir, "events.json"), "w") as f:
-                json.dump(events, f)
+                "date": start.strftime("%Y-%m-%d"),
+                "startTime": start.strftime("%H:%M"),
+                "allDay": False,
+                "type": "single",
+            })
 
             notifications = []
 
@@ -266,18 +256,21 @@ class TestSchedulerEvents:
     @pytest.mark.asyncio
     async def test_already_notified_event_skipped(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            cal_dir = os.path.join(user_dir, "calendar")
-            os.makedirs(cal_dir)
-
-            events = [{
-                "id": "e1",
+            cal_dir = os.path.join(tmpdir, "test_user", "workspace", "calendar")
+            start = datetime.now() + timedelta(minutes=10)
+            _write_event_md(cal_dir, "2026-04-10 Meeting.md", {
                 "title": "Meeting",
-                "start": (datetime.now() + timedelta(minutes=10)).isoformat(),
-                "_notified": True,
-            }]
-            with open(os.path.join(cal_dir, "events.json"), "w") as f:
-                json.dump(events, f)
+                "date": start.strftime("%Y-%m-%d"),
+                "startTime": start.strftime("%H:%M"),
+                "allDay": False,
+                "type": "single",
+            })
+
+            # Pre-set state as notified
+            state_dir = os.path.join(tmpdir, "test_user")
+            os.makedirs(state_dir, exist_ok=True)
+            with open(os.path.join(state_dir, "scheduler_state.json"), "w") as f:
+                json.dump({"notified_events": ["2026-04-10 Meeting.md"]}, f)
 
             notifications = []
 
@@ -295,18 +288,11 @@ class TestSchedulerCallbacks:
     @pytest.mark.asyncio
     async def test_multiple_callbacks(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            os.makedirs(user_dir)
-            reminders = [{
-                "id": "r1",
-                "fire_at": (datetime.now() - timedelta(minutes=1)).isoformat(),
-                "message": "test",
-                "label": "Test",
-                "recurrence": "none",
-                "fired": False,
-            }]
-            with open(os.path.join(user_dir, "reminders.json"), "w") as f:
-                json.dump(reminders, f)
+            workspace = os.path.join(tmpdir, "test_user", "workspace")
+            fire_at = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
+            _write_tasks_md(workspace, [
+                f"- [ ] \U0001f514 Test: test \u23f3 {fire_at}"
+            ])
 
             cb1_calls = []
             cb2_calls = []
@@ -328,18 +314,11 @@ class TestSchedulerCallbacks:
     @pytest.mark.asyncio
     async def test_callback_error_does_not_stop_others(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            user_dir = os.path.join(tmpdir, "test_user")
-            os.makedirs(user_dir)
-            reminders = [{
-                "id": "r1",
-                "fire_at": (datetime.now() - timedelta(minutes=1)).isoformat(),
-                "message": "test",
-                "label": "Test",
-                "recurrence": "none",
-                "fired": False,
-            }]
-            with open(os.path.join(user_dir, "reminders.json"), "w") as f:
-                json.dump(reminders, f)
+            workspace = os.path.join(tmpdir, "test_user", "workspace")
+            fire_at = (datetime.now() - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M")
+            _write_tasks_md(workspace, [
+                f"- [ ] \U0001f514 Test: test \u23f3 {fire_at}"
+            ])
 
             cb2_calls = []
 
@@ -359,5 +338,4 @@ class TestSchedulerCallbacks:
     @pytest.mark.asyncio
     async def test_no_session_dir(self):
         scheduler = Scheduler("/nonexistent/path")
-        # Should not raise
         await scheduler._check_all()
