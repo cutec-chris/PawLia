@@ -118,7 +118,8 @@ async def cmd_consolidate(user_id: str):
         sys.exit(1)
 
     from pawlia.dream_wiki import DreamWikiBackend
-    backend = DreamWikiBackend(str(index_path), CFG)
+    wiki_dir = str(_SESSION_DIR / user_id / "workspace" / "wiki")
+    backend = DreamWikiBackend(str(index_path), CFG, wiki_dir=wiki_dir)
     await backend.consolidate()
     print(json.dumps({"status": "ok", "message": "Konsolidierung abgeschlossen"}))
 
@@ -150,7 +151,8 @@ async def cmd_lint(user_id: str):
         sys.exit(1)
 
     from pawlia.dream_wiki import DreamWikiBackend
-    backend = DreamWikiBackend(str(index_path), CFG)
+    wiki_dir = str(_SESSION_DIR / user_id / "workspace" / "wiki")
+    backend = DreamWikiBackend(str(index_path), CFG, wiki_dir=wiki_dir)
     await backend.consolidate()
     print(json.dumps({"status": "ok", "message": "Wiki Lint abgeschlossen"}))
 
