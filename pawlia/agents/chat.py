@@ -54,6 +54,14 @@ _DEFERRED_TOOL_INTENT_RE = re.compile(
     r"recherch(?:e|ieren)?|suche|schaue|prüfe|pruefe|checke|öffne|oeffne|internet|online|tool|skill|skript)\b)",
     re.IGNORECASE | re.DOTALL,
 )
+_DEFERRED_PLACEHOLDER_RE = re.compile(
+    r"(?:\b(?:please\s+wait|one\s+moment|just\s+a\s+moment|"
+    r"working\s+on\s+it|processing(?:\s+your)?\s+(?:request|message|audio|recording)|"
+    r"bitte\s+warten|warte(?:\s+kurz)?|einen\s+moment|einen\s+augenblick|"
+    r"ich\s+(?:verarbeite|bearbeite|prüfe|pruefe)\s+(?:die|deine|ihre)?\s*"
+    r"(?:aufnahme|anfrage|nachricht)?))\b",
+    re.IGNORECASE,
+)
 
 
 def _split_sentences(text: str) -> Tuple[List[str], str]:
@@ -827,6 +835,8 @@ class ChatAgent(BaseAgent):
         stripped = text.strip()
         if not stripped:
             return has_tool_history
+        if _DEFERRED_PLACEHOLDER_RE.search(stripped):
+            return True
         return bool(_DEFERRED_TOOL_INTENT_RE.search(stripped))
 
     async def _invoke_with_tool_retry(
