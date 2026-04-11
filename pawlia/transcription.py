@@ -35,7 +35,7 @@ import logging
 import os
 import subprocess
 import tempfile
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("pawlia.transcription")
 
@@ -138,7 +138,7 @@ async def transcribe_via_model(
     import base64
     import httpx
 
-    send_bytes = _ensure_model_audio_format(audio_bytes, mime)
+    send_bytes, send_mime = _ensure_model_audio_format(audio_bytes, mime)
 
     audio_b64 = base64.b64encode(send_bytes).decode()
     payload = {
@@ -154,8 +154,9 @@ async def transcribe_via_model(
     }
     url = f"{ollama_base.rstrip('/')}/api/chat"
     logger.info(
-        "transcribe_via_model: sending audio (%d bytes, mime=%s) to %s model=%s",
+        "transcribe_via_model: sending audio (%d bytes, mime=%s, input_mime=%s) to %s model=%s",
         len(send_bytes),
+        send_mime,
         mime,
         url,
         model,
@@ -174,14 +175,14 @@ async def transcribe_via_model(
         return None
 
 
-def _ensure_model_audio_format(audio_bytes: bytes, mime: str) -> bytes:
+def _ensure_model_audio_format(audio_bytes: bytes, mime: str) -> Tuple[bytes, str]:
     """Convert compressed audio to WAV for model-native transcription when possible.
 
     Many native-audio model endpoints handle WAV reliably, while OGG/Opus/WebM
     support can vary. If conversion fails, return original bytes.
     """
     if mime in {"audio/wav", "audio/x-wav"}:
-        return audio_bytes
+        return audio_bytes, "audio/wav"
 
     in_ext = _mime_to_ext(mime)
 
@@ -218,20 +219,20 @@ def _ensure_model_audio_format(audio_bytes: bytes, mime: str) -> bytes:
                 proc.returncode,
                 (proc.stderr or "").strip()[:240],
             )
-            return audio_bytes
+            return audio_bytes, mime
 
         with open(tmp_out_path, "rb") as f:
             wav_bytes = f.read()
         if not wav_bytes:
             logger.warning("transcribe_via_model: ffmpeg conversion produced empty WAV for mime=%s", mime)
-            return audio_bytes
-        return wav_bytes
+            return audio_bytes, mime
+        return wav_bytes, "audio/wav"
     except FileNotFoundError:
         logger.warning("transcribe_via_model: ffmpeg not found, sending original mime=%s", mime)
-        return audio_bytes
+        return audio_bytes, mime
     except Exception as e:
         logger.warning("transcribe_via_model: audio conversion error for mime=%s: %r", mime, e)
-        return audio_bytes
+        return audio_bytes, mime
     finally:
         for path in (tmp_in_path, tmp_out_path):
             try:
