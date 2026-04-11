@@ -1,7 +1,10 @@
 """
-Organizer script – the single entry point for all time/planning operations:
-calendar events (with checklists), tasks (with reminders), simple reminders,
-and scheduled automation jobs.
+Organizer script -- Obsidian-native storage for calendar events and tasks.
+
+Events   -> workspace/calendar/<YYYY-MM-DD> <title>.md  (Full Calendar frontmatter)
+Tasks    -> workspace/tasks.md                           (Obsidian Tasks emoji format)
+Reminders-> workspace/tasks.md                           (scheduled tasks with clock emoji)
+Jobs     -> automations/jobs.json                        (scheduler-internal, not in vault)
 
 Usage:
   python organizer.py <subcommand> --user-id <id> --session-dir <dir> [options]
@@ -18,43 +21,40 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 
+import yaml
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Path helpers
 # ---------------------------------------------------------------------------
 
-def _user_dir(user_id: str, session_dir: str) -> str:
-    path = os.path.join(session_dir, user_id)
+def _workspace_dir(user_id: str, session_dir: str) -> str:
+    path = os.path.join(session_dir, user_id, "workspace")
     os.makedirs(path, exist_ok=True)
     return path
 
 
-def _calendar_path(user_id: str, session_dir: str) -> str:
-    d = os.path.join(_user_dir(user_id, session_dir), "calendar")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "events.json")
+def _calendar_dir(user_id: str, session_dir: str) -> str:
+    path = os.path.join(_workspace_dir(user_id, session_dir), "calendar")
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def _tasks_path(user_id: str, session_dir: str) -> str:
-    d = os.path.join(_user_dir(user_id, session_dir), "tasks")
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, "tasks.json")
-
-
-def _reminders_path(user_id: str, session_dir: str) -> str:
-    return os.path.join(_user_dir(user_id, session_dir), "reminders.json")
+    return os.path.join(_workspace_dir(user_id, session_dir), "tasks.md")
 
 
 def _jobs_path(user_id: str, session_dir: str) -> str:
-    d = os.path.join(_user_dir(user_id, session_dir), "automations")
+    d = os.path.join(session_dir, user_id, "automations")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, "jobs.json")
 
 
-def _load(path: str):
+def _load_json(path: str):
     if not os.path.exists(path):
         return []
     try:
@@ -64,7 +64,7 @@ def _load(path: str):
         return []
 
 
-def _save(path: str, data) -> None:
+def _save_json(path: str, data) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -76,12 +76,351 @@ def _out(data) -> None:
         sys.exit(1)
 
 
+def _strip_quotes(s: str) -> str:
+    """Strip surrounding single quotes that cmd.exe leaves intact."""
+    if s and len(s) >= 2 and s[0] == "'" and s[-1] == "'":
+        return s[1:-1]
+    return s
+
+
+def _safe_filename(name: str) -> str:
+    """Create a filesystem-safe version of a string."""
+    # Normalize unicode
+    name = unicodedata.normalize("NFC", name)
+    # Remove/replace unsafe characters
+    name = re.sub(r'[<>:"/\\|?*]', "", name)
+    name = name.strip(". ")
+    return name[:80] or "event"
+
+
+# ---------------------------------------------------------------------------
+# Event Markdown I/O (Full Calendar format)
+# ---------------------------------------------------------------------------
+
+def _event_filename(date_str: str, title: str) -> str:
+    """Generate filename: 'YYYY-MM-DD title.md'."""
+    # Extract date part (handle full ISO datetime)
+    date_part = date_str[:10] if len(date_str) >= 10 else date_str
+    safe_title = _safe_filename(title)
+    return f"{date_part} {safe_title}.md"
+
+
+def _write_event_md(filepath: str, event: dict) -> None:
+    """Write an event as a Full Calendar compatible Markdown file."""
+    start_str = event["start"]
+    # Parse start datetime
+    try:
+        start_dt = datetime.fromisoformat(start_str)
+        date_str = start_dt.strftime("%Y-%m-%d")
+        start_time = start_dt.strftime("%H:%M")
+    except ValueError:
+        date_str = start_str[:10]
+        start_time = None
+
+    # Parse end datetime
+    end_time = None
+    end_date = None
+    if event.get("end"):
+        try:
+            end_dt = datetime.fromisoformat(event["end"])
+            end_time = end_dt.strftime("%H:%M")
+            end_date_str = end_dt.strftime("%Y-%m-%d")
+            if end_date_str != date_str:
+                end_date = end_date_str
+        except ValueError:
+            pass
+
+    all_day = start_time is None or start_time == "00:00" and end_time in (None, "00:00", "23:59")
+
+    # Build frontmatter
+    fm = {
+        "title": event["title"],
+        "date": date_str,
+        "allDay": all_day,
+        "type": "single",
+    }
+    if not all_day and start_time:
+        fm["startTime"] = start_time
+    if not all_day and end_time:
+        fm["endTime"] = end_time
+    if end_date:
+        fm["endDate"] = end_date
+    if event.get("location"):
+        fm["location"] = event["location"]
+    if event.get("completed"):
+        fm["completed"] = event["completed"]
+
+    # Checklist automation config goes into frontmatter (scheduler reads it)
+    if event.get("checklist"):
+        fm["checklist"] = event["checklist"]
+
+    # Build body
+    body_parts = []
+    if event.get("description"):
+        body_parts.append(event["description"])
+
+    # Human-readable checklist in body
+    if event.get("checklist"):
+        body_parts.append("\n## Checkliste")
+        for item in event["checklist"]:
+            label = item.get("message") or item.get("script", "")
+            offset = item.get("trigger_offset", "")
+            if offset:
+                label += f" ({offset})"
+            body_parts.append(f"- [ ] {label}")
+
+    content = f"---\n{yaml.dump(fm, allow_unicode=True, default_flow_style=False).rstrip()}\n---\n"
+    if body_parts:
+        content += "\n" + "\n".join(body_parts) + "\n"
+
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def _read_event_md(filepath: str) -> dict | None:
+    """Parse a Full Calendar event .md file into a dict."""
+    try:
+        with open(filepath, encoding="utf-8") as f:
+            text = f.read()
+    except Exception:
+        return None
+
+    # Parse frontmatter
+    if not text.lstrip().startswith("---"):
+        return None
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return None
+    try:
+        fm = yaml.safe_load(parts[1]) or {}
+    except Exception:
+        return None
+
+    body = parts[2].strip()
+
+    # Reconstruct event dict
+    date_str = fm.get("date", "")
+    start_time = fm.get("startTime", "")
+    end_time = fm.get("endTime", "")
+
+    if start_time and date_str:
+        start = f"{date_str}T{start_time}:00"
+    else:
+        start = date_str
+
+    end = ""
+    if end_time:
+        end_date = fm.get("endDate", date_str)
+        end = f"{end_date}T{end_time}:00"
+
+    # Extract description (body minus checklist section)
+    description = body
+    if "\n## Checkliste" in body:
+        description = body.split("\n## Checkliste")[0].strip()
+
+    event = {
+        "id": os.path.basename(filepath),
+        "title": fm.get("title", ""),
+        "start": start,
+        "end": end,
+        "description": description,
+        "location": fm.get("location", ""),
+        "checklist": fm.get("checklist", []),
+    }
+    return event
+
+
+def _find_event_file(calendar_dir: str, event_id: str) -> str | None:
+    """Find an event file by ID (filename with or without .md)."""
+    if not event_id.endswith(".md"):
+        event_id += ".md"
+    filepath = os.path.join(calendar_dir, event_id)
+    if os.path.exists(filepath):
+        return filepath
+    # Fuzzy: search by partial match
+    if os.path.isdir(calendar_dir):
+        for f in os.listdir(calendar_dir):
+            if event_id.lower() in f.lower():
+                return os.path.join(calendar_dir, f)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Tasks Markdown I/O (Obsidian Tasks emoji format)
+# ---------------------------------------------------------------------------
+
+_PRIORITY_TO_EMOJI = {
+    "highest": "\U0001f53a",  # 🔺
+    "high": "\u23eb",         # ⏫
+    "medium": "\U0001f53c",   # 🔼
+    "low": "\U0001f53d",      # 🔽
+    "lowest": "\u23ec",       # ⏬
+}
+
+_EMOJI_TO_PRIORITY = {v: k for k, v in _PRIORITY_TO_EMOJI.items()}
+
+# Regex for parsing a task line
+_TASK_RE = re.compile(
+    r"^- \[([ xX\-])\] (.+)$"
+)
+
+
+def _task_to_line(task: dict) -> str:
+    """Convert a task dict to an Obsidian Tasks emoji line."""
+    status = task.get("status", "pending")
+    if status == "completed":
+        checkbox = "[x]"
+    elif status == "cancelled":
+        checkbox = "[-]"
+    else:
+        checkbox = "[ ]"
+
+    parts = [f"- {checkbox} {task['title']}"]
+
+    # Priority emoji
+    prio = task.get("priority", "")
+    if prio in _PRIORITY_TO_EMOJI:
+        parts.append(_PRIORITY_TO_EMOJI[prio])
+
+    # Recurrence
+    if task.get("recurrence"):
+        parts.append(f"\U0001f501 {task['recurrence']}")  # 🔁
+
+    # Scheduled date (for reminders)
+    if task.get("scheduled"):
+        parts.append(f"\u23f3 {task['scheduled']}")  # ⏳
+
+    # Start date
+    if task.get("start_date"):
+        parts.append(f"\U0001f6eb {task['start_date']}")  # 🛫
+
+    # Due date
+    if task.get("due_date"):
+        parts.append(f"\U0001f4c5 {task['due_date']}")  # 📅
+
+    # Created date
+    if task.get("created_at"):
+        created = task["created_at"][:10]
+        parts.append(f"\u2795 {created}")  # ➕
+
+    # Done date
+    if status == "completed" and task.get("completed_at"):
+        done = task["completed_at"][:10]
+        parts.append(f"\u2705 {done}")  # ✅
+
+    # Cancelled date
+    if status == "cancelled" and task.get("cancelled_at"):
+        parts.append(f"\u274c {task['cancelled_at'][:10]}")  # ❌
+
+    return " ".join(parts)
+
+
+def _line_to_task(line: str) -> dict | None:
+    """Parse an Obsidian Tasks emoji line into a task dict."""
+    m = _TASK_RE.match(line.strip())
+    if not m:
+        return None
+
+    check = m.group(1)
+    rest = m.group(2)
+
+    if check in ("x", "X"):
+        status = "completed"
+    elif check == "-":
+        status = "cancelled"
+    else:
+        status = "pending"
+
+    task = {"status": status, "is_reminder": False}
+
+    # Extract emojis and their values from the rest
+    # Work backwards: split off emoji+value pairs
+    title_parts = []
+    tokens = rest.split()
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        # Check if this token is an emoji marker with a following value
+        if token in ("\U0001f53a", "\u23eb", "\U0001f53c", "\U0001f53d", "\u23ec"):
+            # Priority (standalone, no value)
+            task["priority"] = _EMOJI_TO_PRIORITY.get(token, "")
+            i += 1
+        elif token == "\U0001f501" and i + 1 < len(tokens):  # 🔁
+            # Recurrence: collect all following words until next emoji
+            i += 1
+            rec_parts = []
+            while i < len(tokens) and not _is_task_emoji(tokens[i]):
+                rec_parts.append(tokens[i])
+                i += 1
+            task["recurrence"] = " ".join(rec_parts)
+        elif token == "\u23f3" and i + 1 < len(tokens):  # ⏳ scheduled
+            task["scheduled"] = tokens[i + 1]
+            task["is_reminder"] = True
+            i += 2
+        elif token == "\U0001f6eb" and i + 1 < len(tokens):  # 🛫 start
+            task["start_date"] = tokens[i + 1]
+            i += 2
+        elif token == "\U0001f4c5" and i + 1 < len(tokens):  # 📅 due
+            task["due_date"] = tokens[i + 1]
+            i += 2
+        elif token == "\u2795" and i + 1 < len(tokens):  # ➕ created
+            task["created_at"] = tokens[i + 1]
+            i += 2
+        elif token == "\u2705" and i + 1 < len(tokens):  # ✅ done
+            task["completed_at"] = tokens[i + 1]
+            i += 2
+        elif token == "\u274c" and i + 1 < len(tokens):  # ❌ cancelled
+            task["cancelled_at"] = tokens[i + 1]
+            i += 2
+        else:
+            title_parts.append(token)
+            i += 1
+
+    task["title"] = " ".join(title_parts)
+    return task
+
+
+def _is_task_emoji(token: str) -> bool:
+    """Check if token is a known Obsidian Tasks emoji marker."""
+    return token in (
+        "\U0001f53a", "\u23eb", "\U0001f53c", "\U0001f53d", "\u23ec",  # priorities
+        "\U0001f501",  # 🔁 recurrence
+        "\u23f3",      # ⏳ scheduled
+        "\U0001f6eb",  # 🛫 start
+        "\U0001f4c5",  # 📅 due
+        "\u2795",      # ➕ created
+        "\u2705",      # ✅ done
+        "\u274c",      # ❌ cancelled
+    )
+
+
+def _read_tasks_md(path: str) -> list[dict]:
+    """Read all tasks from a tasks.md file."""
+    if not os.path.exists(path):
+        return []
+    tasks = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            task = _line_to_task(line)
+            if task:
+                tasks.append(task)
+    return tasks
+
+
+def _write_tasks_md(path: str, tasks: list[dict]) -> None:
+    """Write all tasks to a tasks.md file."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    lines = [_task_to_line(t) for t in tasks]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n" if lines else "")
+
+
 # ---------------------------------------------------------------------------
 # Calendar commands
 # ---------------------------------------------------------------------------
 
 def cmd_add_event(args) -> None:
-    # Parse checklist from JSON string if provided
     checklist = []
     if args.checklist:
         try:
@@ -90,147 +429,167 @@ def cmd_add_event(args) -> None:
             _out({"success": False, "error": "Invalid checklist JSON."})
             return
 
-    # Ensure each checklist item has an id and status
     for item in checklist:
         if "id" not in item:
             item["id"] = f"chk-{uuid.uuid4().hex[:8]}"
-        if "status" not in item:
-            item["status"] = "pending"
-        if "result" not in item:
-            item["result"] = None
 
     event = {
-        "id": str(uuid.uuid4()),
         "title": args.title,
         "start": args.start,
         "end": args.end or "",
         "description": args.description or "",
         "location": args.location or "",
         "checklist": checklist,
-        "created_at": datetime.now().isoformat(),
     }
-    path = _calendar_path(args.user_id, args.session_dir)
-    events = _load(path)
-    events.append(event)
-    _save(path, events)
+
+    cal_dir = _calendar_dir(args.user_id, args.session_dir)
+    filename = _event_filename(args.start, args.title)
+    filepath = os.path.join(cal_dir, filename)
+
+    # Avoid overwriting: append number if needed
+    if os.path.exists(filepath):
+        base, ext = os.path.splitext(filename)
+        n = 2
+        while os.path.exists(os.path.join(cal_dir, f"{base} {n}{ext}")):
+            n += 1
+        filename = f"{base} {n}{ext}"
+        filepath = os.path.join(cal_dir, filename)
+
+    _write_event_md(filepath, event)
 
     msg = f"Event '{args.title}' added"
     if checklist:
         msg += f" with {len(checklist)} checklist items"
-    _out({"success": True, "message": msg + ".", "event_id": event["id"]})
+    _out({"success": True, "message": msg + ".", "event_id": filename})
 
 
 def cmd_list_events(args) -> None:
-    path = _calendar_path(args.user_id, args.session_dir)
-    events = _load(path)
-    events.sort(key=lambda x: x.get("start", ""), reverse=True)
+    cal_dir = _calendar_dir(args.user_id, args.session_dir)
+    events = []
+    if os.path.isdir(cal_dir):
+        for f in sorted(os.listdir(cal_dir), reverse=True):
+            if f.endswith(".md"):
+                ev = _read_event_md(os.path.join(cal_dir, f))
+                if ev:
+                    events.append(ev)
     limit = args.limit or 10
     _out({"success": True, "events": events[:limit], "total": len(events)})
 
 
 def cmd_delete_event(args) -> None:
-    path = _calendar_path(args.user_id, args.session_dir)
-    events = _load(path)
-    before = len(events)
-    events = [e for e in events if e.get("id") != args.event_id]
-    if len(events) == before:
-        _out({"success": False, "error": "Event not found."})
+    cal_dir = _calendar_dir(args.user_id, args.session_dir)
+    filepath = _find_event_file(cal_dir, args.event_id)
+    if not filepath:
+        _out({"success": False, "error": f"Event not found: {args.event_id}"})
         return
-    _save(path, events)
-    _out({"success": True, "message": "Event deleted.", "remaining": len(events)})
+    os.remove(filepath)
+    _out({"success": True, "message": f"Event deleted: {os.path.basename(filepath)}"})
 
 
 # ---------------------------------------------------------------------------
 # Task commands
 # ---------------------------------------------------------------------------
 
-def _strip_quotes(s: str) -> str:
-    """Strip surrounding single quotes that cmd.exe leaves intact."""
-    if s and len(s) >= 2 and s[0] == "'" and s[-1] == "'":
-        return s[1:-1]
-    return s
-
-
 def cmd_add_task(args) -> None:
-    # Parse reminders from JSON string if provided
-    reminders = []
+    task = {
+        "title": args.title,
+        "due_date": args.due_date or "",
+        "priority": args.priority or "",
+        "status": "pending",
+        "created_at": datetime.now().strftime("%Y-%m-%d"),
+    }
+
+    path = _tasks_path(args.user_id, args.session_dir)
+    tasks = _read_tasks_md(path)
+    tasks.append(task)
+    _write_tasks_md(path, tasks)
+
+    # Store task reminders in scheduler_state.json (outside workspace)
     if args.reminders:
         try:
             reminders = json.loads(_strip_quotes(args.reminders))
         except json.JSONDecodeError:
-            _out({"success": False, "error": "Invalid reminders JSON."})
-            return
+            reminders = []
+        if reminders:
+            state_path = os.path.join(args.session_dir, args.user_id, "scheduler_state.json")
+            state = {}
+            if os.path.exists(state_path):
+                try:
+                    with open(state_path, encoding="utf-8") as f:
+                        state = json.load(f)
+                except Exception:
+                    pass
+            task_reminders = state.setdefault("task_reminders", {})
+            task_key = args.title.lower()
+            for rem in reminders:
+                if "fired" not in rem:
+                    rem["fired"] = False
+            task_reminders[task_key] = reminders
+            os.makedirs(os.path.dirname(state_path), exist_ok=True)
+            with open(state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
 
-    # Ensure each reminder has required fields
-    for rem in reminders:
-        if "fired" not in rem:
-            rem["fired"] = False
-        if "offset" not in rem:
-            rem["offset"] = "-1d"  # default: 1 day before
-
-    task = {
-        "id": str(uuid.uuid4()),
-        "title": args.title,
-        "due_date": args.due_date or "",
-        "priority": args.priority or "medium",
-        "description": args.description or "",
-        "status": "pending",
-        "reminders": reminders,
-        "created_at": datetime.now().isoformat(),
-    }
-    path = _tasks_path(args.user_id, args.session_dir)
-    tasks = _load(path)
-    tasks.append(task)
-    _save(path, tasks)
-
-    msg = f"Task '{args.title}' added"
-    if reminders:
-        msg += f" with {len(reminders)} reminders"
-    _out({"success": True, "message": msg + ".", "task_id": task["id"]})
+    _out({"success": True, "message": f"Task '{args.title}' added.", "task_id": args.title})
 
 
 def cmd_list_tasks(args) -> None:
     path = _tasks_path(args.user_id, args.session_dir)
-    tasks = _load(path)
+    tasks = _read_tasks_md(path)
+
+    # Filter out reminders
+    tasks = [t for t in tasks if not t.get("is_reminder")]
+
     status_filter = args.status or "pending"
     if status_filter != "all":
         tasks = [t for t in tasks if t.get("status") == status_filter]
-    tasks.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
     limit = args.limit or 10
-    _out({"success": True, "tasks": tasks[:limit], "total": len(tasks)})
+    # Format for display
+    display = []
+    for t in tasks[:limit]:
+        display.append({
+            "title": t["title"],
+            "status": t["status"],
+            "due_date": t.get("due_date", ""),
+            "priority": t.get("priority", ""),
+        })
+    _out({"success": True, "tasks": display, "total": len(tasks)})
 
 
 def cmd_complete_task(args) -> None:
     path = _tasks_path(args.user_id, args.session_dir)
-    tasks = _load(path)
+    tasks = _read_tasks_md(path)
     found = False
     for t in tasks:
-        if t.get("id") == args.task_id:
+        if t.get("title", "").lower() == args.task_id.lower() or args.task_id.lower() in t.get("title", "").lower():
             t["status"] = "completed"
-            t["completed_at"] = datetime.now().isoformat()
+            t["completed_at"] = datetime.now().strftime("%Y-%m-%d")
             found = True
             break
     if not found:
-        _out({"success": False, "error": "Task not found."})
+        _out({"success": False, "error": f"Task not found: {args.task_id}"})
         return
-    _save(path, tasks)
+    _write_tasks_md(path, tasks)
     _out({"success": True, "message": "Task marked as completed."})
 
 
 def cmd_delete_task(args) -> None:
     path = _tasks_path(args.user_id, args.session_dir)
-    tasks = _load(path)
+    tasks = _read_tasks_md(path)
     before = len(tasks)
-    tasks = [t for t in tasks if t.get("id") != args.task_id]
+    tasks = [t for t in tasks if not (
+        t.get("title", "").lower() == args.task_id.lower()
+        or args.task_id.lower() in t.get("title", "").lower()
+    )]
     if len(tasks) == before:
-        _out({"success": False, "error": "Task not found."})
+        _out({"success": False, "error": f"Task not found: {args.task_id}"})
         return
-    _save(path, tasks)
+    _write_tasks_md(path, tasks)
     _out({"success": True, "message": "Task deleted.", "remaining": len(tasks)})
 
 
 # ---------------------------------------------------------------------------
-# Simple reminder commands (replaces the old ReminderTool)
+# Reminder commands (stored as scheduled tasks in tasks.md)
 # ---------------------------------------------------------------------------
 
 def _parse_fire_at(fire_at: str) -> datetime:
@@ -251,67 +610,86 @@ def _parse_fire_at(fire_at: str) -> datetime:
 
 
 def cmd_add_reminder(args) -> None:
-    fire_at_str = args.fire_at
-    if not fire_at_str:
+    if not args.fire_at:
         _out({"success": False, "error": "fire_at is required."})
         return
-    message = args.message or ""
-    if not message:
+    if not args.message:
         _out({"success": False, "error": "message is required."})
         return
 
     try:
-        fire_at = _parse_fire_at(fire_at_str)
+        fire_at = _parse_fire_at(args.fire_at)
     except Exception as e:
         _out({"success": False, "error": f"Invalid fire_at format: {e}"})
         return
 
-    recurrence = (args.recurrence or "none").strip().lower()
-    if recurrence not in ("none", "daily", "weekly", "monthly"):
-        recurrence = "none"
+    recurrence = (args.recurrence or "").strip().lower()
+    recurrence_str = ""
+    if recurrence and recurrence != "none":
+        recurrence_str = f"every {recurrence.rstrip('ly')}"  # "daily" -> "every day" etc.
+        if recurrence == "daily":
+            recurrence_str = "every day"
+        elif recurrence == "weekly":
+            recurrence_str = "every week"
+        elif recurrence == "monthly":
+            recurrence_str = "every month"
 
-    reminder = {
-        "id": str(uuid.uuid4()),
-        "user_id": args.user_id,
-        "fire_at": fire_at.isoformat(),
-        "message": message,
-        "label": args.label or "Reminder",
-        "recurrence": recurrence,
-        "fired": False,
-        "created_at": datetime.now().isoformat(),
+    label = args.label or "Reminder"
+    title = f"\U0001f514 {label}: {args.message}"  # 🔔
+
+    task = {
+        "title": title,
+        "scheduled": fire_at.strftime("%Y-%m-%dT%H:%M"),
+        "status": "pending",
+        "created_at": datetime.now().strftime("%Y-%m-%d"),
+        "is_reminder": True,
     }
-    path = _reminders_path(args.user_id, args.session_dir)
-    reminders = _load(path)
-    reminders.append(reminder)
-    _save(path, reminders)
+    if recurrence_str:
+        task["recurrence"] = recurrence_str
+
+    path = _tasks_path(args.user_id, args.session_dir)
+    tasks = _read_tasks_md(path)
+    tasks.append(task)
+    _write_tasks_md(path, tasks)
+
     _out({
         "success": True,
         "message": f"Reminder scheduled for {fire_at.strftime('%d.%m.%Y %H:%M')}",
-        "reminder_id": reminder["id"],
+        "reminder_id": title,
     })
 
 
 def cmd_list_reminders(args) -> None:
-    path = _reminders_path(args.user_id, args.session_dir)
-    reminders = _load(path)
-    pending = [r for r in reminders if not r.get("fired")]
-    _out({"success": True, "reminders": pending, "total": len(pending)})
+    path = _tasks_path(args.user_id, args.session_dir)
+    tasks = _read_tasks_md(path)
+    reminders = [t for t in tasks if t.get("is_reminder") and t.get("status") == "pending"]
+    display = []
+    for r in reminders:
+        display.append({
+            "title": r["title"],
+            "scheduled": r.get("scheduled", ""),
+            "recurrence": r.get("recurrence", ""),
+        })
+    _out({"success": True, "reminders": display, "total": len(reminders)})
 
 
 def cmd_delete_reminder(args) -> None:
-    path = _reminders_path(args.user_id, args.session_dir)
-    reminders = _load(path)
-    before = len(reminders)
-    reminders = [r for r in reminders if r.get("id") != args.reminder_id]
-    if len(reminders) == before:
-        _out({"success": False, "error": "Reminder not found."})
+    path = _tasks_path(args.user_id, args.session_dir)
+    tasks = _read_tasks_md(path)
+    before = len(tasks)
+    tasks = [t for t in tasks if not (
+        t.get("is_reminder")
+        and args.reminder_id.lower() in t.get("title", "").lower()
+    )]
+    if len(tasks) == before:
+        _out({"success": False, "error": f"Reminder not found: {args.reminder_id}"})
         return
-    _save(path, reminders)
+    _write_tasks_md(path, tasks)
     _out({"success": True, "message": "Reminder deleted."})
 
 
 # ---------------------------------------------------------------------------
-# Job commands (scheduled automation scripts)
+# Job commands (scheduler-internal JSON, not in Obsidian vault)
 # ---------------------------------------------------------------------------
 
 def cmd_add_job(args) -> None:
@@ -328,34 +706,35 @@ def cmd_add_job(args) -> None:
         "last_result": "",
     }
     path = _jobs_path(args.user_id, args.session_dir)
-    jobs = _load(path)
+    jobs = _load_json(path)
     jobs.append(job)
-    _save(path, jobs)
+    _save_json(path, jobs)
     _out({"success": True, "message": f"Job '{args.name}' scheduled ({args.schedule}).", "job_id": job["id"]})
 
 
 def cmd_list_jobs(args) -> None:
     path = _jobs_path(args.user_id, args.session_dir)
-    jobs = _load(path)
+    jobs = _load_json(path)
     _out({"success": True, "jobs": jobs, "total": len(jobs)})
 
 
 def cmd_delete_job(args) -> None:
     path = _jobs_path(args.user_id, args.session_dir)
-    jobs = _load(path)
+    jobs = _load_json(path)
     before = len(jobs)
     jobs = [j for j in jobs if j.get("id") != args.job_id]
     if len(jobs) == before:
         _out({"success": False, "error": "Job not found."})
         return
-    _save(path, jobs)
+    _save_json(path, jobs)
     _out({"success": True, "message": "Job deleted.", "remaining": len(jobs)})
 
 
 def cmd_toggle_job(args) -> None:
     path = _jobs_path(args.user_id, args.session_dir)
-    jobs = _load(path)
+    jobs = _load_json(path)
     found = False
+    state = ""
     for j in jobs:
         if j.get("id") == args.job_id:
             j["enabled"] = not j.get("enabled", True)
@@ -365,7 +744,7 @@ def cmd_toggle_job(args) -> None:
     if not found:
         _out({"success": False, "error": "Job not found."})
         return
-    _save(path, jobs)
+    _save_json(path, jobs)
     _out({"success": True, "message": f"Job {state}."})
 
 
@@ -381,7 +760,7 @@ def main():
         p.add_argument("--user-id", default=os.environ.get("PAWLIA_USER_ID"))
         p.add_argument("--session-dir", default=os.environ.get("PAWLIA_SESSION_DIR"))
 
-    # add-event (now with --checklist)
+    # add-event
     p = sub.add_parser("add-event")
     _base(p)
     p.add_argument("--title", required=True)
@@ -399,16 +778,18 @@ def main():
     # delete-event
     p = sub.add_parser("delete-event")
     _base(p)
-    p.add_argument("--event-id", required=True)
+    p.add_argument("--event-id", required=True, help="Event filename (with or without .md)")
 
-    # add-task (now with --reminders)
+    # add-task
     p = sub.add_parser("add-task")
     _base(p)
     p.add_argument("--title", required=True)
     p.add_argument("--due-date")
-    p.add_argument("--priority")
+    p.add_argument("--priority", choices=["highest", "high", "medium", "low", "lowest"])
     p.add_argument("--description")
-    p.add_argument("--reminders", help="JSON array of reminder rules")
+    # Note: --reminders is accepted but task reminders are now managed via
+    # scheduler_state.json, not embedded in the task line itself.
+    p.add_argument("--reminders", help="JSON array of reminder rules (stored in scheduler state)")
 
     # list-tasks
     p = sub.add_parser("list-tasks")
@@ -419,12 +800,12 @@ def main():
     # complete-task
     p = sub.add_parser("complete-task")
     _base(p)
-    p.add_argument("--task-id", required=True)
+    p.add_argument("--task-id", required=True, help="Task title (or substring)")
 
     # delete-task
     p = sub.add_parser("delete-task")
     _base(p)
-    p.add_argument("--task-id", required=True)
+    p.add_argument("--task-id", required=True, help="Task title (or substring)")
 
     # add-reminder
     p = sub.add_parser("add-reminder")
@@ -441,14 +822,14 @@ def main():
     # delete-reminder
     p = sub.add_parser("delete-reminder")
     _base(p)
-    p.add_argument("--reminder-id", required=True)
+    p.add_argument("--reminder-id", required=True, help="Reminder title (or substring)")
 
     # add-job
     p = sub.add_parser("add-job")
     _base(p)
     p.add_argument("--name", required=True)
     p.add_argument("--script", required=True)
-    p.add_argument("--schedule", required=True, help="'HH:MM' or 'interval:Nm/Nh'")
+    p.add_argument("--schedule", required=True)
     p.add_argument("--params", help="JSON object of script params")
     p.add_argument("--no-notify", action="store_true")
 
@@ -469,7 +850,7 @@ def main():
     args = parser.parse_args()
 
     if not args.user_id or not args.session_dir:
-        print(json.dumps({"success": False, "error": "user-id and session-dir are required (via args or PAWLIA_USER_ID / PAWLIA_SESSION_DIR env vars)."}))
+        print(json.dumps({"success": False, "error": "user-id and session-dir required (via args or env vars)."}))
         sys.exit(1)
 
     dispatch = {

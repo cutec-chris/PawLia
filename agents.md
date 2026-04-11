@@ -130,21 +130,31 @@ Tools extend `Tool(ABC)` and register in `ToolRegistry`. Each tool provides `as_
 
 ```
 session/{user_id}/
-├── workspace/
+├── workspace/                      # Obsidian vault
 │   ├── memory/
 │   │   ├── 2026-03-15.md           # daily chat log (append-only)
 │   │   ├── memory.md                # persistent user facts
 │   │   ├── context_summary.md       # LLM-generated conversation summary
 │   │   ├── thread_XXX_2026-03-15.md  # per-thread logs
 │   │   └── model_override.txt       # session-level model override
-│   ├── soul.md                    # agent personality (from template)
-│   ├── IDENTITY.md                # agent identity (from template)
-│   ├── USER.md                    # user context (from template)
-│   ├── bootstrap.md               # onboarding (removed once identity files are filled)
-│   └── skills/                   # workspace skills (with allow_workspace: true)
-├── reminders.json                 # proactive reminders (managed by Scheduler)
-└── calendar/
-    └── events.json                 # calendar events (managed by Scheduler)
+│   ├── calendar/                   # Full Calendar plugin events
+│   │   └── 2026-04-10 Meeting.md   # one .md per event (frontmatter)
+│   ├── tasks.md                    # Obsidian Tasks plugin format
+│   ├── wiki/                       # Dream Wiki (structured knowledge base)
+│   │   ├── index.md                # catalog of all pages
+│   │   ├── log.md                  # chronological audit log
+│   │   └── topics/                 # one .md page per topic/entity
+│   ├── soul.md                     # agent personality (from template)
+│   ├── IDENTITY.md                 # agent identity (from template)
+│   ├── USER.md                     # user context (from template)
+│   ├── bootstrap.md                # onboarding (removed once identity files are filled)
+│   ├── skills/                     # workspace skills (with allow_workspace: true)
+│   └── .git/                       # optional: auto-managed by workspace git sync
+├── scheduler_state.json            # internal scheduler flags (notified, fired, etc.)
+├── automations/
+│   └── jobs.json                   # scheduled automation jobs
+└── memory_index/                   # RAG backend index (not in vault)
+    └── dreamed_files.json          # Dream Wiki tracking
 ```
 
 **System prompt** is built from all `.md` files in workspace root + summary + memory + skill instructions.

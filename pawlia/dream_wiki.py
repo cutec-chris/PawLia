@@ -5,7 +5,7 @@ a persistent, structured wiki with cross-references, YAML frontmatter,
 and ``[[wikilinks]]``.  The wiki is a compounding artifact: knowledge is
 compiled once and kept current, not re-derived on every query.
 
-Storage layout inside *index_path*:
+Storage layout inside the user's workspace (``workspace/wiki/``):
   wiki/
     index.md              — Catalog of all pages (slug + one-line summary)
     log.md                — Chronological audit log of ingest/lint operations
@@ -167,13 +167,20 @@ class DreamWikiBackend:
         index_path: str,
         cfg: dict,
         llm_busy_check: Optional[Callable[[], bool]] = None,
+        wiki_dir: Optional[str] = None,
     ):
         self._index_path = index_path
         self._cfg = cfg
         self._llm_busy = llm_busy_check
-        self._wiki_dir = os.path.join(index_path, "wiki")
+        if wiki_dir:
+            self._wiki_dir = wiki_dir
+        else:
+            # Default: place wiki in workspace/wiki/ (sibling of memory_index)
+            user_session = os.path.dirname(index_path)
+            self._wiki_dir = os.path.join(user_session, "workspace", "wiki")
         self._topics_dir = os.path.join(self._wiki_dir, "topics")
-        self._tracker_path = os.path.join(self._wiki_dir, "dreamed_files.json")
+        # Keep tracker in index_path (not in wiki) to keep the vault clean
+        self._tracker_path = os.path.join(index_path, "dreamed_files.json")
         self._indexed: set[str] = set()
         self._tracker: Optional[dict] = None
 

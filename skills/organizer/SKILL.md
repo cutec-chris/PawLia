@@ -4,16 +4,18 @@ description: "Personal planner for reminders, calendar events, and tasks. Use wh
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "2.0"
+  version: "3.0"
 ---
 
 # Organizer
 
-The single entry point for ALL time-related and planning operations:
-- **Simple reminders** ("remind me in 10 min about the pizza")
-- **Calendar events** with automation checklists
-- **Tasks** with automatic reminder rules
-- **Scheduled jobs** (recurring script execution)
+Obsidian-native storage for all time-related and planning operations.
+The workspace directory functions as an Obsidian vault:
+
+- **Events** → `workspace/calendar/<YYYY-MM-DD> <title>.md` (Full Calendar plugin format)
+- **Tasks** → `workspace/tasks.md` (Obsidian Tasks emoji format)
+- **Reminders** → `workspace/tasks.md` (scheduled tasks with 🔔 prefix)
+- **Jobs** → `automations/jobs.json` (scheduler-internal, not in vault)
 
 ## Instructions
 
@@ -22,6 +24,7 @@ Run the script with the appropriate subcommand. The `--user-id` and `--session-d
 ### Simple Reminders
 
 For quick reminders like "remind me in 10 minutes" or "remind me tomorrow at 9".
+Reminders are stored as scheduled tasks in `tasks.md` with a 🔔 prefix.
 
 Add a reminder:
 ```
@@ -29,7 +32,7 @@ python <scripts_dir>/organizer.py add-reminder --fire-at "<time>" --message "<me
 ```
 
 - `--fire-at`: ISO8601 datetime or relative time: `"10m"`, `"2h"`, `"1d"`
-- `--recurrence`: optional, for repeating reminders
+- `--recurrence`: optional, for repeating reminders (uses 🔁 emoji)
 
 List pending reminders:
 ```
@@ -38,17 +41,19 @@ python <scripts_dir>/organizer.py list-reminders
 
 Delete a reminder:
 ```
-python <scripts_dir>/organizer.py delete-reminder --reminder-id "<id>"
+python <scripts_dir>/organizer.py delete-reminder --reminder-id "<title substring>"
 ```
 
 ### Calendar
+
+Events are stored as individual Markdown files with Full Calendar compatible YAML frontmatter.
 
 Add an event:
 ```
 python <scripts_dir>/organizer.py add-event --title "<title>" --start "<ISO8601>" [--end "<ISO8601>"] [--description "<desc>"] [--location "<loc>"] [--checklist '<JSON>']
 ```
 
-The `--checklist` parameter accepts a JSON array of automation items. Each item can reference a script that the system executes automatically at the right time — no LLM needed at runtime.
+The `--checklist` parameter accepts a JSON array of automation items stored in frontmatter. Each item can reference a script that the system executes automatically at the right time.
 
 **Checklist item format:**
 ```json
@@ -65,25 +70,18 @@ The `--checklist` parameter accepts a JSON array of automation items. Each item 
     "trigger": "relative",
     "trigger_offset": "-1d",
     "message": "Morgen: {title} in {location}. Unterlagen vorbereiten!"
-  },
-  {
-    "script": "check_traffic.py",
-    "trigger": "relative",
-    "trigger_offset": "-60m",
-    "params": {"destination": "Magdeburg"},
-    "notify": true
   }
 ]
 ```
 
 - `trigger`: `"relative"` (offset from event start), `"on_create"` (immediately), `"absolute"` (fixed time)
 - `trigger_offset`: e.g. `"-2h"`, `"-1d"`, `"-30m"` (negative = before event)
-- `script`: path to automation script (resolved from user automations dir or global scripts)
+- `script`: path to automation script
 - `message`: plain text notification (when no script needed)
 - `params`: passed to the script as AUTOMATION_PARAMS env var (JSON)
 - `notify`: whether to send the result to the user (default: true)
 
-**IMPORTANT:** When creating events with a location, ALWAYS create a checklist with appropriate reminders and preparation steps. Think about what the user needs (route, departure time, documents, etc.) and plan it as checklist items.
+**IMPORTANT:** When creating events with a location, ALWAYS create a checklist with appropriate reminders and preparation steps.
 
 List events:
 ```
@@ -92,19 +90,23 @@ python <scripts_dir>/organizer.py list-events [--limit <n>]
 
 Delete an event:
 ```
-python <scripts_dir>/organizer.py delete-event --event-id "<id>"
+python <scripts_dir>/organizer.py delete-event --event-id "<filename>"
 ```
+
+The `--event-id` is the filename (with or without `.md`), e.g. `"2026-04-10 Teammeeting"`.
 
 ### Tasks
 
+Tasks are stored in Obsidian Tasks emoji format in `workspace/tasks.md`.
+
 Add a task:
 ```
-python <scripts_dir>/organizer.py add-task --title "<title>" [--due-date "YYYY-MM-DD"] [--priority high|medium|low] [--description "<desc>"] [--reminders '<JSON>']
+python <scripts_dir>/organizer.py add-task --title "<title>" [--due-date "YYYY-MM-DD"] [--priority highest|high|medium|low|lowest] [--description "<desc>"] [--reminders '<JSON>']
 ```
 
-The `--reminders` parameter accepts a JSON array of reminder rules. The system fires them automatically based on the due date.
+Priority maps to Obsidian Tasks emojis: 🔺 highest, ⏫ high, 🔼 medium, 🔽 low, ⏬ lowest.
 
-**Reminder format:**
+The `--reminders` parameter stores reminder rules in `scheduler_state.json` (outside the vault). Format:
 ```json
 [
   {"offset": "-3d", "message": "In 3 Tagen fällig: {title}"},
@@ -113,13 +115,10 @@ The `--reminders` parameter accepts a JSON array of reminder rules. The system f
 ]
 ```
 
-- `offset`: relative to due_date, e.g. `"-3d"`, `"-1d"`, `"-2h"`
-- `message`: notification text (`{title}` and `{due_date}` are replaced)
-
 **IMPORTANT:** When creating tasks with a due date, ALWAYS add appropriate reminders based on priority:
-- high: 3d, 1d, 2h before
+- highest/high: 3d, 1d, 2h before
 - medium: 1d, 2h before
-- low: 2h before
+- low/lowest: 2h before
 
 List tasks:
 ```
@@ -128,17 +127,17 @@ python <scripts_dir>/organizer.py list-tasks [--status pending|completed|all] [-
 
 Complete a task:
 ```
-python <scripts_dir>/organizer.py complete-task --task-id "<id>"
+python <scripts_dir>/organizer.py complete-task --task-id "<title or substring>"
 ```
 
 Delete a task:
 ```
-python <scripts_dir>/organizer.py delete-task --task-id "<id>"
+python <scripts_dir>/organizer.py delete-task --task-id "<title or substring>"
 ```
 
 ### Scheduled Jobs (Automation)
 
-For recurring automated tasks ("every day at 16:00 create a report"), first write the automation script, then register it as a job.
+Jobs are stored in `automations/jobs.json` (outside the vault) since they are scheduler-internal automation config.
 
 Add a job:
 ```
@@ -149,12 +148,8 @@ python <scripts_dir>/organizer.py add-job --name "<name>" --script "<script_path
 - `"16:00"` — daily at 16:00
 - `"interval:30m"` — every 30 minutes
 - `"interval:2h"` — every 2 hours
-
-**Workflow for creating a scheduled job:**
-1. Write the automation script to the user's automations directory
-2. The script receives params via `AUTOMATION_PARAMS` env var
-3. The script's stdout becomes the notification message
-4. Register the job with `add-job`
+- `"weekly:DOW:HH:MM"` — weekly on day-of-week (0=Mon)
+- `"monthly:DD:HH:MM"` — monthly on day
 
 List jobs:
 ```
