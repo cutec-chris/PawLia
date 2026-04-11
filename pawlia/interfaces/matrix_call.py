@@ -226,14 +226,14 @@ class CallSession:
     """Manages a single active VoIP call."""
 
     # Silence detection: RMS below this → silence
-    SILENCE_THRESHOLD = 0.02
+    SILENCE_THRESHOLD = 0.015
     # Seconds of silence that end a speech chunk
-    SILENCE_SECONDS = 1.5
+    SILENCE_SECONDS = 2.2
     # Minimum seconds of speech before we transcribe (filter short noise bursts)
-    MIN_SPEECH_SECONDS = 0.4
+    MIN_SPEECH_SECONDS = 0.7
     # Chunk-level guard: require enough active speech frames before STT
-    MIN_ACTIVE_SPEECH_RATIO = 0.12
-    MIN_CONSECUTIVE_SPEECH_FRAMES = 8
+    MIN_ACTIVE_SPEECH_RATIO = 0.10
+    MIN_CONSECUTIVE_SPEECH_FRAMES = 10
     # End calls when no speech chunk has been sent to STT for too long.
     CALL_INACTIVITY_SECONDS = 180
     WATCHDOG_POLL_SECONDS = 5.0

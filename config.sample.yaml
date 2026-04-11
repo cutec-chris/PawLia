@@ -70,11 +70,11 @@ interfaces:
   #   #   - stun:stun.l.google.com:19302
 
 # voip:
-#   silence_threshold: 0.02           # frame RMS above this counts as speech
-#   silence_seconds: 1.5              # trailing silence that ends a chunk
-#   min_speech_seconds: 0.4           # shorter chunks are discarded early
-#   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
-#   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
+#   silence_threshold: 0.015          # lower = quieter speech is less likely to be treated as silence
+#   silence_seconds: 2.2              # wait longer before cutting the user off
+#   min_speech_seconds: 0.7           # shorter chunks are discarded early
+#   min_active_speech_ratio: 0.10     # fraction of active frames required per chunk
+#   min_consecutive_speech_frames: 10 # sustained active 20ms frames required
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
 
 # Speech-to-text transcription (voice messages + VoIP calls).
