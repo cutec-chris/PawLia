@@ -33,6 +33,7 @@ Config layout (YAML)::
 import asyncio
 import logging
 import os
+import subprocess
 import tempfile
 from typing import Any, Dict, Optional
 
@@ -137,7 +138,9 @@ async def transcribe_via_model(
     import base64
     import httpx
 
-    audio_b64 = base64.b64encode(audio_bytes).decode()
+    send_bytes = _ensure_model_audio_format(audio_bytes, mime)
+
+    audio_b64 = base64.b64encode(send_bytes).decode()
     payload = {
         "model": model,
         "messages": [
@@ -150,7 +153,13 @@ async def transcribe_via_model(
         "stream": False,
     }
     url = f"{ollama_base.rstrip('/')}/api/chat"
-    logger.info("transcribe_via_model: sending audio (%d bytes) to %s model=%s", len(audio_bytes), url, model)
+    logger.info(
+        "transcribe_via_model: sending audio (%d bytes, mime=%s) to %s model=%s",
+        len(send_bytes),
+        mime,
+        url,
+        model,
+    )
 
     try:
         async with httpx.AsyncClient() as client:
@@ -161,8 +170,74 @@ async def transcribe_via_model(
             logger.info("transcribe_via_model: result: %s", text[:120] if text else "(empty)")
             return text or None
     except Exception as e:
-        logger.error("transcribe_via_model: error: %s", e, exc_info=True)
+        logger.error("transcribe_via_model: error: %r", e, exc_info=True)
         return None
+
+
+def _ensure_model_audio_format(audio_bytes: bytes, mime: str) -> bytes:
+    """Convert compressed audio to WAV for model-native transcription when possible.
+
+    Many native-audio model endpoints handle WAV reliably, while OGG/Opus/WebM
+    support can vary. If conversion fails, return original bytes.
+    """
+    if mime in {"audio/wav", "audio/x-wav"}:
+        return audio_bytes
+
+    in_ext = _mime_to_ext(mime)
+
+    tmp_in = tempfile.NamedTemporaryFile(suffix=f".{in_ext}", delete=False)
+    tmp_out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    tmp_in_path = tmp_in.name
+    tmp_out_path = tmp_out.name
+    try:
+        tmp_in.write(audio_bytes)
+        tmp_in.close()
+        tmp_out.close()
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            tmp_in_path,
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "wav",
+            tmp_out_path,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            logger.warning(
+                "transcribe_via_model: ffmpeg conversion failed for mime=%s (exit=%s): %s",
+                mime,
+                proc.returncode,
+                (proc.stderr or "").strip()[:240],
+            )
+            return audio_bytes
+
+        with open(tmp_out_path, "rb") as f:
+            wav_bytes = f.read()
+        if not wav_bytes:
+            logger.warning("transcribe_via_model: ffmpeg conversion produced empty WAV for mime=%s", mime)
+            return audio_bytes
+        return wav_bytes
+    except FileNotFoundError:
+        logger.warning("transcribe_via_model: ffmpeg not found, sending original mime=%s", mime)
+        return audio_bytes
+    except Exception as e:
+        logger.warning("transcribe_via_model: audio conversion error for mime=%s: %r", mime, e)
+        return audio_bytes
+    finally:
+        for path in (tmp_in_path, tmp_out_path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 async def transcribe_pcm_via_model(
