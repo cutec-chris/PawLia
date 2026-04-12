@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
-"""PawLia skill creator — init, validate, list, and package skills."""
+"""PawLia skill creator — init, validate, list, and package skills.
+
+Creates skills in the user's workspace via PAWLIA_SESSION_DIR.
+"""
 
 import argparse
 import json
 import os
 import re
-import shutil
 import sys
 import zipfile
 from pathlib import Path
 
-# Base skills directories
+# Project root (for finding bundled skills to validate/list against)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # thalia/
 BUNDLED_DIR = PROJECT_ROOT / "skills"
-USER_DIR = BUNDLED_DIR / "user"
+
+
+def _workspace_skills_dir() -> Path:
+    """Return the user's workspace skills directory from env."""
+    session_dir = os.environ.get("PAWLIA_SESSION_DIR")
+    if not session_dir:
+        return None
+    return Path(session_dir) / "workspace" / "skills"
+
 
 # ── Templates ──────────────────────────────────────────────────────────
 
@@ -108,7 +118,7 @@ echo '{{"success": true, "message": "Not implemented yet"}}'
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
-def _validate_name(name: str) -> str:
+def _validate_name(name: str):
     """Ensure skill name is lowercase-with-hyphens."""
     if not re.match(r'^[a-z][a-z0-9-]{0,62}$', name):
         return None
@@ -116,7 +126,6 @@ def _validate_name(name: str) -> str:
 
 
 def _title(name: str) -> str:
-    """Convert skill-name to Skill Name."""
     return name.replace("-", " ").title()
 
 
@@ -126,11 +135,15 @@ def _script_name(name: str, script_type: str) -> str:
 
 
 def _find_skill(name: str) -> Path:
-    """Find a skill by name in user/ then bundled dirs."""
-    for base in [USER_DIR, BUNDLED_DIR]:
-        candidate = base / name
+    """Find a skill: workspace first, then bundled."""
+    ws = _workspace_skills_dir()
+    if ws:
+        candidate = ws / name
         if (candidate / "SKILL.md").is_file():
             return candidate
+    candidate = BUNDLED_DIR / name
+    if (candidate / "SKILL.md").is_file():
+        return candidate
     return None
 
 
@@ -150,7 +163,7 @@ def _parse_frontmatter(skill_md: Path):
 # ── Commands ───────────────────────────────────────────────────────────
 
 def cmd_init(args):
-    """Initialize a new skill directory with template files."""
+    """Initialize a new skill in the user's workspace."""
     name = _validate_name(args.name)
     if not name:
         print(json.dumps({
@@ -159,11 +172,16 @@ def cmd_init(args):
         }))
         sys.exit(1)
 
-    # Determine target path
-    if args.path:
-        target = Path(args.path) / name
-    else:
-        target = USER_DIR / name
+    # Resolve target directory — always workspace
+    ws = _workspace_skills_dir()
+    if not ws:
+        print(json.dumps({
+            "success": False,
+            "error": "PAWLIA_SESSION_DIR not set — cannot determine workspace. This script must run as a PawLia skill.",
+        }))
+        sys.exit(1)
+
+    target = ws / name
 
     if target.exists():
         print(json.dumps({
@@ -181,7 +199,6 @@ def cmd_init(args):
         resources = [r.strip() for r in args.resources.split(",")]
 
     script_type = args.script or "python"
-    no_script = "scripts" not in resources
 
     # Create directory
     target.mkdir(parents=True, exist_ok=True)
@@ -217,9 +234,7 @@ def cmd_init(args):
             ref_file.write_text(f"# {title} Reference\n\nTODO: Add reference documentation.\n", encoding="utf-8")
             created.append(str(ref_file))
         elif resource == "assets":
-            readme = res_dir / ".gitkeep"
-            readme.write_text("", encoding="utf-8")
-            created.append(str(readme))
+            (res_dir / ".gitkeep").write_text("", encoding="utf-8")
 
     print(json.dumps({
         "success": True,
@@ -238,29 +253,24 @@ def cmd_validate(args):
     if not skill_path:
         print(json.dumps({
             "success": False,
-            "error": f"Skill '{name}' not found in user/ or bundled skills/",
+            "error": f"Skill '{name}' not found (checked workspace + bundled)",
         }))
         sys.exit(1)
 
     issues = []
     warnings = []
-    skill_md = skill_path / "SKILL.md"
 
-    # Parse frontmatter
-    meta, body, content = _parse_frontmatter(skill_md)
+    meta, body, content = _parse_frontmatter(skill_path / "SKILL.md")
 
     if meta is None:
         issues.append("Missing or malformed YAML frontmatter (must be --- / YAML / --- / markdown)")
         print(json.dumps({
-            "success": False,
-            "name": name,
-            "path": str(skill_path),
-            "issues": issues,
-            "warnings": warnings,
+            "success": False, "name": name, "path": str(skill_path),
+            "issues": issues, "warnings": warnings,
         }))
         sys.exit(1)
 
-    # Check required fields
+    # Required fields
     if not meta.get("name"):
         issues.append("Missing required field: 'name'")
     elif meta["name"] != name:
@@ -271,61 +281,53 @@ def cmd_validate(args):
     elif len(meta.get("description", "")) < 20:
         warnings.append("Description is very short (<20 chars) — may not trigger reliably")
 
-    # Check instructions body
+    # Instruction body
     if not body:
-        issues.append("No instruction body after frontmatter — sub-agent needs instructions")
+        issues.append("No instruction body — sub-agent needs instructions")
     elif len(body.split("\n")) < 5:
-        warnings.append("Instruction body is very short (<5 lines) — may not guide the sub-agent well")
+        warnings.append("Instruction body is very short (<5 lines)")
 
-    # Check for <scripts_dir> usage if scripts/ exists
+    # scripts/ checks
     scripts_dir = skill_path / "scripts"
-    has_scripts = scripts_dir.is_dir()
-    if has_scripts:
+    if scripts_dir.is_dir():
         if "<scripts_dir>" not in body:
-            issues.append("Has scripts/ directory but SKILL.md doesn't use <scripts_dir> placeholder")
-        script_files = [f for f in scripts_dir.iterdir() if f.is_file()]
-        if not script_files:
-            warnings.append("scripts/ directory is empty — add at least one script")
+            issues.append("Has scripts/ but SKILL.md doesn't use <scripts_dir> placeholder")
+        if not [f for f in scripts_dir.iterdir() if f.is_file()]:
+            warnings.append("scripts/ directory is empty")
 
-    # Check for unused resource directories
+    # Unused resource dirs
     for res_type in ["references", "assets"]:
         res_dir = skill_path / res_type
         if res_dir.is_dir():
             files = [f for f in res_dir.iterdir() if f.is_file() and f.name != ".gitkeep"]
             if files and res_type not in body.lower():
-                warnings.append(f"Has {res_type}/ directory but SKILL.md doesn't reference it")
+                warnings.append(f"Has {res_type}/ but SKILL.md doesn't reference it")
 
-    # Check line count
+    # Line count
     line_count = len(body.split("\n"))
     if line_count > 500:
-        warnings.append(f"SKILL.md body is {line_count} lines (recommended max: 500) — consider splitting into references/")
+        warnings.append(f"SKILL.md body is {line_count} lines (max recommended: 500)")
 
-    # Check for extraneous files
+    # Extraneous files
     allowed = {"SKILL.md", "scripts", "references", "assets"}
     for item in skill_path.iterdir():
         if item.name not in allowed and not item.name.startswith("."):
-            warnings.append(f"Extraneous file/dir: {item.name} — skills should only contain SKILL.md, scripts/, references/, assets/")
+            warnings.append(f"Extraneous file/dir: {item.name}")
 
     if issues:
         print(json.dumps({
-            "success": False,
-            "name": name,
-            "path": str(skill_path),
-            "issues": issues,
-            "warnings": warnings,
+            "success": False, "name": name, "path": str(skill_path),
+            "issues": issues, "warnings": warnings,
         }))
     else:
         print(json.dumps({
-            "success": True,
-            "name": name,
-            "path": str(skill_path),
-            "issues": [],
-            "warnings": warnings,
+            "success": True, "name": name, "path": str(skill_path),
+            "issues": [], "warnings": warnings,
         }))
 
 
 def cmd_list(args):
-    """List all discoverable skills."""
+    """List all discoverable skills (workspace + bundled)."""
     skills = []
 
     def scan(directory: Path, source: str):
@@ -352,24 +354,24 @@ def cmd_list(args):
                 })
             except Exception:
                 skills.append({
-                    "name": child.name,
-                    "description": "(parse error)",
-                    "version": "?",
-                    "source": source,
-                    "path": str(child),
-                    "has_scripts": False,
-                    "has_references": False,
-                    "has_assets": False,
+                    "name": child.name, "description": "(parse error)",
+                    "version": "?", "source": source, "path": str(child),
+                    "has_scripts": False, "has_references": False, "has_assets": False,
                 })
 
+    # Workspace skills first
+    ws = _workspace_skills_dir()
+    if ws:
+        scan(ws, "workspace")
+
+    # Bundled skills
     scan(BUNDLED_DIR, "bundled")
-    scan(USER_DIR, "user")
 
     print(json.dumps({"success": True, "skills": skills}, ensure_ascii=False))
 
 
 def cmd_package(args):
-    """Package a skill into a distributable .skill zip file."""
+    """Package a skill into a .skill zip file."""
     name = args.name
     skill_path = _find_skill(name)
 
@@ -380,23 +382,23 @@ def cmd_package(args):
         }))
         sys.exit(1)
 
-    # Validate first
-    meta, body, content = _parse_frontmatter(skill_path / "SKILL.md")
+    # Quick validate
+    meta, body, _ = _parse_frontmatter(skill_path / "SKILL.md")
     if not meta or not meta.get("name") or not meta.get("description"):
         print(json.dumps({
             "success": False,
-            "error": f"Skill '{name}' failed validation — fix SKILL.md before packaging",
+            "error": f"Skill '{name}' failed validation — fix SKILL.md first",
         }))
         sys.exit(1)
 
-    # Check for symlinks (security)
+    # No symlinks
     for root, dirs, files in os.walk(skill_path):
         for f in files:
             fpath = Path(root) / f
             if fpath.is_symlink():
                 print(json.dumps({
                     "success": False,
-                    "error": f"Symlink found at {fpath} — remove symlinks before packaging",
+                    "error": f"Symlink at {fpath} — remove before packaging",
                 }))
                 sys.exit(1)
 
@@ -407,7 +409,6 @@ def cmd_package(args):
 
     with zipfile.ZipFile(output_file, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, dirs, files in os.walk(skill_path):
-            # Skip hidden dirs
             dirs[:] = [d for d in dirs if not d.startswith(".")]
             for f in files:
                 if f.startswith("."):
@@ -431,25 +432,24 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     # init
-    p_init = sub.add_parser("init", help="Initialize a new skill directory")
+    p_init = sub.add_parser("init", help="Create a new skill in the user's workspace")
     p_init.add_argument("--name", required=True, help="Skill name (lowercase, hyphens)")
-    p_init.add_argument("--description", help="One-line description (default: auto-generated)")
-    p_init.add_argument("--path", help="Target parent directory (default: skills/user/)")
-    p_init.add_argument("--resources", help="Comma-separated: scripts,references,assets (default: scripts)")
+    p_init.add_argument("--description", help="One-line description")
+    p_init.add_argument("--resources", help="Comma-separated: scripts,references,assets")
     p_init.add_argument("--script", choices=["python", "node", "bash"], default="python")
-    p_init.add_argument("--no-script", action="store_true", help="Skip script template even if scripts/ is included")
+    p_init.add_argument("--no-script", action="store_true", help="Skip script template")
 
     # validate
     p_validate = sub.add_parser("validate", help="Validate a skill's SKILL.md and structure")
     p_validate.add_argument("--name", required=True, help="Skill name to validate")
 
     # list
-    sub.add_parser("list", help="List all loaded skills")
+    sub.add_parser("list", help="List all skills (workspace + bundled)")
 
     # package
     p_package = sub.add_parser("package", help="Package skill into .skill zip")
     p_package.add_argument("--name", required=True, help="Skill name to package")
-    p_package.add_argument("--output", help="Output directory (default: skill's parent)")
+    p_package.add_argument("--output", help="Output directory")
 
     args = parser.parse_args()
 

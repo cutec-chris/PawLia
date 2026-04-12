@@ -68,13 +68,17 @@ Keep SKILL.md under 500 lines. Split detailed content into references/ when appr
 
 ### Step 3: Initialize
 
-Run the init script to scaffold the skill:
+Run the init script to scaffold the skill in the user's workspace:
 
 ```
-python <scripts_dir>/creator.py init --name "<skill-name>" --path "<target-path>" [--resources scripts,references,assets]
+python <scripts_dir>/creator.py init --name "<skill-name>" --description "<one-line desc>" [--resources scripts,references,assets]
 ```
 
-This creates the directory, SKILL.md template, and resource directories.
+IMPORTANT: Skills are created in the user's workspace
+(`$PAWLIA_SESSION_DIR/workspace/skills/<name>/`).
+The `PAWLIA_SESSION_DIR` env var is set automatically by PawLia.
+
+Requires `skill-install.allow_workspace: true` in config.yaml.
 
 ### Step 4: Implement
 
@@ -151,11 +155,20 @@ For detailed skill-writing patterns and examples, read `references/patterns.md`:
 
 ---
 
+## IMPORTANT: Workspace-Only
+
+New skills are created in the user's workspace via `PAWLIA_SESSION_DIR`:
+`session/<user_id>/workspace/skills/<skill-name>/`.
+
+Requires `skill-install.allow_workspace: true` in config.yaml.
+
+---
+
 ## Commands Quick Reference
 
 | Command | What it does |
 |---------|-------------|
-| `init` | Scaffold a new skill directory with template files |
+| `init` | Create a new skill in the user's workspace |
 | `validate` | Check SKILL.md for common errors |
-| `list` | Show all loaded skills and their status |
+| `list` | Show all skills (workspace + bundled) |
 | `package` | Create a `.skill` zip for distribution |
