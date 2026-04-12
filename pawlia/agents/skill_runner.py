@@ -57,6 +57,9 @@ class SkillRunnerAgent(BaseAgent):
         self.context = context or {}
         self.context["cwd"] = skill.base_dir
         self.command_fallback = command_fallback
+
+        # Load matching credentials into context
+        self._load_credentials()
         self.on_step = None  # Optional[Callable[[str], Awaitable[None]]]
         self._directives: List[str] = []  # collected __directive__ lines from tool output
 
@@ -66,6 +69,30 @@ class SkillRunnerAgent(BaseAgent):
             self.bound_llm = llm.bind_tools(tool_specs, tool_choice="auto")
         else:
             self.bound_llm = llm
+
+    def _load_credentials(self) -> None:
+        """Load matching credentials into context as CRED_* env vars."""
+        if not self.skill.requires_credentials:
+            return
+        session_dir = self.context.get("session_dir", "")
+        user_id = self.context.get("user_id", "")
+        if not session_dir or not user_id:
+            return
+        cred_path = os.path.join(session_dir, user_id, ".credentials.json")
+        if not os.path.isfile(cred_path):
+            return
+        try:
+            with open(cred_path, encoding="utf-8") as f:
+                all_creds = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+        cred_env = {}
+        for key in self.skill.requires_credentials:
+            if key in all_creds:
+                env_key = "CRED_" + re.sub(r"[^A-Za-z0-9]", "_", key).upper()
+                cred_env[env_key] = str(all_creds[key])
+        if cred_env:
+            self.context.setdefault("env_extra", {}).update(cred_env)
 
     # ------------------------------------------------------------------
     # Public entry point

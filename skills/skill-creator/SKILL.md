@@ -2,11 +2,13 @@
 name: skill-creator
 description: >
   Create new PawLia skills from scratch, improve or audit existing ones.
+  Also manages centralized credentials for skills — store, retrieve, check
+  API keys and tokens that other skills need at runtime.
   Use when the user wants to: create a new skill, scaffold a skill directory,
-  improve or review an existing skill, validate a SKILL.md against the spec,
-  package a skill for distribution, or tidy up a skill directory.
-  Triggers on phrases like "create a skill", "build a skill", "new skill",
-  "improve this skill", "review the skill", "fix the skill", "validate skill".
+  manage skill credentials, improve or review an existing skill, validate
+  a SKILL.md against the spec, package a skill for distribution.
+  Triggers on phrases like "create a skill", "new skill", "store api key",
+  "add credentials", "improve this skill", "validate skill".
 license: MIT
 metadata:
   author: Christian Ulrich
@@ -15,7 +17,7 @@ metadata:
 
 # Skill Creator
 
-Create, edit, improve, or audit PawLia AgentSkills.
+Create, edit, improve, or audit PawLia AgentSkills. Manage credentials.
 
 ## Core Principles
 
@@ -23,8 +25,7 @@ Create, edit, improve, or audit PawLia AgentSkills.
 
 The context window is a shared resource. Skills share it with the system prompt,
 conversation history, and other skills' metadata. The default assumption is that
-the model is already smart — only add what it doesn't already know. Challenge
-each piece: "Does this justify its token cost?"
+the model is already smart — only add what it doesn't already know.
 
 ### Set Appropriate Degrees of Freedom
 
@@ -42,6 +43,42 @@ Skills use three loading levels:
 
 ---
 
+## Credential Management
+
+Skills that need API keys or tokens declare them via `requires_credentials` in
+their SKILL.md frontmatter. Credentials live at `session/{user_id}/.credentials.json`
+— outside the workspace. The SkillRunner injects matching credentials as env vars
+(`CRED_<KEY_NAME>`) when running a skill. Skills never read the credential file.
+
+### When a skill needs credentials
+
+The main model (ChatAgent) should:
+
+1. Ask the user for the required credential (e.g. "I need your OpenMeteo API key")
+2. Store it:
+   ```
+   python <scripts_dir>/credentials.py set --key "<key_name>" --value "<value>"
+   ```
+3. Invoke the target skill — credentials are injected automatically
+
+### Check if credentials exist
+
+```
+python <scripts_dir>/credentials.py check --keys "api_key,other_key"
+```
+
+Returns `{"success": true, "available": [...], "missing": [...]}`.
+
+### Other commands
+
+```
+python <scripts_dir>/credentials.py list                              # list key names
+python <scripts_dir>/credentials.py get --key "<key_name>"           # retrieve value
+python <scripts_dir>/credentials.py delete --key "<key_name>"        # remove
+```
+
+---
+
 ## Skill Creation Process
 
 ### Step 1: Understand Intent
@@ -50,7 +87,7 @@ Gather concrete usage examples from the user. Ask:
 1. What should this skill enable the agent to do?
 2. When should it trigger? (what user phrases/contexts)
 3. What's the expected input/output format?
-4. Does it need external APIs, tools, or config?
+4. Does it need credentials (API keys, tokens)?
 
 Avoid overwhelming the user — start with the most important questions, follow up as needed.
 
@@ -60,33 +97,33 @@ Analyze examples to determine what the skill needs:
 
 | Resource | When to include | Example |
 |----------|----------------|---------|
-| `scripts/` | Same code rewritten repeatedly, or deterministic reliability needed | `scripts/weather.py` for API calls |
-| `references/` | Documentation the agent should reference while working | `references/api_docs.md` for API schemas |
-| `assets/` | Files used in output (templates, boilerplate) | `assets/template.html` for HTML generation |
+| `scripts/` | Repeated logic or deterministic reliability | `scripts/weather.py` for API calls |
+| `references/` | Docs the agent should reference | `references/api_docs.md` for schemas |
+| `assets/` | Files used in output (templates, boilerplate) | `assets/template.html` |
+| `requires_credentials` | External APIs, services | `["openmeteo_api_key"]` |
 
 Keep SKILL.md under 500 lines. Split detailed content into references/ when approaching the limit.
 
 ### Step 3: Initialize
 
-Run the init script to scaffold the skill in the user's workspace:
-
 ```
-python <scripts_dir>/creator.py init --name "<skill-name>" --description "<one-line desc>" [--resources scripts,references,assets]
+python <scripts_dir>/creator.py init --name "<skill-name>" --description "<desc>" [--resources scripts,references,assets]
 ```
 
-IMPORTANT: Skills are created in the user's workspace
-(`$PAWLIA_SESSION_DIR/workspace/skills/<name>/`).
-The `PAWLIA_SESSION_DIR` env var is set automatically by PawLia.
-
-Requires `skill-install.allow_workspace: true` in config.yaml.
+Skills are created in the user's workspace (`$PAWLIA_SESSION_DIR/$PAWLIA_USER_ID/workspace/skills/<name>/`).
 
 ### Step 4: Implement
 
 #### Write SKILL.md
 
-**Frontmatter** (required fields):
+**Frontmatter fields:**
 - `name`: Skill identifier, matches directory name. Lowercase + hyphens.
-- `description`: Primary triggering mechanism. Include what the skill does AND when to use it. All "when to use" info goes here, not in the body. Be slightly "pushy" — models tend to undertrigger skills.
+- `description`: Primary triggering mechanism. Include what the skill does AND when to use it.
+- `requires_credentials`: List of credential key names the skill needs. Example:
+  ```yaml
+  requires_credentials:
+    - openmeteo_api_key
+  ```
 
 **Body** instructions:
 - Use imperative form ("Run the script", "Parse the output")
@@ -97,12 +134,18 @@ Requires `skill-install.allow_workspace: true` in config.yaml.
 
 #### Write Scripts
 
-Scripts follow these conventions:
+Scripts access credentials via env vars — PawLia injects them as `CRED_<KEY_NAME>`
+(uppercased, non-alphanumeric replaced with `_`):
+
+```python
+import os
+api_key = os.environ.get("CRED_OPENMETEO_API_KEY")
+```
+
+Other conventions:
 - Accept arguments via `argparse`
-- Return JSON on stdout: `{"success": true, ...}` or `{"success": false, "error": "..."}`
-- Use `<scripts_dir>` placeholder in SKILL.md (PawLia substitutes at runtime)
-- Keep self-contained (stdlib + requests preferred)
-- Test scripts by actually running them
+- Return JSON: `{"success": true, ...}` or `{"success": false, "error": "..."}`
+- Use `<scripts_dir>` placeholder (substituted at runtime)
 
 ### Step 5: Validate
 
@@ -110,19 +153,15 @@ Scripts follow these conventions:
 python <scripts_dir>/creator.py validate --name "<skill-name>"
 ```
 
-Checks: frontmatter fields, name match, instruction body, `<scripts_dir>` usage, script existence.
-
 ### Step 6: Package (optional)
 
 ```
 python <scripts_dir>/creator.py package --name "<skill-name>"
 ```
 
-Creates a `.skill` zip file for distribution.
-
 ### Step 7: Iterate
 
-Use the skill on real tasks, notice struggles, update. Repeat until satisfied.
+Use the skill on real tasks, notice struggles, update. Repeat.
 
 ---
 
@@ -131,44 +170,23 @@ Use the skill on real tasks, notice struggles, update. Repeat until satisfied.
 ```
 skill-name/
 ├── SKILL.md            # required: frontmatter + instructions
-├── scripts/            # optional: executable code (Python, Bash, etc.)
+├── scripts/            # optional: executable code
 ├── references/         # optional: docs loaded into context as needed
-└── assets/             # optional: files used in output (templates, etc.)
+└── assets/             # optional: files used in output
 ```
-
-### What NOT to include
-
-- No README.md, CHANGELOG.md, or other auxiliary docs
-- No test files (testing happens externally)
-- Only files the agent needs to do its job
-
----
-
-## Reference Files
-
-For detailed skill-writing patterns and examples, read `references/patterns.md`:
-
-- Multi-step workflow patterns
-- Output format templates
-- Error handling patterns
-- Command reference table patterns
-
----
-
-## IMPORTANT: Workspace-Only
-
-New skills are created in the user's workspace via `PAWLIA_SESSION_DIR`:
-`session/<user_id>/workspace/skills/<skill-name>/`.
-
-Requires `skill-install.allow_workspace: true` in config.yaml.
 
 ---
 
 ## Commands Quick Reference
 
-| Command | What it does |
-|---------|-------------|
-| `init` | Create a new skill in the user's workspace |
-| `validate` | Check SKILL.md for common errors |
-| `list` | Show all skills (workspace + bundled) |
-| `package` | Create a `.skill` zip for distribution |
+| Command | Script | What it does |
+|---------|--------|-------------|
+| `init` | creator.py | Create a new skill in the user's workspace |
+| `validate` | creator.py | Check SKILL.md for common errors |
+| `list` | creator.py | Show all skills (workspace + bundled) |
+| `package` | creator.py | Create a `.skill` zip for distribution |
+| `set` | credentials.py | Store a credential |
+| `get` | credentials.py | Retrieve a credential |
+| `list` | credentials.py | List credential key names |
+| `delete` | credentials.py | Remove a credential |
+| `check` | credentials.py | Check if keys exist |

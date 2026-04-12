@@ -20,9 +20,10 @@ BUNDLED_DIR = PROJECT_ROOT / "skills"
 def _workspace_skills_dir() -> Path:
     """Return the user's workspace skills directory from env."""
     session_dir = os.environ.get("PAWLIA_SESSION_DIR")
-    if not session_dir:
+    user_id = os.environ.get("PAWLIA_USER_ID")
+    if not session_dir or not user_id:
         return None
-    return Path(session_dir) / "workspace" / "skills"
+    return Path(session_dir) / user_id / "workspace" / "skills"
 
 
 # ── Templates ──────────────────────────────────────────────────────────
@@ -36,6 +37,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "1.0"
+{credentials_field}
 ---
 
 # {title}
@@ -177,7 +179,7 @@ def cmd_init(args):
     if not ws:
         print(json.dumps({
             "success": False,
-            "error": "PAWLIA_SESSION_DIR not set — cannot determine workspace. This script must run as a PawLia skill.",
+            "error": "PAWLIA_SESSION_DIR / PAWLIA_USER_ID not set — this script must run as a PawLia skill.",
         }))
         sys.exit(1)
 
@@ -192,6 +194,15 @@ def cmd_init(args):
 
     description = args.description or f"The {name} skill."
     title = _title(name)
+
+    # Build credentials field for frontmatter
+    cred_keys = []
+    if args.credentials:
+        cred_keys = [c.strip() for c in args.credentials.split(",")]
+    if cred_keys:
+        cred_yaml = "requires_credentials:\n" + "\n".join(f"  - {k}" for k in cred_keys)
+    else:
+        cred_yaml = ""
 
     # Parse resources
     resources = []
@@ -211,6 +222,7 @@ def cmd_init(args):
         description=description,
         title=title,
         script_name=sname,
+        credentials_field=cred_yaml,
     )
     (target / "SKILL.md").write_text(skill_md, encoding="utf-8")
     created = [str(target / "SKILL.md")]
@@ -436,6 +448,7 @@ def main():
     p_init.add_argument("--name", required=True, help="Skill name (lowercase, hyphens)")
     p_init.add_argument("--description", help="One-line description")
     p_init.add_argument("--resources", help="Comma-separated: scripts,references,assets")
+    p_init.add_argument("--credentials", help="Comma-separated credential key names (e.g. api_key,token)")
     p_init.add_argument("--script", choices=["python", "node", "bash"], default="python")
     p_init.add_argument("--no-script", action="store_true", help="Skip script template")
 

@@ -27,6 +27,7 @@ class AgentSkill:
         self.name: str = metadata.get("name", "")
         self.description: str = metadata.get("description", "")
         self.scripts_dir = os.path.join(skill_path, "scripts")
+        self.requires_credentials: list = metadata.get("requires_credentials", [])
         self.instructions = self._load_instructions()
 
     def _load_instructions(self) -> str:
