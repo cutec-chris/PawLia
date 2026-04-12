@@ -17,18 +17,22 @@ When the user sends a message, the dispatcher (ChatAgent) decides whether to cal
 | `browser` | Browse and extract content from web pages | — |
 | `files` | Read, write, and manage files in the workspace | — |
 | `organizer` | Calendar events (Full Calendar), tasks (Obsidian Tasks), reminders, scheduled jobs — Obsidian vault native | — |
+| `skill-creator` | Create, scaffold, validate, and package new skills; manage centralized credentials | — |
 
 ## Custom skills
 
-Place your skill directory in `skills/user/` — it is gitignored and loaded automatically alongside bundled skills.
+With `skill-install.allow_workspace: true` in config.yaml, skills placed in a user's workspace are loaded automatically:
 
 ```
-skills/
-└── user/
-    └── my-skill/
-        ├── SKILL.md         # required
-        └── scripts/         # optional helper scripts
+session/<user>/workspace/skills/
+└── my-skill/
+    ├── SKILL.md         # required
+    ├── scripts/         # optional helper scripts
+    ├── references/      # optional docs loaded into context as needed
+    └── assets/          # optional files used in output (templates, etc.)
 ```
+
+Use the `skill-creator` skill to scaffold new skills — it handles directory structure, templates, and validation.
 
 ## SKILL.md format
 
@@ -42,8 +46,10 @@ license: MIT
 metadata:
   author: Your Name
   version: "1.0"
-  requires_config:       # optional: config keys that must be present
-    - url
+requires_config:           # optional: config keys that must be present
+  - url
+requires_credentials:      # optional: credential keys the skill needs
+  - api_key
 ---
 
 # My Skill
@@ -61,8 +67,9 @@ Describe step by step what the sub-agent should do...
 | `description` | yes | Used by the dispatcher to decide when to invoke the skill |
 | `license` | no | License identifier |
 | `metadata.requires_config` | no | List of `skill-config.<name>.*` keys that must exist |
+| `requires_credentials` | no | List of credential key names (see [Credentials](#credentials)) |
 
-## Per-skill model assignment
+### Per-skill model assignment
 
 Assign a specific model to a skill in `config.yaml`:
 
@@ -87,3 +94,33 @@ skill-config:
 ```
 
 The values are passed to the skill's scripts via environment variables or arguments — see each skill's `SKILL.md` for specifics.
+
+## Credentials
+
+Skills that need API keys or tokens declare them via `requires_credentials` in their SKILL.md frontmatter. Credentials are stored centrally per user at `session/<user>/.credentials.json` — outside the workspace so skills can't read the file directly.
+
+When the SkillRunner starts, it injects matching credentials as environment variables (`CRED_<KEY_NAME>`) into the skill's execution context. Skill scripts read them via `os.environ`:
+
+```python
+import os
+api_key = os.environ.get("CRED_MY_API_KEY")
+```
+
+### Credential management
+
+The `skill-creator` skill provides credential management commands. The main model asks the user for credentials when a skill needs them, then stores them:
+
+```
+python <scripts_dir>/credentials.py set --key "my_api_key" --value "sk-..."
+python <scripts_dir>/credentials.py list
+python <scripts_dir>/credentials.py check --keys "my_api_key,other_key"
+```
+
+### Flow
+
+1. Skill declares `requires_credentials: ["my_api_key"]` in SKILL.md
+2. Main model sees the credential requirement in the skill's description
+3. Main model asks the user: "I need your API key for this skill"
+4. Main model stores it via `credentials.py set`
+5. SkillRunner loads matching credentials and injects as `CRED_*` env vars
+6. Skill script reads the env var
