@@ -8,11 +8,15 @@ workflows:
   max_steps: 10
   building_blocks:
   - id: write_script
-    command: files write {script_path} '{script_content}'
+    command: python <scripts_dir>/../files/scripts/files.py write --filename "{script_path}"
     description: Write Python automation script to user's workspace
     status_desc: Schreibe Automatisierungsskript {script_name}
+    env_params:
+    - script_content
     verify:
       exit_code: 0
+      output_not_contains:
+      - '"success": false'
     on_error: script_write_failed
   - id: register_job
     command: python <scripts_dir>/../organizer/scripts/organizer.py add-job --name
@@ -24,8 +28,8 @@ workflows:
       output_contains:
       - Job added successfully
   - id: script_write_failed
-    command: 'notify ''Fehler beim Schreiben des Skripts: {error_message}'''
-    description: Notify user about script writing failure
+    command: echo '{"success": false, "error": "Script write failed"}'
+    description: Report script writing failure
     status_desc: 'Fehler: {error_message}'
 - id: manage_jobs
   trigger: User wants to list, delete, or toggle existing automation jobs
