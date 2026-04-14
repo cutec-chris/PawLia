@@ -811,7 +811,8 @@ class CallSession:
             except Exception as e:
                 logger.debug("call %s: could not save debug audio: %s", self.call_id[:8], e)
 
-        # Resolve the active model for this call context
+        # Use native-audio model for transcription if available (e.g. Gemma4),
+        # otherwise fall back to Whisper-based STT
         active_model = self._agent._active_override_model(self.thread_id)
         audio_info = self._app.llm.audio_model_info(active_model or "chat")
         if audio_info:
