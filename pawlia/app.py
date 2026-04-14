@@ -53,21 +53,8 @@ class App:
             skills_dir, config, require_workflow=require_workflow,
         )
 
-        # Also discover skills placed in any session workspace (session/<user>/workspace/skills/)
-        # Requires skill-install.allow_workspace: true in config (default: false)
-        # Deps + workflows are installed/compiled at upload time, not here.
-        allow_workspace = config.get("skill-install", {}).get("allow_workspace", False)
-        if allow_workspace and os.path.isdir(self.session_dir):
-            for user_entry in os.listdir(self.session_dir):
-                workspace_dir = os.path.join(self.session_dir, user_entry, "workspace")
-                workspace_skills_dir = os.path.join(workspace_dir, "skills")
-                if os.path.isdir(workspace_skills_dir):
-                    workspace_skills = SkillLoader.discover(
-                        workspace_skills_dir, config,
-                        workspace_dir=workspace_dir,
-                        require_workflow=require_workflow,
-                    )
-                    self.skills.update(workspace_skills)
+        # Also discover skills placed in any session workspace
+        self._refresh_workspace_skills()
 
         if self.skills:
             self.logger.info("Loaded skills: %s", ", ".join(self.skills.keys()))
@@ -78,6 +65,30 @@ class App:
         self.scheduler = Scheduler(self.session_dir, config=self.config)
         self.scheduler.set_app(self)
         self.scheduler.set_llm_formatter(self._format_notification)
+
+    def _refresh_workspace_skills(self) -> None:
+        """Re-discover workspace skills and merge into self.skills.
+
+        Called at startup and again every time make_agent() creates a new
+        ChatAgent so that skills created during runtime become available
+        without restarting the App.
+        """
+        allow_workspace = self.config.get("skill-install", {}).get("allow_workspace", False)
+        if not allow_workspace or not os.path.isdir(self.session_dir):
+            return
+
+        require_workflow = self.config.get("workflow", {}).get("require_compiled", False)
+
+        for user_entry in os.listdir(self.session_dir):
+            workspace_dir = os.path.join(self.session_dir, user_entry, "workspace")
+            workspace_skills_dir = os.path.join(workspace_dir, "skills")
+            if os.path.isdir(workspace_skills_dir):
+                workspace_skills = SkillLoader.discover(
+                    workspace_skills_dir, self.config,
+                    workspace_dir=workspace_dir,
+                    require_workflow=require_workflow,
+                )
+                self.skills.update(workspace_skills)
 
     async def _format_notification(self, user_id: str, raw_message: str) -> str:
         """Pass a raw notification through the LLM for personalized delivery.
@@ -108,6 +119,9 @@ class App:
         Each agent gets its own SkillRunner factory bound to the user context.
         Extra kwargs are forwarded to ChatAgent (e.g. on_interim).
         """
+        # Pick up workspace skills created since startup (e.g. by skill-creator)
+        self._refresh_workspace_skills()
+
         session = self.memory.load_session(user_id)
 
         # Resolve LLMs – honour per-session model override
@@ -150,6 +164,8 @@ class App:
         agent._fallback_resolver = self.llm.get
         # Resolve config keys (e.g. "fast") to actual model names
         agent._model_name_resolver = self.llm.resolve_model_name
+        # Let the ChatAgent re-discover workspace skills after each skill call
+        agent._skills_refresher = self._refresh_workspace_skills
         return agent
 
 

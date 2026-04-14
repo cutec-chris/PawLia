@@ -130,7 +130,12 @@ class ChatAgent(BaseAgent):
         # Used to fall back when an override model is unreachable.
         self._fallback_resolver: Optional[Callable[[str], Any]] = None
         # Resolves config keys (e.g. "fast") to actual model names (e.g. "qwen3.5:4b").
-        self._model_name_resolver: Optional[Callable[[str], str]] = None
+        self._model_name_resolver: Optional[Callable[[str, str]]] = None
+
+        # Callback to re-discover workspace skills (set by App.make_agent).
+        # Called after each skill returns so that skills created at runtime
+        # (e.g. by skill-creator) become available immediately.
+        self._skills_refresher: Optional[Callable[[], None]] = None
 
     def build_system_prompt(
         self,
@@ -148,6 +153,37 @@ class ChatAgent(BaseAgent):
                 mode=mode,
             )
         return DEFAULT_SYSTEM_PROMPT
+
+    def _refresh_and_rebind_skills(self) -> bool:
+        """Re-discover workspace skills and rebind LLM tools if new skills appeared.
+
+        Called after each skill returns.  Returns True if tools were rebound
+        (caller must update its local ``active_llm`` reference).
+        """
+        if not self._skills_refresher:
+            return False
+
+        prev_count = len(self._skill_specs)
+        self._skills_refresher()
+
+        if len(self.skills) == prev_count:
+            return False
+
+        # New skills appeared — rebuild specs and rebind tools
+        self._skill_specs = [s.as_openai_spec() for s in self.skills.values()]
+        if self._skill_specs:
+            base_llm = self.llm  # underlying ChatOpenAI without tools
+            self.bound_llm = base_llm.bind_tools(self._skill_specs, tool_choice="auto")
+            self.vision_bound_llm = (
+                (self.vision_llm or base_llm).bind_tools(self._skill_specs, tool_choice="auto")
+                if hasattr(self, "vision_llm") else self.bound_llm
+            )
+        self.logger.info(
+            "Skills rebound (%d → %d), new: %s",
+            prev_count, len(self.skills),
+            ", ".join(set(self.skills) - {s["function"]["name"] for s in self._skill_specs[:prev_count]}),
+        )
+        return True
 
     def _resolve_skill_name(self, name: str) -> str:
         """Resolve minor skill-name variations from model tool calls."""
@@ -395,6 +431,11 @@ class ChatAgent(BaseAgent):
                     tool_call_id=tool_call.get("id", ""),
                 ))
 
+            # Refresh workspace skills (e.g. skill-creator may have added one)
+            if self._refresh_and_rebind_skills():
+                bound_llm = self.bound_llm
+                active_llm = bound_llm
+
             final, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
         else:
             self.logger.warning("Max chat tool turns reached, forcing final response")
@@ -566,6 +607,10 @@ class ChatAgent(BaseAgent):
                 tool_call_id=tool_call.get("id", ""),
             ))
 
+        # Refresh workspace skills (e.g. skill-creator may have added one)
+        if self._refresh_and_rebind_skills():
+            bound_llm = self.bound_llm
+
         # ---- Continue tool loop until the task is actually complete ----
         raw_text2 = ""
         nudge_count = 0
@@ -623,6 +668,10 @@ class ChatAgent(BaseAgent):
                     content=skill_result,
                     tool_call_id=tool_call.get("id", ""),
                 ))
+
+            # Refresh workspace skills after each skill return
+            if self._refresh_and_rebind_skills():
+                bound_llm = self.bound_llm
         else:
             accumulated2, raw_text2 = await self._stream_with_sentences(
                 messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)], unbound_llm, on_sentence,
