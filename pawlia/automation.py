@@ -365,6 +365,17 @@ class JobRunner:
         def _not_run_recently() -> bool:
             return last_run is None or (now - last_run).total_seconds() > 120
 
+        def _in_window(hour: int, minute: int) -> bool:
+            """Check if target HH:MM falls within the current check window.
+
+            Instead of requiring an exact minute match (which drifts and
+            misses targets), we check whether the target time is between
+            the last run (or 2 min ago) and now.
+            """
+            target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            window_start = last_run if last_run else (now - timedelta(minutes=2))
+            return window_start < target_today <= now
+
         if schedule.startswith("interval:"):
             interval_str = schedule[len("interval:"):]
             try:
@@ -385,7 +396,7 @@ class JobRunner:
                 return False
             if now.weekday() != dow:
                 return False
-            return now.hour == hour and now.minute == minute and _not_run_recently()
+            return _in_window(hour, minute) and _not_run_recently()
 
         if schedule.startswith("monthly:"):
             parts = schedule.split(":")
@@ -397,7 +408,7 @@ class JobRunner:
                 return False
             if now.day != day:
                 return False
-            return now.hour == hour and now.minute == minute and _not_run_recently()
+            return _in_window(hour, minute) and _not_run_recently()
 
         try:
             parts = schedule.split(":")
@@ -406,7 +417,7 @@ class JobRunner:
         except (ValueError, IndexError):
             return False
 
-        return now.hour == target_hour and now.minute == target_minute and _not_run_recently()
+        return _in_window(target_hour, target_minute) and _not_run_recently()
 
 
 # ---------------------------------------------------------------------------
