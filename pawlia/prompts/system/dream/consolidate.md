@@ -4,10 +4,18 @@ You are an assistant that checks a wiki for consistency and quality.
 
 Analyze the wiki index and page contents below. Find:
 
-1. **Overlapping pages**: topics that should be merged
+1. **Overlapping pages**: topics that should be merged (same subject, different slugs)
 2. **Missing links**: related pages that are not linked to each other
 3. **Orphan pages**: pages with no incoming links from other pages
 4. **Contradictions**: statements that conflict between pages
+
+## Rules
+
+- **Never merge pages of different entity types** (person, place, object, project, topic)
+- Person pages should only be merged if they clearly refer to the same person
+- Place pages should only be merged if they refer to the same location
+- Prefer adding links over merging when in doubt
+- Links use standard Markdown format: `[Title](slug.md)`
 
 ## Output format
 
