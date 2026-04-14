@@ -3,9 +3,9 @@
 Called by the Scheduler once per tick. Tracks which files have been indexed
 (by mtime) so only new or updated logs are processed.
 
-Requires ``skill-config.memory`` to be configured with embedding settings.
-The active RAG backend is selected via ``skill-config.memory.rag_backend``
-(default: ``markdown``; alternatives: ``lightrag``, ``simple``, ``mem0``).
+The ``markdown`` backend (default) works without any configuration.
+Other backends (``lightrag``, ``simple``, ``mem0``) require embedding settings
+in ``skill-config.memory``.  Select via ``skill-config.memory.rag_backend``.
 """
 
 import json
@@ -32,19 +32,24 @@ class MemoryIndexer:
         self._llm_busy = llm_busy_check  # callable: () -> bool
         skill_config_root = config.get("skill-config") or {}
         self._cfg = skill_config_root.get("memory", {})
-        self._enabled = bool(
-            self._cfg.get("embedding_provider")
-            and self._cfg.get("embedding_model")
-            and self._cfg.get("embedding_dim")
-            and self._cfg.get("embedding_host")
-        )
+        backend = self._cfg.get("rag_backend", "markdown")
+        if backend == "markdown":
+            # markdown backend needs no embedding config — always enabled
+            self._enabled = True
+        else:
+            self._enabled = bool(
+                self._cfg.get("embedding_provider")
+                and self._cfg.get("embedding_model")
+                and self._cfg.get("embedding_dim")
+                and self._cfg.get("embedding_host")
+            )
         # Per-user backend instances (lazy)
         self._backends: Dict[str, object] = {}
         # Track failed indexing attempts: {user_id: {fname: timestamp}}
         self._failures: Dict[str, Dict[str, float]] = {}
 
         if not self._enabled:
-            logger.debug("Memory indexer disabled (skill-config.memory not configured)")
+            logger.debug("Memory indexer disabled (backend %r requires embedding config)", backend)
 
     @property
     def enabled(self) -> bool:
