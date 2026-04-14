@@ -516,6 +516,8 @@ class CallSession:
         asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
         # Periodic RTP receiver stats for diagnostics
         asyncio.ensure_future(self._log_receiver_stats())
+        # Greet the caller so they don't have to speak first
+        asyncio.ensure_future(self._send_greeting())
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
@@ -545,6 +547,54 @@ class CallSession:
             content={"call_id": self.call_id, "version": 0, "candidates": candidates},
         )
         logger.info("call %s: sent %d local ICE candidates", self.call_id[:8], len(candidates))
+
+    async def _send_greeting(self) -> None:
+        """Generate and play a greeting via LLM + TTS when the call is accepted."""
+        try:
+            from pawlia.tts import synthesize_pcm
+        except ImportError:
+            logger.debug("call %s: TTS not available, skipping greeting", self.call_id[:8])
+            return
+
+        if not self._tts_track:
+            return
+
+        try:
+            call_prompt = self._agent.build_system_prompt(mode="call")
+            greeting_input = (
+                "[SYSTEM: A voice call was just accepted. "
+                "Greet the caller with a short, friendly greeting. "
+                "Keep it to one or two sentences.]"
+            )
+
+            async def _on_sentence(sentence: str) -> None:
+                if not self._tts_track:
+                    return
+                try:
+                    tts_pcm = await synthesize_pcm(
+                        sentence, self._app.config, sample_rate=48000,
+                    )
+                    if tts_pcm is not None and len(tts_pcm):
+                        logger.info(
+                            "call %s: greeting TTS (%d samples): %s",
+                            self.call_id[:8], len(tts_pcm), sentence[:60],
+                        )
+                        self._tts_track.enqueue_pcm_float32(tts_pcm)
+                        self._tts_track.stop_hold()
+                except Exception as e:
+                    logger.warning("call %s: greeting TTS failed: %s", self.call_id[:8], e)
+
+            response = await self._agent.run_streamed(
+                greeting_input,
+                system_prompt=call_prompt,
+                thread_id=self.thread_id,
+                on_sentence=_on_sentence,
+            )
+            await self._send_cb(response)
+            self._mark_activity()
+            logger.info("call %s: greeting sent", self.call_id[:8])
+        except Exception as e:
+            logger.warning("call %s: greeting failed: %s", self.call_id[:8], e)
 
     async def add_candidates(self, candidates: List[Dict]) -> None:
         """Feed ICE candidates from ``m.call.candidates``."""
@@ -794,16 +844,17 @@ class CallSession:
                 nonlocal first_sentence_received
                 if not self._tts_track:
                     return
-                # Stop hold audio as soon as first real TTS arrives
-                if not first_sentence_received:
-                    first_sentence_received = True
-                    self._tts_track.stop_hold()
                 try:
                     tts_pcm = await synthesize_pcm(sentence, self._app.config, sample_rate=48000)
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info("call %s: TTS sentence (%d samples): %s",
                                     self.call_id[:8], len(tts_pcm), sentence[:60])
                         self._tts_track.enqueue_pcm_float32(tts_pcm)
+                        # Stop hold audio only AFTER TTS is queued so there is
+                        # no silence gap that could cause playback glitches.
+                        if not first_sentence_received:
+                            first_sentence_received = True
+                            self._tts_track.stop_hold()
                 except Exception as e:
                     logger.warning("call %s: TTS sentence failed: %s", self.call_id[:8], e)
 

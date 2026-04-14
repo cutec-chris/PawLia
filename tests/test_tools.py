@@ -29,8 +29,12 @@ class TestBashTool:
 
     def test_cwd(self):
         tool = BashTool()
+        # Use a tmpdir inside session_dir so _validate_cwd allows it
         with tempfile.TemporaryDirectory() as tmpdir:
-            result = tool.execute({"command": "pwd"}, context={"cwd": tmpdir})
+            result = tool.execute(
+                {"command": "pwd"},
+                context={"cwd": tmpdir, "session_dir": tmpdir},
+            )
             # Git Bash on Windows returns POSIX paths; compare directory name only
             assert os.path.basename(tmpdir) in result
 
