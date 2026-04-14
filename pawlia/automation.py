@@ -88,12 +88,36 @@ class ScriptExecutor:
     TIMEOUT = 120
 
     @staticmethod
+    def _is_allowed_path(script_path: str, user_id: Optional[str],
+                         session_dir: Optional[str]) -> bool:
+        """Verify script resides in an allowed directory.
+
+        Allowed: user automations dir, project skills/, project scripts/.
+        """
+        real = os.path.realpath(script_path)
+        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        allowed = [
+            os.path.realpath(os.path.join(pkg_dir, "skills")),
+            os.path.realpath(os.path.join(pkg_dir, "scripts")),
+        ]
+        if session_dir and user_id:
+            allowed.append(os.path.realpath(
+                os.path.join(session_dir, user_id, "automations")
+            ))
+        return any(real.startswith(base + os.sep) for base in allowed)
+
+    @staticmethod
     async def run(script_path: str, params: Optional[Dict[str, Any]] = None,
                   cwd: Optional[str] = None,
                   user_id: Optional[str] = None,
                   session_dir: Optional[str] = None) -> Dict[str, Any]:
         if not os.path.isfile(script_path):
             return {"success": False, "output": "", "error": f"Script not found: {script_path}"}
+
+        if not ScriptExecutor._is_allowed_path(script_path, user_id, session_dir):
+            logger.warning("Script path outside allowed dirs: %s", script_path)
+            return {"success": False, "output": "",
+                    "error": "Script liegt ausserhalb der erlaubten Verzeichnisse."}
 
         env = os.environ.copy()
         if user_id:
@@ -323,11 +347,29 @@ class JobRunner:
                 continue
 
             script_path = resolve_script(self.session_dir, user_id, script)
+            job_name = job.get("name", "Job")
+
+            if not os.path.isfile(script_path):
+                job["last_run"] = now.isoformat()
+                job["last_result"] = "failed"
+                changed = True
+                logger.error(
+                    "Job '%s' for %s: script '%s' not found at %s",
+                    job_name, user_id, script, script_path,
+                )
+                await self._notify(
+                    user_id,
+                    f"\u26a0\ufe0f Job '{job_name}': Skript '{script}' wurde "
+                    f"nicht gefunden.\n"
+                    f"Bitte erstelle das Skript neu oder passe den Job an.",
+                )
+                continue
+
             params = dict(job.get("params", {}))
-            params["job_name"] = job.get("name", "")
+            params["job_name"] = job_name
             params["user_id"] = user_id
 
-            logger.info("Running job '%s' for %s", job.get("name"), user_id)
+            logger.info("Running job '%s' for %s", job_name, user_id)
             result = await ScriptExecutor.run(
                 script_path, params,
                 user_id=user_id, session_dir=self.session_dir,
@@ -340,10 +382,10 @@ class JobRunner:
             if job.get("notify", True):
                 if result["success"]:
                     output = result["output"][:500] if result["output"] else "erledigt"
-                    await self._notify(user_id, f"\u2699\ufe0f {job.get('name', 'Job')}: {output}")
+                    await self._notify(user_id, f"\u2699\ufe0f {job_name}: {output}")
                 else:
                     await self._notify(user_id,
-                        f"\u26a0\ufe0f Job '{job.get('name', '')}' fehlgeschlagen: {result['error'][:200]}")
+                        f"\u26a0\ufe0f Job '{job_name}' fehlgeschlagen: {result['error'][:200]}")
 
         if changed:
             save_json(jobs_path, jobs)
