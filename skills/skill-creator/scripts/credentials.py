@@ -42,6 +42,7 @@ def _save(data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.chmod(path, 0o600)
 
 
 def cmd_set(args):
@@ -51,15 +52,6 @@ def cmd_set(args):
     _save(creds)
     print(json.dumps({"success": True, "key": args.key}))
 
-
-def cmd_get(args):
-    """Retrieve a credential value."""
-    creds = _load()
-    value = creds.get(args.key)
-    if value is None:
-        print(json.dumps({"success": False, "error": f"Credential '{args.key}' not found"}))
-        sys.exit(1)
-    print(json.dumps({"success": True, "key": args.key, "value": value}))
 
 
 def cmd_list(args):
@@ -100,9 +92,6 @@ def main():
     p_set.add_argument("--key", required=True, help="Credential key name")
     p_set.add_argument("--value", required=True, help="Credential value")
 
-    p_get = sub.add_parser("get", help="Retrieve a credential")
-    p_get.add_argument("--key", required=True, help="Credential key name")
-
     sub.add_parser("list", help="List credential key names")
 
     p_del = sub.add_parser("delete", help="Delete a credential")
@@ -115,8 +104,6 @@ def main():
 
     if args.command == "set":
         cmd_set(args)
-    elif args.command == "get":
-        cmd_get(args)
     elif args.command == "list":
         cmd_list(args)
     elif args.command == "delete":

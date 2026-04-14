@@ -73,7 +73,6 @@ Returns `{"success": true, "available": [...], "missing": [...]}`.
 
 ```
 python <scripts_dir>/credentials.py list                              # list key names
-python <scripts_dir>/credentials.py get --key "<key_name>"           # retrieve value
 python <scripts_dir>/credentials.py delete --key "<key_name>"        # remove
 ```
 
@@ -186,7 +185,6 @@ skill-name/
 | `list` | creator.py | Show all skills (workspace + bundled) |
 | `package` | creator.py | Create a `.skill` zip for distribution |
 | `set` | credentials.py | Store a credential |
-| `get` | credentials.py | Retrieve a credential |
 | `list` | credentials.py | List credential key names |
 | `delete` | credentials.py | Remove a credential |
 | `check` | credentials.py | Check if keys exist |

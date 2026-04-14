@@ -6,6 +6,7 @@ Provides a factory for creating ChatAgents per user session.
 
 import logging
 import os
+import threading
 from typing import Any, Callable, Dict, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -52,6 +53,7 @@ class App:
         self.skills: Dict[str, AgentSkill] = SkillLoader.discover(
             skills_dir, config, require_workflow=require_workflow,
         )
+        self._skills_lock = threading.Lock()
 
         # Also discover skills placed in any session workspace
         self._refresh_workspace_skills()
@@ -71,7 +73,7 @@ class App:
 
         Called at startup and again every time make_agent() creates a new
         ChatAgent so that skills created during runtime become available
-        without restarting the App.
+        without restarting the App.  Thread-safe via ``_skills_lock``.
         """
         allow_workspace = self.config.get("skill-install", {}).get("allow_workspace", False)
         if not allow_workspace or not os.path.isdir(self.session_dir):
@@ -79,16 +81,17 @@ class App:
 
         require_workflow = self.config.get("workflow", {}).get("require_compiled", False)
 
-        for user_entry in os.listdir(self.session_dir):
-            workspace_dir = os.path.join(self.session_dir, user_entry, "workspace")
-            workspace_skills_dir = os.path.join(workspace_dir, "skills")
-            if os.path.isdir(workspace_skills_dir):
-                workspace_skills = SkillLoader.discover(
-                    workspace_skills_dir, self.config,
-                    workspace_dir=workspace_dir,
-                    require_workflow=require_workflow,
-                )
-                self.skills.update(workspace_skills)
+        with self._skills_lock:
+            for user_entry in os.listdir(self.session_dir):
+                workspace_dir = os.path.join(self.session_dir, user_entry, "workspace")
+                workspace_skills_dir = os.path.join(workspace_dir, "skills")
+                if os.path.isdir(workspace_skills_dir):
+                    workspace_skills = SkillLoader.discover(
+                        workspace_skills_dir, self.config,
+                        workspace_dir=workspace_dir,
+                        require_workflow=require_workflow,
+                    )
+                    self.skills.update(workspace_skills)
 
     async def _format_notification(self, user_id: str, raw_message: str) -> str:
         """Pass a raw notification through the LLM for personalized delivery.

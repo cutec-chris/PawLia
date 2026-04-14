@@ -130,7 +130,7 @@ class ChatAgent(BaseAgent):
         # Used to fall back when an override model is unreachable.
         self._fallback_resolver: Optional[Callable[[str], Any]] = None
         # Resolves config keys (e.g. "fast") to actual model names (e.g. "qwen3.5:4b").
-        self._model_name_resolver: Optional[Callable[[str, str]]] = None
+        self._model_name_resolver: Optional[Callable[[str], str]] = None
 
         # Callback to re-discover workspace skills (set by App.make_agent).
         # Called after each skill returns so that skills created at runtime
@@ -170,6 +170,7 @@ class ChatAgent(BaseAgent):
             return False
 
         # New skills appeared — rebuild specs and rebind tools
+        old_names = {s["function"]["name"] for s in self._skill_specs}
         self._skill_specs = [s.as_openai_spec() for s in self.skills.values()]
         if self._skill_specs:
             base_llm = self.llm  # underlying ChatOpenAI without tools
@@ -178,10 +179,11 @@ class ChatAgent(BaseAgent):
                 (self.vision_llm or base_llm).bind_tools(self._skill_specs, tool_choice="auto")
                 if hasattr(self, "vision_llm") else self.bound_llm
             )
+        new_names = {s["function"]["name"] for s in self._skill_specs} - old_names
         self.logger.info(
             "Skills rebound (%d → %d), new: %s",
             prev_count, len(self.skills),
-            ", ".join(set(self.skills) - {s["function"]["name"] for s in self._skill_specs[:prev_count]}),
+            ", ".join(new_names),
         )
         return True
 
