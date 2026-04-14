@@ -19,172 +19,120 @@ metadata:
 
 Create, edit, improve, or audit PawLia AgentSkills. Manage credentials.
 
-## Core Principles
-
-### Concise is Key
-
-The context window is a shared resource. Skills share it with the system prompt,
-conversation history, and other skills' metadata. The default assumption is that
-the model is already smart — only add what it doesn't already know.
-
-### Set Appropriate Degrees of Freedom
-
-Match specificity to the task's fragility:
-- **High freedom** (text instructions): Multiple valid approaches, context-dependent
-- **Medium freedom** (pseudocode / parameterized scripts): Preferred pattern, some variation OK
-- **Low freedom** (specific scripts, few params): Fragile operations, consistency critical
-
-### Progressive Disclosure
-
-Skills use three loading levels:
-1. **Metadata** (name + description) — always in context (~100 tokens)
-2. **SKILL.md body** — loaded when skill triggers (<500 lines ideal)
-3. **Bundled resources** — loaded as needed (scripts execute without context loading)
-
----
+For design principles and writing patterns, read `references/design-principles.md`
+and `references/patterns.md` when writing or reviewing a SKILL.md.
 
 ## Credential Management
 
-Skills that need API keys or tokens declare them via `requires_credentials` in
-their SKILL.md frontmatter. Credentials live at `session/{user_id}/.credentials.json`
-— outside the workspace. The SkillRunner injects matching credentials as env vars
-(`CRED_<KEY_NAME>`) when running a skill. Skills never read the credential file.
+Skills declare required credentials via `requires_credentials` in SKILL.md frontmatter.
+Credentials live at `session/{user_id}/.credentials.json` — outside the workspace.
+The SkillRunner injects them as env vars (`CRED_<KEY_NAME>`) at runtime.
 
-### When a skill needs credentials
+### Store credentials
 
-The main model (ChatAgent) should:
+Ask the user for the value, then:
+```
+python <scripts_dir>/credentials.py set --key "<key_name>" --value "<value>"
+```
 
-1. Ask the user for the required credential (e.g. "I need your OpenMeteo API key")
-2. Store it:
-   ```
-   python <scripts_dir>/credentials.py set --key "<key_name>" --value "<value>"
-   ```
-3. Invoke the target skill — credentials are injected automatically
-
-### Check if credentials exist
+### Check / list / delete
 
 ```
 python <scripts_dir>/credentials.py check --keys "api_key,other_key"
-```
-
-Returns `{"success": true, "available": [...], "missing": [...]}`.
-
-### Other commands
-
-```
-python <scripts_dir>/credentials.py list                              # list key names
-python <scripts_dir>/credentials.py delete --key "<key_name>"        # remove
+python <scripts_dir>/credentials.py list
+python <scripts_dir>/credentials.py delete --key "<key_name>"
 ```
 
 ---
 
-## Skill Creation Process
+## Creating a Skill
 
-### Step 1: Understand Intent
+### 1. Understand Intent
 
-Gather concrete usage examples from the user. Ask:
-1. What should this skill enable the agent to do?
-2. When should it trigger? (what user phrases/contexts)
-3. What's the expected input/output format?
-4. Does it need credentials (API keys, tokens)?
+Ask the user:
+1. What should this skill do?
+2. When should it trigger? (phrases, contexts)
+3. Expected input/output?
+4. Does it need credentials?
 
-Avoid overwhelming the user — start with the most important questions, follow up as needed.
+### 2. Plan Resources
 
-### Step 2: Plan Reusable Contents
+| Resource | When needed | Example |
+|----------|-------------|---------|
+| `scripts/` | Repeated logic, deterministic reliability | `scripts/weather.py` |
+| `references/` | Docs the agent should reference | `references/api_docs.md` |
+| `assets/` | Templates, boilerplate | `assets/template.html` |
+| `requires_credentials` | External APIs | `["my_api_key"]` |
 
-Analyze examples to determine what the skill needs:
-
-| Resource | When to include | Example |
-|----------|----------------|---------|
-| `scripts/` | Repeated logic or deterministic reliability | `scripts/weather.py` for API calls |
-| `references/` | Docs the agent should reference | `references/api_docs.md` for schemas |
-| `assets/` | Files used in output (templates, boilerplate) | `assets/template.html` |
-| `requires_credentials` | External APIs, services | `["openmeteo_api_key"]` |
-
-Keep SKILL.md under 500 lines. Split detailed content into references/ when approaching the limit.
-
-### Step 3: Initialize
+### 3. Scaffold
 
 ```
-python <scripts_dir>/creator.py init --name "<skill-name>" --description "<desc>" [--resources scripts,references,assets]
+python <scripts_dir>/creator.py init --name "<skill-name>" --description "<desc>" [--resources scripts,references,assets] [--credentials "key1,key2"]
 ```
 
-Skills are created in the user's workspace (`$PAWLIA_SESSION_DIR/$PAWLIA_USER_ID/workspace/skills/<name>/`).
+Creates the skill in `$PAWLIA_SESSION_DIR/$PAWLIA_USER_ID/workspace/skills/<name>/`.
 
-### Step 4: Implement
+### 4. Implement
 
-#### Write SKILL.md
+**SKILL.md frontmatter** — required fields:
+- `name`: lowercase + hyphens, matches directory name
+- `description`: what the skill does AND when to trigger it. Be specific — models undertrigger vague descriptions.
 
-**Frontmatter fields:**
-- `name`: Skill identifier, matches directory name. Lowercase + hyphens.
-- `description`: Primary triggering mechanism. Include what the skill does AND when to use it.
-- `requires_credentials`: List of credential key names the skill needs. Example:
-  ```yaml
-  requires_credentials:
-    - openmeteo_api_key
-  ```
+Optional:
+- `requires_credentials`: list of credential key names
 
-**Body** instructions:
-- Use imperative form ("Run the script", "Parse the output")
-- Include step-by-step workflow
-- Reference bundled resources with guidance on when to read them
-- Include error handling / self-repair table
-- Define output format clearly
+**SKILL.md body** — instructions for the sub-agent:
+- Imperative form ("Run the script", "Parse the output")
+- Step-by-step workflow
+- Error handling table (so the sub-agent self-repairs)
+- Clear output format
+- Keep under 500 lines; split into `references/` if longer
 
-#### Write Scripts
+**Scripts**:
+- Credentials via env vars: `os.environ.get("CRED_MY_API_KEY")`
+- Arguments via `argparse`
+- Output JSON: `{"success": true, ...}` or `{"success": false, "error": "..."}`
+- Use `<scripts_dir>` placeholder in SKILL.md (substituted at runtime)
 
-Scripts access credentials via env vars — PawLia injects them as `CRED_<KEY_NAME>`
-(uppercased, non-alphanumeric replaced with `_`):
-
-```python
-import os
-api_key = os.environ.get("CRED_OPENMETEO_API_KEY")
-```
-
-Other conventions:
-- Accept arguments via `argparse`
-- Return JSON: `{"success": true, ...}` or `{"success": false, "error": "..."}`
-- Use `<scripts_dir>` placeholder (substituted at runtime)
-
-### Step 5: Validate
+### 5. Validate
 
 ```
 python <scripts_dir>/creator.py validate --name "<skill-name>"
 ```
 
-### Step 6: Package (optional)
+### 6. Package (optional)
 
 ```
 python <scripts_dir>/creator.py package --name "<skill-name>"
 ```
 
-### Step 7: Iterate
+### 7. Iterate
 
-Use the skill on real tasks, notice struggles, update. Repeat.
+Use the skill on real tasks, notice struggles, update.
 
 ---
 
-## Skill Anatomy
+## Skill Directory Structure
 
 ```
 skill-name/
-├── SKILL.md            # required: frontmatter + instructions
-├── scripts/            # optional: executable code
-├── references/         # optional: docs loaded into context as needed
-└── assets/             # optional: files used in output
+├── SKILL.md            # required
+├── scripts/            # optional
+├── references/         # optional
+└── assets/             # optional
 ```
 
 ---
 
-## Commands Quick Reference
+## Commands
 
 | Command | Script | What it does |
 |---------|--------|-------------|
-| `init` | creator.py | Create a new skill in the user's workspace |
-| `validate` | creator.py | Check SKILL.md for common errors |
-| `list` | creator.py | Show all skills (workspace + bundled) |
-| `package` | creator.py | Create a `.skill` zip for distribution |
+| `init` | creator.py | Scaffold a new skill |
+| `validate` | creator.py | Check SKILL.md for errors |
+| `list` | creator.py | Show all skills |
+| `package` | creator.py | Create .skill zip |
 | `set` | credentials.py | Store a credential |
-| `list` | credentials.py | List credential key names |
+| `list` | credentials.py | List credential keys |
 | `delete` | credentials.py | Remove a credential |
 | `check` | credentials.py | Check if keys exist |

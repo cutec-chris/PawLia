@@ -82,6 +82,30 @@ agents:
 
 Falls back to `agents.skill_runner` → `agents.default` if not set. See [config.md](config.md#agents) for the full fallback chain.
 
+### Model recommendations
+
+Most skills work fine with small/fast models because the SkillRunner guides execution
+via system prompts, nudging, and command-mode fallback. Some skills however are
+significantly more complex and benefit from a larger model:
+
+| Skill | Recommended | Why |
+|-------|-------------|-----|
+| `skill-creator` | `smart` (or larger) | Generates SKILL.md files, writes scripts, makes design decisions — requires strong reasoning and code generation |
+| `browser` | `smart` | Multi-step navigation with context-dependent decisions |
+| Most others | `fast` is fine | Follow clear script → parse output → return result |
+
+Example config for mixed model sizes:
+
+```yaml
+agents:
+  default: fast
+  skill_runner: fast          # default for all skills
+  skills:
+    skill-creator: smart      # override: needs a capable model
+    browser: smart
+    searxng: fast
+```
+
 ## Skill configuration
 
 Skills that need external URLs or API keys read from `skill-config` in `config.yaml`:
