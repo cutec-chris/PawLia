@@ -859,11 +859,20 @@ class CallSession:
                 except Exception as e:
                     logger.warning("call %s: TTS sentence failed: %s", self.call_id[:8], e)
 
+            async def _on_skill_start(skill_name: str, query: str) -> None:
+                short_q = (query[:60] + "…") if len(query) > 60 else query
+                await self._send_cb(f"⚙ *{skill_name}*: {short_q}")
+
+            async def _on_skill_done(skill_name: str) -> None:
+                await self._send_cb(f"✓ *{skill_name}*")
+
             response = await self._agent.run_streamed(
                 text,
                 system_prompt=call_prompt,
                 thread_id=self.thread_id,
                 on_sentence=_on_sentence,
+                on_skill_start=_on_skill_start,
+                on_skill_done=_on_skill_done,
             )
         except Exception as e:
             logger.error("call %s: agent error: %s", self.call_id[:8], e)
