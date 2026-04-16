@@ -26,12 +26,14 @@ import os
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import markdown
+import yaml
 from nio import (
     AsyncClient,
     CallCandidatesEvent,
     CallHangupEvent,
     CallInviteEvent,
     DownloadResponse,
+    InviteMemberEvent,
     LoginResponse,
     MatrixRoom,
     RoomMessageAudio,
@@ -109,6 +111,23 @@ def _make_status_done(event_id: str, skill_name: str, steps: int) -> dict:
     return _status_edit(event_id, body, html)
 
 
+def _save_allowed_users(app: "App", users: List[str]) -> None:
+    """Write allowed_users back to config.yaml under interfaces.matrix."""
+    config_path = app.config_path
+    if not config_path or not os.path.isfile(config_path):
+        logger.warning("Matrix: cannot save allowed_users — config_path unknown")
+        return
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        raw.setdefault("interfaces", {}).setdefault("matrix", {})["allowed_users"] = users
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(raw, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        logger.info("Matrix: saved allowed_users=%s to %s", users, config_path)
+    except Exception as exc:
+        logger.error("Matrix: failed to save allowed_users: %s", exc)
+
+
 def _resolve_thread_root(
     source: dict,
     known_thread_events: Optional[Dict[str, str]] = None,
@@ -155,18 +174,25 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     user_id: str = cfg["user_id"]
     password: Optional[str] = cfg.get("password")
     access_token: Optional[str] = cfg.get("access_token")
+    allowed_users: Optional[List[str]] = cfg.get("allowed_users")
 
-    client = AsyncClient(homeserver, user_id)
+    # E2EE: persistent crypto store so keys survive restarts
+    store_path = os.path.join(app.session_dir, "nio_store")
+    os.makedirs(store_path, exist_ok=True)
+
+    client = AsyncClient(homeserver, user_id, store_path=store_path)
 
     # Authenticate
     if access_token:
         client.access_token = access_token
         client.user_id = user_id
+        # Load persisted Olm state for E2EE
+        client.load_store()
         logger.info("Matrix: using access_token for %s", user_id)
     elif password:
-        resp = await client.login(password)
+        resp = await client.login(password, device_name="PawLia")
         if isinstance(resp, LoginResponse):
-            logger.info("Matrix: logged in as %s", user_id)
+            logger.info("Matrix: logged in as %s (device %s)", user_id, resp.device_id)
         else:
             logger.error("Matrix: login failed: %s", resp)
             await client.close()
@@ -175,6 +201,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         logger.error("Matrix: no password or access_token configured")
         await client.close()
         return
+
+    # Upload encryption keys if we haven't yet
+    if client.should_upload_keys:
+        await client.keys_upload()
+        logger.info("Matrix: E2EE keys uploaded")
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
@@ -581,6 +612,35 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         await call_manager.on_hangup(room, event)
 
     # ------------------------------------------------------------------
+    # Auto-join on invite (with pairing)
+    # ------------------------------------------------------------------
+
+    async def on_invite(room: MatrixRoom, event: InviteMemberEvent) -> None:
+        if event.state_key != client.user_id:
+            return
+
+        sender = event.sender
+
+        nonlocal allowed_users
+        if allowed_users is not None and sender not in allowed_users:
+            logger.info("Matrix: ignoring invite from %s (not in allowed_users)", sender)
+            return
+
+        resp = await client.join(room.room_id)
+        if hasattr(resp, "room_id"):
+            logger.info("Matrix: joined %s (invited by %s)", room.room_id, sender)
+        else:
+            logger.error("Matrix: failed to join %s: %s", room.room_id, resp)
+            return
+
+        # Pairing: first invite ever → persist sender as allowed_users
+        if allowed_users is None:
+            allowed_users = [sender]
+            cfg["allowed_users"] = allowed_users
+            _save_allowed_users(app, allowed_users)
+            logger.info("Matrix: paired with %s (saved to config)", sender)
+
+    # ------------------------------------------------------------------
     # Scheduler callback for proactive notifications
     # ------------------------------------------------------------------
 
@@ -616,6 +676,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         client.add_event_callback(on_call_invite, CallInviteEvent)
         client.add_event_callback(on_call_candidates, CallCandidatesEvent)
         client.add_event_callback(on_call_hangup, CallHangupEvent)
+        client.add_event_callback(on_invite, InviteMemberEvent)
 
         await client.sync_forever(timeout=30000)
     except asyncio.CancelledError:
