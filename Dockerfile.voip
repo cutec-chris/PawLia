@@ -16,7 +16,8 @@ RUN apk add --no-cache \
 COPY requirements.txt requirements-voip.txt ./
 # python-olm must link against system libolm; needs --no-build-isolation
 # so the env var reaches olm_build.py inside pip's subprocess.
-RUN pip install --no-cache-dir --prefix=/install cffi \
+RUN pip install --no-cache-dir setuptools \
+    && pip install --no-cache-dir --prefix=/install cffi \
     && PYTHON_OLM_USE_SYSTEM_LIB=1 \
        pip install --no-cache-dir --no-build-isolation --prefix=/install python-olm \
     && pip install --no-cache-dir --prefix=/install \
