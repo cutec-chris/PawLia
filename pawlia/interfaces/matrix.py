@@ -35,6 +35,7 @@ from nio import (
     DownloadResponse,
     InviteMemberEvent,
     LoginResponse,
+    MegolmEvent,
     MatrixRoom,
     RoomMessageAudio,
     RoomMessageImage,
@@ -206,6 +207,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     if client.should_upload_keys:
         await client.keys_upload()
         logger.info("Matrix: E2EE keys uploaded")
+
+    # Trust all devices automatically so we can decrypt messages
+    client.store.blacklist_on_unverified = False
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
@@ -641,6 +645,16 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             logger.info("Matrix: paired with %s (saved to config)", sender)
 
     # ------------------------------------------------------------------
+    # E2EE: handle undecryptable messages
+    # ------------------------------------------------------------------
+
+    async def on_megolm(room: MatrixRoom, event: MegolmEvent) -> None:
+        logger.warning(
+            "Matrix: could not decrypt message in %s from %s (session %s)",
+            room.room_id, event.sender, event.session_id,
+        )
+
+    # ------------------------------------------------------------------
     # Scheduler callback for proactive notifications
     # ------------------------------------------------------------------
 
@@ -670,6 +684,17 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         # Initial sync to get a since-token and skip old messages (no callbacks yet)
         await client.sync(timeout=0)
 
+        # E2EE: fetch device keys for all joined rooms so we can decrypt
+        if client.store:
+            for room_id in client.rooms:
+                room_obj = client.rooms[room_id]
+                if room_obj.encrypted:
+                    user_ids = [u for u in room_obj.users if u != client.user_id]
+                    if user_ids:
+                        await client.keys_query()
+                        logger.info("Matrix: E2EE keys queried for %d joined rooms", len(client.rooms))
+                        break
+
         client.add_event_callback(on_message, RoomMessageText)
         client.add_event_callback(on_image, RoomMessageImage)
         client.add_event_callback(on_audio, RoomMessageAudio)
@@ -677,6 +702,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         client.add_event_callback(on_call_candidates, CallCandidatesEvent)
         client.add_event_callback(on_call_hangup, CallHangupEvent)
         client.add_event_callback(on_invite, InviteMemberEvent)
+        client.add_event_callback(on_megolm, MegolmEvent)
 
         await client.sync_forever(timeout=30000)
     except asyncio.CancelledError:

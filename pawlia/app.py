@@ -191,5 +191,7 @@ class App:
 def create_app(config_path: Optional[str] = None,
                logger: Optional[logging.Logger] = None) -> App:
     """Load config and create an App instance."""
+    from pawlia.config import resolve_config_path
+    config_path = config_path or resolve_config_path()
     config = load_config(config_path)
     return App(config, logger=logger, config_path=config_path)
