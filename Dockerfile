@@ -11,9 +11,12 @@ RUN apk add --no-cache \
         olm-dev
 
 COPY requirements.txt ./
-# Tell python-olm to link against the system libolm instead of building its own
-ENV PYTHON_OLM_USE_SYSTEM_LIB=1
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# python-olm must link against system libolm; needs --no-build-isolation
+# so the env var reaches olm_build.py inside pip's subprocess.
+RUN pip install --no-cache-dir --prefix=/install cffi \
+    && PYTHON_OLM_USE_SYSTEM_LIB=1 \
+       pip install --no-cache-dir --no-build-isolation --prefix=/install python-olm \
+    && pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
