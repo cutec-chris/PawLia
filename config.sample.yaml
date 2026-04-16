@@ -66,15 +66,17 @@ interfaces:
   #   password: YOUR_PASSWORD
   #   # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
   #   # always_thread: true                  # always reply in a new thread (default: false)
+  #   # allowed_users:                       # who may invite the bot (default: first inviter wins)
+  #   #   - "@you:matrix.org"
   #   # stun_servers:                        # STUN for VoIP (optional)
   #   #   - stun:stun.l.google.com:19302
 
 # voip:
-#   silence_threshold: 0.015          # lower = quieter speech is less likely to be treated as silence
-#   silence_seconds: 2.2              # wait longer before cutting the user off
-#   min_speech_seconds: 0.7           # shorter chunks are discarded early
-#   min_active_speech_ratio: 0.10     # fraction of active frames required per chunk
-#   min_consecutive_speech_frames: 10 # sustained active 20ms frames required
+#   silence_threshold: 0.05           # frame RMS above this counts as speech
+#   silence_seconds: 2.5              # trailing silence that ends a chunk
+#   min_speech_seconds: 0.6           # shorter chunks are discarded early
+#   min_active_speech_ratio: 0.30     # fraction of active frames required per chunk
+#   min_consecutive_speech_frames: 15 # sustained active 20ms frames required
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
 
 # Speech-to-text transcription (voice messages + VoIP calls).

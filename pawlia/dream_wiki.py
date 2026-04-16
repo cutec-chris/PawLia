@@ -248,10 +248,12 @@ class DreamWikiBackend:
             return None
 
     def _build_frontmatter(self, slug: str, title: str, date_str: str,
-                           tags: list[str] | None = None) -> str:
+                           tags: list[str] | None = None,
+                           entity_type: str = "topic") -> str:
         fm = {
             "slug": slug,
             "title": title,
+            "type": entity_type,
             "created": date_str,
             "updated": date_str,
             "tags": tags or [],
@@ -270,10 +272,35 @@ class DreamWikiBackend:
     def _rebuild_index(self) -> None:
         """Rebuild index.md from the current wiki catalog."""
         catalog = self._get_wiki_catalog()
-        lines = ["# Wiki Index\n"]
+        # Group pages by type for a structured index
+        typed: dict[str, list[tuple[str, str]]] = {}
         for slug, title in sorted(catalog.items()):
-            lines.append(f"- [[{slug}]] — {title}")
-        lines.append(f"\n> {len(catalog)} Seiten")
+            filepath = os.path.join(self._topics_dir, f"{slug}.md")
+            entity_type = "topic"
+            try:
+                with open(filepath, encoding="utf-8") as f:
+                    fm = self._parse_frontmatter(f.read())
+                if fm and fm.get("type"):
+                    entity_type = fm["type"]
+            except Exception:
+                pass
+            typed.setdefault(entity_type, []).append((slug, title))
+
+        _TYPE_ORDER = ("person", "place", "object", "project", "topic")
+        lines = ["# Wiki Index\n"]
+        for etype in _TYPE_ORDER:
+            entries = typed.pop(etype, [])
+            if not entries:
+                continue
+            lines.append(f"\n## {etype.title()}\n")
+            for slug, title in entries:
+                lines.append(f"- [{title}](topics/{slug}.md)")
+        # Any unknown types
+        for etype, entries in typed.items():
+            lines.append(f"\n## {etype.title()}\n")
+            for slug, title in entries:
+                lines.append(f"- [{title}](topics/{slug}.md)")
+        lines.append(f"\n> {len(catalog)} pages")
         path = os.path.join(self._wiki_dir, "index.md")
         os.makedirs(self._wiki_dir, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
@@ -281,7 +308,7 @@ class DreamWikiBackend:
 
     def _append_log(self, entry_type: str, detail: str, slugs: list[str] | None = None) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-        slug_list = f" | Seiten: {', '.join(slugs)}" if slugs else ""
+        slug_list = f" | pages: {', '.join(slugs)}" if slugs else ""
         line = f"\n## [{timestamp}] {entry_type} | {detail}{slug_list}\n"
         path = os.path.join(self._wiki_dir, "log.md")
         os.makedirs(self._wiki_dir, exist_ok=True)
@@ -306,24 +333,44 @@ class DreamWikiBackend:
         if not actions:
             logger.warning("DreamWikiBackend: could not parse LLM JSON, using raw")
             return [{"action": "create", "slug": "misc",
-                      "title": "Verschiedenes", "content": content,
+                      "title": "Miscellaneous", "content": content,
                       "tags": [], "links": []}]
         return actions
 
     # ── Page management ───────────────────────────────────────────────────────
 
+    def _md_link(self, slug: str, catalog: dict[str, str] | None = None) -> str:
+        """Build a standard Markdown relative link for a slug."""
+        title = slug
+        if catalog and slug in catalog:
+            title = catalog[slug]
+        else:
+            # Try reading the title from the file
+            filepath = os.path.join(self._topics_dir, f"{slug}.md")
+            if os.path.exists(filepath):
+                try:
+                    with open(filepath, encoding="utf-8") as f:
+                        fm = self._parse_frontmatter(f.read())
+                    if fm and fm.get("title"):
+                        title = fm["title"]
+                except Exception:
+                    pass
+        return f"[{title}]({slug}.md)"
+
     async def _update_page(self, slug: str, title: str, content: str,
                            date_str: str, action: str,
                            tags: list[str] | None = None,
-                           links: list[str] | None = None) -> None:
+                           links: list[str] | None = None,
+                           entity_type: str = "topic") -> None:
         filepath = os.path.join(self._topics_dir, f"{slug}.md")
         os.makedirs(self._topics_dir, exist_ok=True)
 
+        catalog = self._get_wiki_catalog()
         link_section = ""
         if links:
-            link_lines = [f"- [[{l}]]" for l in links if l != slug]
+            link_lines = [f"- {self._md_link(l, catalog)}" for l in links if l != slug]
             if link_lines:
-                link_section = "\n\n## Verwandte Seiten\n" + "\n".join(link_lines)
+                link_section = "\n\n## Related\n" + "\n".join(link_lines)
 
         if os.path.exists(filepath) and action == "update":
             with open(filepath, encoding="utf-8") as f:
@@ -342,16 +389,17 @@ class DreamWikiBackend:
 
             section = f"\n\n### Update ({date_str})\n\n{content}"
             if link_section:
-                if "## Verwandte Seiten" in existing:
+                if "## Related" in existing:
                     for l in links:
-                        if l != slug and f"[[{l}]]" not in existing:
-                            existing += f"\n- [[{l}]]"
+                        if l != slug and f"]({l}.md)" not in existing:
+                            existing += f"\n- {self._md_link(l, catalog)}"
                 else:
                     existing += link_section
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(existing + section)
         else:
-            frontmatter = self._build_frontmatter(slug, title, date_str, tags)
+            frontmatter = self._build_frontmatter(slug, title, date_str, tags,
+                                                   entity_type=entity_type)
             page_content = f"{frontmatter}\n\n# {title}\n\n{content}"
             if link_section:
                 page_content += link_section
@@ -381,7 +429,7 @@ class DreamWikiBackend:
 
         system_prompt = load_system_prompt("dream/consolidate.md")
         user_prompt = (
-            f"## Wiki-Seiten ({len(catalog)} insgesamt)\n\n"
+            f"## Wiki pages ({len(catalog)} total)\n\n"
             + "\n".join(page_summaries)
         )
 
@@ -434,10 +482,15 @@ class DreamWikiBackend:
                     if body_lines and body_lines[0].startswith("# "):
                         body = "\n".join(body_lines[1:]).lstrip("\n")
 
+                    keep_title = catalog.get(keep_slug, keep_slug)
                     with open(keep_path, "a", encoding="utf-8") as f:
-                        f.write(f"\n\n---\n*Merged from [[{m_slug}]]*\n\n{body}")
+                        f.write(f"\n\n---\n*Merged from {self._md_link(m_slug, catalog)}*\n\n{body}")
 
-                    # Update wikilinks in all files
+                    # Update links in all files (both old [[wikilink]] and md link formats)
+                    m_slug_link_re = re.compile(
+                        rf"\[\[[^\]]*{re.escape(m_slug)}[^\]]*\]\]"
+                        rf"|\[[^\]]*\]\({re.escape(m_slug)}\.md\)"
+                    )
                     for fname in os.listdir(self._topics_dir):
                         if not fname.endswith(".md"):
                             continue
@@ -445,7 +498,9 @@ class DreamWikiBackend:
                         try:
                             with open(fpath, encoding="utf-8") as f:
                                 fc = f.read()
-                            updated = fc.replace(f"[[{m_slug}]]", f"[[{keep_slug}]]")
+                            updated = m_slug_link_re.sub(
+                                f"[{keep_title}]({keep_slug}.md)", fc,
+                            )
                             if updated != fc:
                                 with open(fpath, "w", encoding="utf-8") as f:
                                     f.write(updated)
@@ -467,21 +522,23 @@ class DreamWikiBackend:
                     logger.warning("DreamWikiBackend: consolidation error for %s: %s", m_slug, exc)
 
         # Add missing links
+        catalog = self._get_wiki_catalog()
         for ml in data.get("missing_links", []):
             from_slug = ml.get("from", "")
             to_slug = ml.get("to", "")
             if not from_slug or not to_slug:
                 continue
             fpath = os.path.join(self._topics_dir, f"{from_slug}.md")
-            if os.path.exists(fpath) and to_slug in self._get_wiki_catalog():
+            if os.path.exists(fpath) and to_slug in catalog:
                 try:
                     with open(fpath, encoding="utf-8") as f:
                         fc = f.read()
-                    if f"[[{to_slug}]]" not in fc:
-                        if "## Verwandte Seiten" in fc:
-                            fc += f"\n- [[{to_slug}]]"
+                    if f"]({to_slug}.md)" not in fc:
+                        link = self._md_link(to_slug, catalog)
+                        if "## Related" in fc:
+                            fc += f"\n- {link}"
                         else:
-                            fc += f"\n\n## Verwandte Seiten\n- [[{to_slug}]]"
+                            fc += f"\n\n## Related\n- {link}"
                         with open(fpath, "w", encoding="utf-8") as f:
                             f.write(fc)
                 except Exception:
@@ -490,7 +547,7 @@ class DreamWikiBackend:
         if merged_count:
             self._save_tracker()
             self._rebuild_index()
-            self._append_log("lint", f"{merged_count} Seiten zusammengeführt")
+            self._append_log("lint", f"{merged_count} pages merged")
             logger.info("DreamWikiBackend: consolidated %d page(s)", merged_count)
 
     # ── RagBackend interface ──────────────────────────────────────────────────
@@ -514,6 +571,7 @@ class DreamWikiBackend:
 
         for act in actions:
             action = act.get("action", "create")
+            entity_type = act.get("type", "topic")
             raw_slug = act.get("slug", "misc")
             title = act.get("title", raw_slug)
             content = act.get("content", "")
@@ -534,7 +592,8 @@ class DreamWikiBackend:
             slugs.append(slug)
 
             await self._update_page(
-                slug, title, content, date_str, action, tags=tags, links=links
+                slug, title, content, date_str, action, tags=tags, links=links,
+                entity_type=entity_type,
             )
 
             if is_new:
@@ -566,13 +625,13 @@ class DreamWikiBackend:
 
     async def query(self, question: str) -> str:
         if not os.path.isdir(self._topics_dir):
-            return "Noch keine Dokumente indiziert."
+            return "No documents indexed yet."
 
         topic_files = sorted(
             f for f in os.listdir(self._topics_dir) if f.endswith(".md")
         )
         if not topic_files:
-            return "Noch keine Dokumente indiziert."
+            return "No documents indexed yet."
 
         query_words = set(re.split(r"\W+", question.lower())) - _STOP_WORDS - {""}
 
@@ -589,7 +648,10 @@ class DreamWikiBackend:
             search_text = name_part + " " + content.lower()
             score = sum(1 for w in query_words if w in search_text)
             score += sum(2 for w in query_words if w in name_part)
-            score += sum(3 for w in query_words if f"[[{w}" in content.lower())
+            # Boost for linked references (both md links and legacy wikilinks)
+            content_lower = content.lower()
+            score += sum(3 for w in query_words
+                         if f"]({w}" in content_lower or f"[[{w}" in content_lower)
             scored.append((score, fname, content))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -606,5 +668,5 @@ class DreamWikiBackend:
             total += len(content)
 
         if not results:
-            return "Keine relevanten Informationen gefunden."
+            return "No relevant information found."
         return "\n\n---\n\n".join(results)

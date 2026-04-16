@@ -10,7 +10,7 @@ When the user sends a message, the dispatcher (ChatAgent) decides whether to cal
 
 | Skill | Description | Requires |
 |-------|-------------|---------|
-| `memory` | Long-term conversation memory — indexes daily chat logs by topic | `skill-config.memory` (embedding settings) |
+| `memory` | Long-term conversation memory — indexes daily chat logs by topic | none (markdown backend); `skill-config.memory` for other backends |
 | `researcher` | Per-project research knowledge bases (index URLs, PDFs, query) | `skill-config.researcher` (embedding settings) |
 | `searxng` | Web search via a SearXNG instance | `skill-config.searxng.url` |
 | `perplexica` | AI-powered search via Perplexica | `skill-config.perplexica.url` |
@@ -81,6 +81,30 @@ agents:
 ```
 
 Falls back to `agents.skill_runner` → `agents.default` if not set. See [config.md](config.md#agents) for the full fallback chain.
+
+### Model recommendations
+
+Most skills work fine with small/fast models because the SkillRunner guides execution
+via system prompts, nudging, and command-mode fallback. Some skills however are
+significantly more complex and benefit from a larger model:
+
+| Skill | Recommended | Why |
+|-------|-------------|-----|
+| `skill-creator` | `smart` (or larger) | Generates SKILL.md files, writes scripts, makes design decisions — requires strong reasoning and code generation |
+| `browser` | `smart` | Multi-step navigation with context-dependent decisions |
+| Most others | `fast` is fine | Follow clear script → parse output → return result |
+
+Example config for mixed model sizes:
+
+```yaml
+agents:
+  default: fast
+  skill_runner: fast          # default for all skills
+  skills:
+    skill-creator: smart      # override: needs a capable model
+    browser: smart
+    searxng: fast
+```
 
 ## Skill configuration
 

@@ -6,6 +6,7 @@ Provides a factory for creating ChatAgents per user session.
 
 import logging
 import os
+import threading
 from typing import Any, Callable, Dict, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -46,49 +47,60 @@ class App:
         self.tools = ToolRegistry()
         self.tools.register(BashTool())
 
-        # Skills — built-in (already installed+compiled during Docker build)
+        # Skills — bundled (shared across all users, read-only)
         skills_dir = os.path.join(pkg_dir, "skills")
         require_workflow = config.get("workflow", {}).get("require_compiled", False)
-        self.skills: Dict[str, AgentSkill] = SkillLoader.discover(
+        self._bundled_skills: Dict[str, AgentSkill] = SkillLoader.discover(
             skills_dir, config, require_workflow=require_workflow,
         )
+        self._skills_lock = threading.Lock()
 
-        # Also discover skills placed in any session workspace
-        self._refresh_workspace_skills()
-
-        if self.skills:
-            self.logger.info("Loaded skills: %s", ", ".join(self.skills.keys()))
+        if self._bundled_skills:
+            self.logger.info("Loaded bundled skills: %s", ", ".join(self._bundled_skills.keys()))
         else:
-            self.logger.info("No skills loaded")
+            self.logger.info("No bundled skills loaded")
+
+        # Backwards-compatible accessor (used by test scripts)
+        self.skills = self._bundled_skills
 
         # Scheduler for proactive reminders / event notifications
         self.scheduler = Scheduler(self.session_dir, config=self.config)
         self.scheduler.set_app(self)
         self.scheduler.set_llm_formatter(self._format_notification)
 
-    def _refresh_workspace_skills(self) -> None:
-        """Re-discover workspace skills and merge into self.skills.
+    def _discover_user_workspace_skills(self, user_id: str) -> Dict[str, AgentSkill]:
+        """Discover workspace skills for a single user.
 
-        Called at startup and again every time make_agent() creates a new
-        ChatAgent so that skills created during runtime become available
-        without restarting the App.
+        Returns only the skills from ``session/<user_id>/workspace/skills/``.
+        Thread-safe via ``_skills_lock``.
         """
         allow_workspace = self.config.get("skill-install", {}).get("allow_workspace", False)
         if not allow_workspace or not os.path.isdir(self.session_dir):
-            return
+            return {}
+
+        workspace_dir = os.path.join(self.session_dir, user_id, "workspace")
+        workspace_skills_dir = os.path.join(workspace_dir, "skills")
+        if not os.path.isdir(workspace_skills_dir):
+            return {}
 
         require_workflow = self.config.get("workflow", {}).get("require_compiled", False)
 
-        for user_entry in os.listdir(self.session_dir):
-            workspace_dir = os.path.join(self.session_dir, user_entry, "workspace")
-            workspace_skills_dir = os.path.join(workspace_dir, "skills")
-            if os.path.isdir(workspace_skills_dir):
-                workspace_skills = SkillLoader.discover(
-                    workspace_skills_dir, self.config,
-                    workspace_dir=workspace_dir,
-                    require_workflow=require_workflow,
-                )
-                self.skills.update(workspace_skills)
+        with self._skills_lock:
+            return SkillLoader.discover(
+                workspace_skills_dir, self.config,
+                workspace_dir=workspace_dir,
+                require_workflow=require_workflow,
+            )
+
+    def _build_user_skills(self, user_id: str) -> Dict[str, AgentSkill]:
+        """Return bundled skills + this user's workspace skills.
+
+        Each user gets their own copy so workspace skills are isolated.
+        """
+        skills = dict(self._bundled_skills)
+        user_skills = self._discover_user_workspace_skills(user_id)
+        skills.update(user_skills)
+        return skills
 
     async def _format_notification(self, user_id: str, raw_message: str) -> str:
         """Pass a raw notification through the LLM for personalized delivery.
@@ -117,12 +129,13 @@ class App:
         """Create a new ChatAgent for a user session.
 
         Each agent gets its own SkillRunner factory bound to the user context.
+        Skills are scoped per user: bundled skills + this user's workspace skills.
         Extra kwargs are forwarded to ChatAgent (e.g. on_interim).
         """
-        # Pick up workspace skills created since startup (e.g. by skill-creator)
-        self._refresh_workspace_skills()
-
         session = self.memory.load_session(user_id)
+
+        # Build per-user skill set (bundled + user's own workspace skills)
+        user_skills = self._build_user_skills(user_id)
 
         # Resolve LLMs – honour per-session model override
         if session.model_override:
@@ -148,9 +161,15 @@ class App:
                 },
             )
 
+        def refresh_user_skills() -> None:
+            """Re-discover this user's workspace skills and update the agent's dict."""
+            fresh = self._build_user_skills(user_id)
+            user_skills.clear()
+            user_skills.update(fresh)
+
         agent = ChatAgent(
             llm=chat_llm,
-            skills=self.skills,
+            skills=user_skills,
             skill_runner_factory=make_runner,
             logger=self.logger.getChild(f"chat.{user_id}"),
             memory=self.memory,
@@ -164,13 +183,15 @@ class App:
         agent._fallback_resolver = self.llm.get
         # Resolve config keys (e.g. "fast") to actual model names
         agent._model_name_resolver = self.llm.resolve_model_name
-        # Let the ChatAgent re-discover workspace skills after each skill call
-        agent._skills_refresher = self._refresh_workspace_skills
+        # Let the ChatAgent re-discover this user's workspace skills after each skill call
+        agent._skills_refresher = refresh_user_skills
         return agent
 
 
 def create_app(config_path: Optional[str] = None,
                logger: Optional[logging.Logger] = None) -> App:
     """Load config and create an App instance."""
+    from pawlia.config import resolve_config_path
+    config_path = config_path or resolve_config_path()
     config = load_config(config_path)
     return App(config, logger=logger, config_path=config_path)

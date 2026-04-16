@@ -36,12 +36,32 @@ class BashTool(Tool):
                 break
         return normalized
 
+    @staticmethod
+    def _validate_cwd(cwd: Optional[str], context: Optional[Dict[str, Any]]) -> Optional[str]:
+        """Ensure cwd stays within session_dir or project tree."""
+        if not cwd:
+            return cwd
+        real_cwd = os.path.realpath(cwd)
+        # __file__ is pawlia/tools/bash.py → go up 3 levels to project root
+        pkg_dir = os.path.realpath(
+            os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(__file__))))
+        )
+        allowed = [pkg_dir]
+        if context and context.get("session_dir"):
+            allowed.append(os.path.realpath(context["session_dir"]))
+        if any(real_cwd.startswith(base + os.sep) or real_cwd == base
+               for base in allowed):
+            return cwd
+        return None
+
     def execute(self, args: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Any:
         cmd = args.get("command", "")
         if not cmd:
             return "Error: No command provided."
 
         cwd = context.get("cwd") if context else None
+        cwd = self._validate_cwd(cwd, context)
 
         timeout = context.get("timeout", 120) if context else 120
 

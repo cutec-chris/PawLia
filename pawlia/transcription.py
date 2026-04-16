@@ -176,15 +176,19 @@ async def transcribe_via_model(
 
 
 def _ensure_model_audio_format(audio_bytes: bytes, mime: str) -> Tuple[bytes, str]:
-    """Convert compressed audio to WAV for model-native transcription when possible.
+    """Convert audio to 16 kHz mono WAV for model-native transcription.
 
-    Many native-audio model endpoints handle WAV reliably, while OGG/Opus/WebM
-    support can vary. If conversion fails, return original bytes.
+    Ollama native-audio models require 16 kHz mono WAV with a RIFF header.
+    All input formats (including WAV at other sample rates) are converted
+    via ffmpeg.  If conversion fails, return original bytes.
     """
-    if mime in {"audio/wav", "audio/x-wav"}:
+    # Check if already 16 kHz mono WAV — skip conversion
+    if mime in {"audio/wav", "audio/x-wav"} and _is_16khz_mono_wav(audio_bytes):
         return audio_bytes, "audio/wav"
 
     in_ext = _mime_to_ext(mime)
+    if mime in {"audio/wav", "audio/x-wav"}:
+        in_ext = "wav"
 
     tmp_in = tempfile.NamedTemporaryFile(suffix=f".{in_ext}", delete=False)
     tmp_out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -241,6 +245,9 @@ def _ensure_model_audio_format(audio_bytes: bytes, mime: str) -> Tuple[bytes, st
                 pass
 
 
+_MODEL_AUDIO_RATE = 16000  # Ollama native-audio models expect 16 kHz mono WAV
+
+
 async def transcribe_pcm_via_model(
     pcm_float32: "np.ndarray",
     sample_rate: int,
@@ -250,7 +257,8 @@ async def transcribe_pcm_via_model(
 ) -> Optional[str]:
     """Transcribe raw float32 PCM via a native-audio model.
 
-    Wraps PCM in WAV and delegates to :func:`transcribe_via_model`.
+    Resamples to 16 kHz mono (required by Ollama native-audio models),
+    wraps in WAV, and delegates to :func:`transcribe_via_model`.
     """
     import io
     import wave
@@ -258,6 +266,17 @@ async def transcribe_pcm_via_model(
     import numpy as np
 
     pcm_float32 = _bandpass_pcm(pcm_float32, sample_rate)
+
+    # Resample to 16 kHz if needed — Ollama audio models require it
+    if sample_rate != _MODEL_AUDIO_RATE:
+        num_samples = int(len(pcm_float32) * _MODEL_AUDIO_RATE / sample_rate)
+        pcm_float32 = np.interp(
+            np.linspace(0, len(pcm_float32), num_samples, endpoint=False),
+            np.arange(len(pcm_float32)),
+            pcm_float32,
+        ).astype(np.float32)
+        sample_rate = _MODEL_AUDIO_RATE
+
     pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)
 
     buf = io.BytesIO()
@@ -345,6 +364,19 @@ async def _transcribe_local(audio_bytes: bytes, cfg: Dict, mime: str) -> Optiona
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _is_16khz_mono_wav(data: bytes) -> bool:
+    """Return True if *data* is a WAV file at 16 kHz, mono, 16-bit."""
+    import struct
+
+    if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return False
+    try:
+        channels, sample_rate, _, _, bits_per_sample = struct.unpack_from("<HHIIH", data, 22)
+        return channels == 1 and sample_rate == 16000 and bits_per_sample == 16
+    except struct.error:
+        return False
+
 
 def _mime_to_ext(mime: str) -> str:
     return {

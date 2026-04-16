@@ -271,11 +271,11 @@ class Scheduler:
     async def _loop(self) -> None:
         try:
             while True:
-                await asyncio.sleep(CHECK_INTERVAL)
                 try:
                     await self._check_all()
                 except Exception as e:
                     logger.error("Scheduler check failed: %s", e)
+                await asyncio.sleep(CHECK_INTERVAL)
         except asyncio.CancelledError:
             pass
 

@@ -138,26 +138,8 @@ def ensure_dir(path: str) -> str:
 def resolve_script(session_dir: str, user_id: str, script: str) -> str:
     """Resolve a script name to an absolute path.
 
-    Search order:
-    1. User automations dir: session/<user_id>/automations/<script>
-    2. Global scripts dir:   <project>/scripts/<script>
-    3. Skill scripts dirs:   <project>/skills/*/scripts/<script>
-    4. Fallback: return *script* unchanged.
+    Automation scripts are restricted to the user's automations directory:
+      session/<user_id>/automations/<script>
     """
     user_path = os.path.join(session_dir, user_id, "automations", script)
-    if os.path.isfile(user_path):
-        return user_path
-
-    pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    global_path = os.path.join(pkg_dir, "scripts", script)
-    if os.path.isfile(global_path):
-        return global_path
-
-    skills_path = os.path.join(pkg_dir, "skills")
-    if os.path.isdir(skills_path):
-        for skill_dir in os.listdir(skills_path):
-            candidate = os.path.join(skills_path, skill_dir, "scripts", script)
-            if os.path.isfile(candidate):
-                return candidate
-
-    return script
+    return user_path

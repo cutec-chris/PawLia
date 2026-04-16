@@ -6,12 +6,8 @@ from typing import Any, Dict, Optional
 import yaml
 
 
-def load_config(path: Optional[str] = None) -> Dict[str, Any]:
-    """Load config from the given path, CWD, or project root.
-
-    Looks for config.yaml / config.yml.
-    Returns an empty dict if no config file is found.
-    """
+def resolve_config_path(path: Optional[str] = None) -> Optional[str]:
+    """Find the config file path without loading it."""
     candidates = []
     if path:
         candidates.append(path)
@@ -22,7 +18,18 @@ def load_config(path: Optional[str] = None) -> Dict[str, Any]:
 
     for candidate in candidates:
         if os.path.isfile(candidate):
-            with open(candidate, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+            return candidate
+    return None
 
+
+def load_config(path: Optional[str] = None) -> Dict[str, Any]:
+    """Load config from the given path, CWD, or project root.
+
+    Looks for config.yaml / config.yml.
+    Returns an empty dict if no config file is found.
+    """
+    resolved = resolve_config_path(path)
+    if resolved:
+        with open(resolved, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
     return {}
