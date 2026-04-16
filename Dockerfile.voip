@@ -10,7 +10,8 @@ RUN apk add --no-cache \
         python3-dev \
         openssl-dev \
         libffi-dev \
-        crc32c-dev
+        crc32c-dev \
+        olm-dev
 
 COPY requirements.txt requirements-voip.txt ./
 RUN pip install --no-cache-dir --prefix=/install \
@@ -38,6 +39,7 @@ RUN apk add --no-cache \
         libffi \
         libstdc++ \
         crc32c \
+        olm \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 

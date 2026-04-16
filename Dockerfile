@@ -4,9 +4,11 @@ WORKDIR /app
 
 # System dependencies:
 #   nodejs/npm  — AgentSkills
+#   libolm-dev  — E2EE for Matrix (python-olm)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs \
         npm \
+        libolm-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Base Python dependencies

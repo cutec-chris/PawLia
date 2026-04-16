@@ -181,14 +181,24 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     store_path = os.path.join(app.session_dir, "nio_store")
     os.makedirs(store_path, exist_ok=True)
 
-    client = AsyncClient(homeserver, user_id, store_path=store_path)
+    # Try to use SqliteStore for E2EE; fall back to plain client if deps missing
+    try:
+        from nio import ClientConfig
+        from nio.store import SqliteStore
+        client_config = ClientConfig(store=SqliteStore, store_name="")
+        client = AsyncClient(homeserver, user_id, store_path=store_path, config=client_config)
+        e2ee = True
+    except ImportError:
+        logger.warning("Matrix: E2EE unavailable (install matrix-nio[e2e])")
+        client = AsyncClient(homeserver, user_id)
+        e2ee = False
 
     # Authenticate
     if access_token:
         client.access_token = access_token
         client.user_id = user_id
-        # Load persisted Olm state for E2EE
-        client.load_store()
+        if e2ee:
+            client.load_store()
         logger.info("Matrix: using access_token for %s", user_id)
     elif password:
         resp = await client.login(password, device_name="PawLia")
@@ -203,13 +213,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         await client.close()
         return
 
-    # Upload encryption keys if we haven't yet
-    if client.should_upload_keys:
-        await client.keys_upload()
-        logger.info("Matrix: E2EE keys uploaded")
-
-    # Trust all devices automatically so we can decrypt messages
-    client.store.blacklist_on_unverified = False
+    # E2EE setup
+    if e2ee:
+        if client.should_upload_keys:
+            await client.keys_upload()
+            logger.info("Matrix: E2EE keys uploaded")
+        # Trust all devices automatically so we can decrypt messages
+        if client.store:
+            client.store.blacklist_on_unverified = False
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
