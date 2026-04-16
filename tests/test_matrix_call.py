@@ -184,7 +184,7 @@ def test_should_transcribe_chunk_accepts_sustained_speech():
         send_cb=AsyncMock(),
     )
 
-    levels = [0.0] * 25 + [0.035] * 12 + [0.028] * 6 + [0.0] * 37
+    levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
     pcm = _make_pcm_from_frame_levels(levels)
 
     assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
