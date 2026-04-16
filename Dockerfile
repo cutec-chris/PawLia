@@ -10,6 +10,8 @@ RUN apk add --no-cache \
         libffi-dev \
         olm-dev
 
+ENV PYTHON_OLM_USE_SYSTEM_LIB=1
+
 COPY requirements.txt ./
 # python-olm must link against system libolm; needs --no-build-isolation
 # so the env var reaches olm_build.py inside pip's subprocess.
