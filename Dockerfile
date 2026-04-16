@@ -12,7 +12,7 @@ RUN apk add --no-cache \
 
 # Build python-olm against system libolm first (needs --no-build-isolation
 # so PYTHON_OLM_USE_SYSTEM_LIB reaches the cffi build script)
-RUN pip install --no-cache-dir cffi \
+RUN pip install --no-cache-dir cffi setuptools \
     && PYTHON_OLM_USE_SYSTEM_LIB=1 pip install --no-cache-dir --no-build-isolation python-olm
 
 COPY requirements.txt ./
