@@ -8,19 +8,10 @@ RUN apk add --no-cache \
         python3-dev \
         openssl-dev \
         libffi-dev \
-        olm-dev
-
-ENV PYTHON_OLM_USE_SYSTEM_LIB=1
+        py3-olm-pyc
 
 COPY requirements.txt ./
-# python-olm must link against system libolm; needs --no-build-isolation
-# so the env var reaches olm_build.py inside pip's subprocess.
-# setuptools is required for building python-olm from source (not bundled in Python 3.13+).
-RUN pip install --no-cache-dir setuptools \
-    && pip install --no-cache-dir --prefix=/install cffi \
-    && PYTHON_OLM_USE_SYSTEM_LIB=1 \
-       pip install --no-cache-dir --no-build-isolation --prefix=/install python-olm \
-    && pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
@@ -34,7 +25,7 @@ RUN apk add --no-cache \
         npm \
         openssl \
         libffi \
-        olm
+        py3-olm-pyc
 
 WORKDIR /app
 
