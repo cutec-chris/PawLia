@@ -10,12 +10,22 @@ RUN apk add --no-cache \
         python3-dev \
         openssl-dev \
         libffi-dev \
-        crc32c-dev
+        crc32c-dev \
+        olm-dev
+
+# Build python-olm against system libolm first (needs --no-build-isolation
+# so PYTHON_OLM_USE_SYSTEM_LIB reaches the cffi build script)
+RUN pip install --no-cache-dir cffi \
+    && PYTHON_OLM_USE_SYSTEM_LIB=1 pip install --no-cache-dir --no-build-isolation python-olm
 
 COPY requirements.txt requirements-voip.txt ./
 RUN pip install --no-cache-dir --prefix=/install \
         -r requirements.txt \
         -r requirements-voip.txt
+# Copy the already-built python-olm into /install so it's available at runtime
+RUN cp -r /usr/local/lib/python3.13/site-packages/_libolm* \
+          /usr/local/lib/python3.13/site-packages/olm \
+          /install/lib/python3.13/site-packages/ 2>/dev/null || true
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
@@ -38,7 +48,7 @@ RUN apk add --no-cache \
         libffi \
         libstdc++ \
         crc32c \
-        py3-olm-pyc \
+        olm \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
@@ -53,7 +63,7 @@ COPY skills/ skills/
 RUN mkdir -p skills/user
 
 # Install deps + compile workflows for all pre-bundled skills
-RUN python -m pawlia.install_skill_deps
+RUN python -m pawlia.install_skill_deps --no-compile
 
 # Default voice model: German Kerstin low (~63 MB, 16 kHz)
 RUN mkdir -p /app/piper && \
