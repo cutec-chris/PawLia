@@ -8,11 +8,11 @@ RUN apk add --no-cache \
         python3-dev \
         openssl-dev \
         libffi-dev \
-        olm-dev \
-        cmake \
-        make
+        olm-dev
 
 COPY requirements.txt ./
+# Tell python-olm to link against the system libolm instead of building its own
+ENV PYTHON_OLM_USE_SYSTEM_LIB=1
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
