@@ -252,7 +252,7 @@ class CallSession:
     AGC_MAX_GAIN = 10.0           # don't amplify more than this
     AGC_SMOOTHING = 0.05          # EMA alpha for gain updates (lower = smoother)
     # Barge-in: interrupt TTS when user speaks loudly enough
-    BARGEIN_RMS_THRESHOLD = 0.08  # raw RMS to trigger barge-in during TTS
+    BARGEIN_RMS_THRESHOLD = 0.05  # raw RMS to trigger barge-in during TTS
 
     def __init__(
         self,

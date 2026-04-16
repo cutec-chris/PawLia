@@ -78,7 +78,7 @@ interfaces:
 #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
 #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
-#   bargein_rms_threshold: 0.08       # raw RMS to interrupt TTS playback
+#   bargein_rms_threshold: 0.05       # raw RMS to interrupt TTS playback
 
 # Speech-to-text transcription (voice messages + VoIP calls).
 # Any OpenAI-compatible /audio/transcriptions endpoint works.
