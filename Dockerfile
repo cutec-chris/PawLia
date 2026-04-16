@@ -1,25 +1,42 @@
-FROM python:3.13-slim
+# ── Stage 1: build ────────────────────────────────────────────────────────
+FROM python:3.13-alpine AS builder
+
+RUN apk add --no-cache \
+        gcc \
+        g++ \
+        musl-dev \
+        python3-dev \
+        openssl-dev \
+        libffi-dev \
+        olm-dev \
+        cmake \
+        make
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+
+# ── Stage 2: runtime ──────────────────────────────────────────────────────
+FROM python:3.13-alpine
+
+# Runtime system deps:
+#   nodejs/npm  — AgentSkills
+#   olm         — E2EE for Matrix
+RUN apk add --no-cache \
+        nodejs \
+        npm \
+        openssl \
+        libffi \
+        olm
 
 WORKDIR /app
 
-# System dependencies:
-#   nodejs/npm  — AgentSkills
-#   libolm-dev  — E2EE for Matrix (python-olm)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        nodejs \
-        npm \
-        libolm-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Copy compiled Python packages from builder
+COPY --from=builder /install /usr/local
 
-# Base Python dependencies
-COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code and built-in assets
+# Application code
 COPY pawlia/ pawlia/
 COPY skills/ skills/
-
-# Ensure user skills directory exists (may be empty if gitignored)
 RUN mkdir -p skills/user
 
 # Install deps + compile workflows for all pre-bundled skills

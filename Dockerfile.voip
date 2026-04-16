@@ -11,7 +11,9 @@ RUN apk add --no-cache \
         openssl-dev \
         libffi-dev \
         crc32c-dev \
-        olm-dev
+        olm-dev \
+        cmake \
+        make
 
 COPY requirements.txt requirements-voip.txt ./
 RUN pip install --no-cache-dir --prefix=/install \
