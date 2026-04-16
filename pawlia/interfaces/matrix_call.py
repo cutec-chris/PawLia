@@ -98,6 +98,15 @@ if _AIORTC_AVAILABLE:
             """Stop hold audio playback."""
             self._hold_active = False
 
+        def interrupt(self) -> None:
+            """Barge-in: clear all queued TTS audio and stop hold."""
+            while not self._queue.empty():
+                try:
+                    self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+            self._hold_active = False
+
         async def recv(self):  # noqa: D401
             from av import AudioFrame  # type: ignore
 
@@ -225,18 +234,25 @@ def _parse_sdp_candidates(sdp: str) -> List[Dict]:
 class CallSession:
     """Manages a single active VoIP call."""
 
-    # Silence detection: RMS below this → silence
-    SILENCE_THRESHOLD = 0.05
+    # Silence detection: RMS below this (after AGC) → silence
+    SILENCE_THRESHOLD = 0.02
     # Seconds of silence that end a speech chunk
-    SILENCE_SECONDS = 2.5
+    SILENCE_SECONDS = 2.2
     # Minimum seconds of speech before we transcribe (filter short noise bursts)
-    MIN_SPEECH_SECONDS = 0.6
+    MIN_SPEECH_SECONDS = 0.4
     # Chunk-level guard: require enough active speech frames before STT
-    MIN_ACTIVE_SPEECH_RATIO = 0.30
-    MIN_CONSECUTIVE_SPEECH_FRAMES = 15
+    MIN_ACTIVE_SPEECH_RATIO = 0.12
+    MIN_CONSECUTIVE_SPEECH_FRAMES = 8
     # End calls when no speech chunk has been sent to STT for too long.
     CALL_INACTIVITY_SECONDS = 180
     WATCHDOG_POLL_SECONDS = 5.0
+    # AGC: boost gain in windows where we expect the user to speak
+    AGC_WINDOW_SECONDS = 8.0      # how long the AGC stays active
+    AGC_TARGET_RMS = 0.08         # target RMS level for normalization
+    AGC_MAX_GAIN = 10.0           # don't amplify more than this
+    AGC_SMOOTHING = 0.05          # EMA alpha for gain updates (lower = smoother)
+    # Barge-in: interrupt TTS when user speaks loudly enough
+    BARGEIN_RMS_THRESHOLD = 0.08  # raw RMS to trigger barge-in during TTS
 
     def __init__(
         self,
@@ -267,11 +283,41 @@ class CallSession:
         self._speaking = False
         self._ice_reconnect_task: Optional[asyncio.Task] = None
         self._last_activity_at = time.monotonic()
+        # AGC state
+        self._agc_until: float = 0.0   # monotonic timestamp; AGC active while now < this
+        self._agc_gain: float = 1.0    # current smoothed gain factor
         self._load_voip_audio_config()
 
     def _mark_activity(self) -> None:
         """Record user or bot activity to keep the call alive."""
         self._last_activity_at = time.monotonic()
+
+    def _activate_agc(self) -> None:
+        """Open an AGC window for the next AGC_WINDOW_SECONDS."""
+        self._agc_until = time.monotonic() + self.AGC_WINDOW_SECONDS
+
+    @property
+    def _agc_active(self) -> bool:
+        return time.monotonic() < self._agc_until
+
+    def _agc_rms(self, raw_rms: float) -> float:
+        """Return the AGC-adjusted RMS for VAD decisions.
+
+        When the AGC window is inactive, returns raw_rms unchanged.
+        When active, tracks a smoothed gain factor that brings the signal
+        toward AGC_TARGET_RMS and returns ``raw_rms * gain``.
+        """
+        if not self._agc_active:
+            self._agc_gain = 1.0
+            return raw_rms
+
+        if raw_rms > 1e-6:
+            ideal_gain = self.AGC_TARGET_RMS / raw_rms
+            ideal_gain = min(ideal_gain, self.AGC_MAX_GAIN)
+            alpha = self.AGC_SMOOTHING
+            self._agc_gain = alpha * ideal_gain + (1 - alpha) * self._agc_gain
+
+        return raw_rms * self._agc_gain
 
     def _load_voip_audio_config(self) -> None:
         """Apply per-instance VAD/STT gating thresholds from shared VoIP config."""
@@ -317,6 +363,12 @@ class CallSession:
             "call_inactivity_seconds",
             self.CALL_INACTIVITY_SECONDS,
             minimum=1,
+        )
+        self.BARGEIN_RMS_THRESHOLD = self._get_float_config(
+            voip_cfg,
+            "bargein_rms_threshold",
+            self.BARGEIN_RMS_THRESHOLD,
+            minimum=0.0,
         )
 
     def _get_float_config(
@@ -592,6 +644,7 @@ class CallSession:
             )
             await self._send_cb(response)
             self._mark_activity()
+            self._activate_agc()
             logger.info("call %s: greeting sent", self.call_id[:8])
         except Exception as e:
             logger.warning("call %s: greeting failed: %s", self.call_id[:8], e)
@@ -635,6 +688,9 @@ class CallSession:
 
         framed = pcm[:usable].reshape(-1, frame_size)
         frame_rms = np.sqrt(np.mean(framed ** 2, axis=1))
+        # Apply current AGC gain so chunk analysis matches frame-level VAD
+        if self._agc_active:
+            frame_rms = frame_rms * self._agc_gain
         active_mask = frame_rms > self.SILENCE_THRESHOLD
 
         longest_run = 0
@@ -719,16 +775,26 @@ class CallSession:
                                  self.call_id[:8], frames_received, rms,
                                  len(speech_buffer), silence_count, h)
 
-                # Suppress echo: discard mic input while TTS is playing
+                # Barge-in: if TTS is playing, check for loud speech to interrupt
                 if self._tts_track and self._tts_track.is_playing:
-                    if speech_buffer:
-                        logger.debug("call %s: dropping speech buffer (TTS playing)",
-                                     self.call_id[:8])
-                        speech_buffer = []
+                    if rms >= self.BARGEIN_RMS_THRESHOLD:
+                        logger.info("call %s: barge-in detected (rms=%.4f), stopping TTS",
+                                    self.call_id[:8], rms)
+                        self._tts_track.interrupt()
+                        self._activate_agc()
+                        speech_buffer = [pcm]
                         silence_count = 0
+                    else:
+                        # TTS playing, no barge-in — discard
+                        if speech_buffer:
+                            speech_buffer = []
+                            silence_count = 0
                     continue
 
-                if rms > self.SILENCE_THRESHOLD:
+                # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
+                adjusted_rms = self._agc_rms(rms)
+
+                if adjusted_rms > self.SILENCE_THRESHOLD:
                     if not speech_buffer and silence_count == 0:
                         logger.info("call %s: speech started (rms=%.4f)",
                                     self.call_id[:8], rms)
@@ -881,6 +947,7 @@ class CallSession:
             typing_task.cancel()
             if self._tts_track:
                 self._tts_track.stop_hold()
+            self._activate_agc()
             try:
                 await self._client.room_typing(self.room_id, typing_state=False)
             except Exception:
@@ -1004,6 +1071,14 @@ class CallSession:
                 await self.hangup()
                 await self._send_hangup_event()
                 return
+
+            # Activate AGC when half the inactivity timeout has passed
+            # — the user might be speaking softly and we're not hearing them
+            half = self.CALL_INACTIVITY_SECONDS / 2
+            if idle_for >= half and not self._agc_active:
+                logger.info("call %s: half inactivity reached, activating AGC",
+                            self.call_id[:8])
+                self._activate_agc()
 
             try:
                 await asyncio.wait_for(
