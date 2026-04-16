@@ -7,7 +7,8 @@ langchain-ollama>=0.3
 langchain-openai>=0.3
 markdown>=3.5
 matrix-nio>=0.25
-# E2EE deps (usually via [e2e] extra, but python-olm comes from system pkg py3-olm-pyc)
+# E2EE deps (nio[e2e] extra split out — python-olm builds its own libolm via cmake)
+python-olm>=3.2
 peewee>=3.14
 cachetools>=5.3
 python-telegram-bot>=20.0
