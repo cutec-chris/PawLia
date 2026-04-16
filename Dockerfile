@@ -7,8 +7,7 @@ RUN apk add --no-cache \
         musl-dev \
         python3-dev \
         openssl-dev \
-        libffi-dev \
-        py3-olm-pyc
+        libffi-dev
 
 COPY requirements.txt ./
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt

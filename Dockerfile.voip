@@ -10,8 +10,7 @@ RUN apk add --no-cache \
         python3-dev \
         openssl-dev \
         libffi-dev \
-        crc32c-dev \
-        py3-olm-pyc
+        crc32c-dev
 
 COPY requirements.txt requirements-voip.txt ./
 RUN pip install --no-cache-dir --prefix=/install \
