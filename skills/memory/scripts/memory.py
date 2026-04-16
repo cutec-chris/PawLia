@@ -159,7 +159,8 @@ async def cmd_lint(user_id: str):
 
 async def cmd_status(user_id: str):
     backend = CFG.get("rag_backend", "markdown")
-    tracker_path = _SESSION_DIR / user_id / "memory_index" / f"indexed_files_{backend}.json"
+    wiki_dir = _SESSION_DIR / user_id / CFG.get("wiki_dir", os.path.join("workspace", "wiki"))
+    tracker_path = wiki_dir / f".indexed_files_{backend}.json"
     indexed = {}
     if tracker_path.exists():
         indexed = json.loads(tracker_path.read_text(encoding="utf-8"))

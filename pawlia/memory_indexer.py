@@ -81,11 +81,17 @@ class MemoryIndexer:
     # Tracking
     # ------------------------------------------------------------------
 
+    def _wiki_dir(self, user_id: str) -> str:
+        return os.path.join(
+            self._session_dir, user_id,
+            self._cfg.get("wiki_dir", os.path.join("workspace", "wiki")),
+        )
+
     def _tracker_path(self, user_id: str) -> str:
-        d = os.path.join(self._session_dir, user_id, "memory_index")
+        d = self._wiki_dir(user_id)
         os.makedirs(d, exist_ok=True)
         backend = self._cfg.get("rag_backend", "markdown")
-        return os.path.join(d, f"indexed_files_{backend}.json")
+        return os.path.join(d, f".indexed_files_{backend}.json")
 
     def _load_tracked(self, user_id: str) -> dict:
         p = self._tracker_path(user_id)
