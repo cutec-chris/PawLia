@@ -111,17 +111,13 @@ Clear the override (falls back to global `tts.piper.model` / `tts.edge.voice`):
 python <scripts_dir>/config.py voice --off
 ```
 
-To use a voice not in the curated list (e.g. an `en-US-...` Edge voice that the dynamic listing didn't return), append `--force`:
-
-```
-python <scripts_dir>/config.py voice --name en-US-AriaNeural --force
-```
-
 **How `available_voices` is discovered:**
-- Piper: glob `/app/piper/*.onnx` (the voices baked into the VoIP image).
-- Edge: `edge_tts.list_voices()` (full Microsoft catalog).
+- Piper: glob `/app/piper/*.onnx` (the voice files baked into the VoIP image). **This list is authoritative** — a voice not listed does not exist on disk. Setting a non-listed Piper voice is always rejected, even with `--force`, because Piper would immediately crash with "Model file doesn't exist" and break TTS. If a user asks for a Piper voice that isn't available, tell them so and offer one from the list; never try to force it.
+- Edge: `edge_tts.list_voices()` (full Microsoft catalog). If the dynamic listing is unreachable (`edge_tts` not installed / no internet) the list may be empty — only then may `--force` be used to write a voice name the user explicitly asked for:
 
-If the list comes back empty (Piper dir missing on a dev host, `edge_tts` not installed), every name is rejected — use `--force` to write anyway.
+  ```
+  python <scripts_dir>/config.py voice --name en-US-AriaNeural --force
+  ```
 
 ## Private mode
 

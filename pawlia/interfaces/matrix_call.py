@@ -279,6 +279,7 @@ class CallSession:
         self._tts_track: Optional["_TTSAudioTrack"] = None
         self._agent = agent
         self._done = asyncio.Event()
+        self._hungup = False
         self._pending_candidates: List[Dict] = []
         self._speaking = False
         self._ice_reconnect_task: Optional[asyncio.Task] = None
@@ -668,7 +669,16 @@ class CallSession:
                 self._pending_candidates.append(c)
 
     async def hangup(self) -> None:
-        """Terminate the call."""
+        """Terminate the call. Idempotent: safe to call multiple times.
+
+        The watchdog and the remote peer can both trigger a hangup for the same
+        call; without this guard `pc.close()` runs twice and aioice leaks TURN
+        CHANNEL_BIND tasks that then flood the log with `socket.send()`
+        exceptions (seen 2026-04-17 around the pi hang).
+        """
+        if self._hungup:
+            return
+        self._hungup = True
         self._done.set()
         if self._pc:
             await self._pc.close()

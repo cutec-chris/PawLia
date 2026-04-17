@@ -225,15 +225,23 @@ def cmd_voice(args) -> None:
         })
         return
 
-    if not args.force and args.name not in available:
-        _out({
-            "success": False,
-            "error": f"Unknown voice '{args.name}' for provider '{provider}'. "
-                     f"Use --force to override or pick from available_voices.",
-            "provider": provider,
-            "available_voices": available,
-        })
-        return
+    if args.name not in available:
+        # For Piper the list is authoritative — it globs the on-disk .onnx files,
+        # so a voice not in the list does not exist and --force cannot conjure it.
+        # For Edge the dynamic list may be incomplete, so --force is allowed there.
+        if provider == "piper" or not args.force:
+            _out({
+                "success": False,
+                "error": (
+                    f"Unknown voice '{args.name}' for provider '{provider}'. "
+                    + ("Pick from available_voices — the Piper list is the on-disk model files."
+                       if provider == "piper"
+                       else "Pick from available_voices or use --force for Edge voices not in the dynamic list.")
+                ),
+                "provider": provider,
+                "available_voices": available,
+            })
+            return
 
     os.makedirs(os.path.dirname(override_path), exist_ok=True)
     with open(override_path, "w", encoding="utf-8") as f:
@@ -273,18 +281,26 @@ def cmd_set(args) -> None:
     value = _coerce(args.value)
 
     # Validate TTS voice/model writes — wrong values silently break TTS.
-    if args.path in _TTS_VOICE_PATHS and not args.force:
+    # Piper: the list is authoritative (on-disk .onnx files), --force can't
+    # conjure a missing file. Edge: --force allowed because the dynamic list
+    # may be incomplete when edge_tts isn't installed.
+    if args.path in _TTS_VOICE_PATHS:
         provider = _TTS_VOICE_PATHS[args.path]
         available = _voices_for_provider(provider)
         if value not in available:
-            _out({
-                "success": False,
-                "error": f"'{value}' is not a known {provider} voice. "
-                         f"Use --force to override or pick from available_voices.",
-                "provider": provider,
-                "available_voices": available,
-            })
-            return
+            if provider == "piper" or not args.force:
+                _out({
+                    "success": False,
+                    "error": (
+                        f"'{value}' is not a known {provider} voice. "
+                        + ("Pick from available_voices — the Piper list is the on-disk model files."
+                           if provider == "piper"
+                           else "Pick from available_voices or use --force for Edge voices not in the dynamic list.")
+                    ),
+                    "provider": provider,
+                    "available_voices": available,
+                })
+                return
 
     # Validate provider switch — only piper/edge are wired up.
     if args.path == "tts.provider" and not args.force and value not in ("piper", "edge"):
