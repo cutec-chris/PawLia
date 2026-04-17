@@ -40,6 +40,7 @@ from nio import (
     RoomMessageAudio,
     RoomMessageImage,
     RoomMessageText,
+    SyncResponse,
 )
 
 if TYPE_CHECKING:
@@ -265,6 +266,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 room_id=room_id,
                 message_type="m.room.message",
                 content=_make_content(text),
+                ignore_unverified_devices=True,
             )
         except Exception as e:
             logger.error("Matrix: send_text failed for %s: %s", room_id, e)
@@ -283,6 +285,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 room_id=room_id,
                 message_type="m.room.message",
                 content=content,
+                ignore_unverified_devices=True,
             )
             _remember_thread_event(getattr(resp, "event_id", None), root_event_id)
         except Exception as e:
@@ -425,6 +428,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     room_id=room.room_id,
                     message_type="m.room.message",
                     content=content,
+                    ignore_unverified_devices=True,
                 )
                 status_event_id = getattr(resp, "event_id", None)
                 _remember_thread_event(status_event_id, thread_id)
@@ -437,6 +441,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                         room_id=room.room_id,
                         message_type="m.room.message",
                         content=_make_status_step(status_event_id, current_skill, step_count, step_text),
+                        ignore_unverified_devices=True,
                     )
 
             async def _on_skill_done(skill_name: str) -> None:
@@ -445,6 +450,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                         room_id=room.room_id,
                         message_type="m.room.message",
                         content=_make_status_done(status_event_id, skill_name, step_count),
+                        ignore_unverified_devices=True,
                     )
 
             agent.on_interim = _on_interim
@@ -665,6 +671,27 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             room.room_id, event.sender, event.session_id,
         )
 
+    def _trust_allowed_devices() -> int:
+        """TOFU: auto-verify every device of users in allowed_users.
+
+        Trust anchor is the ``allowed_users`` config (set via the pairing
+        flow or explicitly).  Any device belonging to those users gets
+        verified so we can send encrypted messages to them.  Returns the
+        number of devices newly verified in this pass.
+        """
+        if not client.device_store:
+            return 0
+        trust_users = allowed_users or []
+        if not trust_users:
+            return 0
+        verified = 0
+        for user in trust_users:
+            for device in client.device_store.active_user_devices(user):
+                if not device.verified:
+                    client.verify_device(device)
+                    verified += 1
+        return verified
+
     # ------------------------------------------------------------------
     # Scheduler callback for proactive notifications
     # ------------------------------------------------------------------
@@ -705,6 +732,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                         await client.keys_query()
                         logger.info("Matrix: E2EE keys queried for %d joined rooms", len(client.rooms))
                         break
+            verified = _trust_allowed_devices()
+            if verified:
+                logger.info("Matrix: auto-verified %d device(s) from allowed_users", verified)
 
         client.add_event_callback(on_message, RoomMessageText)
         client.add_event_callback(on_image, RoomMessageImage)
@@ -714,6 +744,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         client.add_event_callback(on_call_hangup, CallHangupEvent)
         client.add_event_callback(on_invite, InviteMemberEvent)
         client.add_event_callback(on_megolm, MegolmEvent)
+
+        async def _on_sync(response: SyncResponse) -> None:
+            # Auto-verify any new devices of allowed users (TOFU)
+            verified = _trust_allowed_devices()
+            if verified:
+                logger.info("Matrix: auto-verified %d new device(s) from allowed_users", verified)
+
+        client.add_response_callback(_on_sync, SyncResponse)
 
         await client.sync_forever(timeout=30000)
     except asyncio.CancelledError:
