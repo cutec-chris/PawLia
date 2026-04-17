@@ -781,6 +781,11 @@ class ChatAgent(BaseAgent):
                         self.logger.info("Directive: model override set to '%s'", model)
                     if self.on_model_change:
                         self.on_model_change(model)
+            elif directive == "set_voice":
+                if self.memory and self.session:
+                    voice = obj.get("voice")
+                    self.memory.set_voice_override(self.session, voice)
+                    self.logger.info("Directive: voice override set to '%s'", voice)
             elif directive == "set_private":
                 if self.memory and self.session:
                     desired: bool = bool(obj.get("private", True))

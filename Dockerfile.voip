@@ -64,13 +64,16 @@ RUN mkdir -p skills/user
 # Install deps + compile workflows for all pre-bundled skills
 RUN python3 -m pawlia.install_skill_deps --no-compile
 
-# Default voice model: German Kerstin low (~63 MB, 16 kHz)
+# German Piper voices (low quality, 16 kHz, ~63 MB each → ~252 MB total)
 RUN mkdir -p /app/piper && \
-    wget -O /app/piper/de_DE-kerstin-low.onnx \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx" && \
-    wget -O /app/piper/de_DE-kerstin-low.onnx.json \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json" && \
-    test -s /app/piper/de_DE-kerstin-low.onnx || { echo "ERROR: voice model download failed"; exit 1; }
+    for voice in karlsson kerstin ramona thorsten; do \
+        wget -O "/app/piper/de_DE-${voice}-low.onnx" \
+            "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/${voice}/low/de_DE-${voice}-low.onnx" && \
+        wget -O "/app/piper/de_DE-${voice}-low.onnx.json" \
+            "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/${voice}/low/de_DE-${voice}-low.onnx.json" && \
+        test -s "/app/piper/de_DE-${voice}-low.onnx" \
+            || { echo "ERROR: voice download failed for ${voice}"; exit 1; } ; \
+    done
 
 
 # Session data lives in a volume

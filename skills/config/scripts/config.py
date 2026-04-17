@@ -151,6 +151,59 @@ def cmd_model(args) -> None:
     _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
 
 
+_AVAILABLE_PIPER_VOICES = [
+    "de_DE-karlsson-low",
+    "de_DE-kerstin-low",
+    "de_DE-ramona-low",
+    "de_DE-thorsten-low",
+]
+
+
+def cmd_voice(args) -> None:
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+
+    override_path = os.path.join(
+        session_dir, user_id, "workspace", "memory", "voice_override.txt",
+    )
+
+    if args.off:
+        if os.path.isfile(override_path):
+            os.remove(override_path)
+        _out({"__directive__": "set_voice", "voice": None})
+        _out({"success": True, "voice": "(default)", "message": "Voice-Override entfernt."})
+        return
+
+    if not args.name:
+        current = ""
+        if os.path.isfile(override_path):
+            with open(override_path, encoding="utf-8") as f:
+                current = f.read().strip()
+        _out({
+            "success": True,
+            "voice": current or "(default)",
+            "available_voices": _AVAILABLE_PIPER_VOICES,
+        })
+        return
+
+    if args.name not in _AVAILABLE_PIPER_VOICES:
+        _out({
+            "success": False,
+            "error": f"Unknown voice '{args.name}'",
+            "available_voices": _AVAILABLE_PIPER_VOICES,
+        })
+        return
+
+    os.makedirs(os.path.dirname(override_path), exist_ok=True)
+    with open(override_path, "w", encoding="utf-8") as f:
+        f.write(args.name)
+    _out({"__directive__": "set_voice", "voice": args.name})
+    _out({"success": True, "voice": args.name, "message": f"Voice auf '{args.name}' gesetzt."})
+
+
 def cmd_private(args) -> None:
     scope = f"Thread {args.thread}" if args.thread else "Session"
     private = not args.off
@@ -203,6 +256,12 @@ def main():
     p.add_argument("--user-id", default=None)
     p.add_argument("--session-dir", default=None)
 
+    p = sub.add_parser("voice")
+    p.add_argument("--name", default=None, help="Piper voice name, e.g. de_DE-thorsten-low")
+    p.add_argument("--off", action="store_true", help="Clear voice override")
+    p.add_argument("--user-id", default=None)
+    p.add_argument("--session-dir", default=None)
+
     p = sub.add_parser("private")
     p.add_argument("--thread", default=None, help="Thread ID (omit for session-level)")
     p.add_argument("--off", action="store_true", help="Disable private mode")
@@ -212,7 +271,10 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    dispatch = {"show": cmd_show, "get": cmd_get, "set": cmd_set, "model": cmd_model, "private": cmd_private}
+    dispatch = {
+        "show": cmd_show, "get": cmd_get, "set": cmd_set,
+        "model": cmd_model, "voice": cmd_voice, "private": cmd_private,
+    }
     try:
         dispatch[args.cmd](args)
     except Exception as e:

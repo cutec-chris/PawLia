@@ -20,13 +20,18 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger("pawlia.tts")
 
 
-async def synthesize(text: str, config: Dict[str, Any]) -> Optional[bytes]:
+async def synthesize(
+    text: str,
+    config: Dict[str, Any],
+    voice_override: Optional[str] = None,
+) -> Optional[bytes]:
     """Synthesize *text* to audio bytes using the configured provider.
 
     Returns MP3 bytes (edge) or raw PCM bytes (piper), or ``None`` if TTS
-    is not configured.
+    is not configured.  ``voice_override`` takes precedence over the
+    configured voice (piper model name or edge voice name).
     """
-    cfg = _effective_tts_cfg(config)
+    cfg = _effective_tts_cfg(config, voice_override=voice_override)
     if cfg is None:
         return None
 
@@ -48,6 +53,7 @@ async def synthesize_pcm(
     text: str,
     config: Dict[str, Any],
     sample_rate: int = 48000,
+    voice_override: Optional[str] = None,
 ) -> Optional["np.ndarray"]:
     """Synthesize *text* and return float32 mono PCM at *sample_rate* Hz.
 
@@ -56,11 +62,11 @@ async def synthesize_pcm(
     """
     import numpy as np
 
-    cfg = _effective_tts_cfg(config)
+    cfg = _effective_tts_cfg(config, voice_override=voice_override)
     if cfg is None:
         return None
 
-    audio_bytes = await synthesize(text, config)
+    audio_bytes = await synthesize(text, config, voice_override=voice_override)
     if audio_bytes is None:
         return None
 
@@ -71,24 +77,38 @@ _DEFAULT_PIPER_VOICE = "de_DE-kerstin-low"
 _PIPER_DOWNLOAD_DIR = "/app/piper"
 
 
-def _effective_tts_cfg(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _effective_tts_cfg(
+    config: Dict[str, Any],
+    voice_override: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """Return the effective TTS config dict, applying built-in defaults.
 
-    Returns ``None`` when TTS is not configured.
+    ``voice_override`` overrides the configured voice (piper model name
+    or edge voice name).  Returns ``None`` when TTS is not configured.
     """
     cfg = config.get("tts", {})
-    if cfg:
-        # Fill in default voice if provider is piper but model omitted
-        if cfg.get("provider") == "piper" and not cfg.get("piper", {}).get("model"):
-            cfg = dict(cfg)
-            cfg["piper"] = {"model": _DEFAULT_PIPER_VOICE, **cfg.get("piper", {})}
-        return cfg
+    if not cfg:
+        # No tts: section — default to piper with built-in voice
+        cfg = {"provider": "piper", "piper": {"model": _DEFAULT_PIPER_VOICE}}
 
-    # No tts: section — default to piper with built-in voice
-    return {
-        "provider": "piper",
-        "piper": {"model": _DEFAULT_PIPER_VOICE},
-    }
+    cfg = dict(cfg)
+    provider = cfg.get("provider", "piper")
+
+    if provider == "piper":
+        piper_cfg = dict(cfg.get("piper", {}))
+        if voice_override:
+            piper_cfg["model"] = voice_override
+            # Drop stale explicit config path so it's re-resolved from the name
+            piper_cfg.pop("config", None)
+        elif not piper_cfg.get("model"):
+            piper_cfg["model"] = _DEFAULT_PIPER_VOICE
+        cfg["piper"] = piper_cfg
+    elif provider == "edge" and voice_override:
+        edge_cfg = dict(cfg.get("edge", {}))
+        edge_cfg["voice"] = voice_override
+        cfg["edge"] = edge_cfg
+
+    return cfg
 
 
 def _decode_to_pcm(audio_bytes: bytes, cfg: Dict[str, Any], target_rate: int) -> "np.ndarray":

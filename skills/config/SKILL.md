@@ -83,6 +83,28 @@ python <scripts_dir>/config.py model --name qwen3.5:latest
 
 The model name must match a key in the `models` section of config.yaml.
 
+## Switch the TTS voice (per-user)
+
+Show the current voice and available Piper voices:
+
+```
+python <scripts_dir>/config.py voice
+```
+
+Set a voice (persists in `workspace/memory/voice_override.txt`):
+
+```
+python <scripts_dir>/config.py voice --name de_DE-thorsten-low
+```
+
+Clear the override (falls back to global `tts.piper.model`):
+
+```
+python <scripts_dir>/config.py voice --off
+```
+
+Available voices: `de_DE-karlsson-low`, `de_DE-kerstin-low`, `de_DE-ramona-low`, `de_DE-thorsten-low`.
+
 ## Private mode
 
 Enable private mode for the current session (messages won't be saved):

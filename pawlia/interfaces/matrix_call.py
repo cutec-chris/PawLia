@@ -319,6 +319,14 @@ class CallSession:
 
         return raw_rms * self._agc_gain
 
+    def _voice_override(self) -> Optional[str]:
+        """Return the user's persistent TTS voice override (if any)."""
+        try:
+            session = self._app.memory.load_session(f"mx_{self.room_id}")
+            return session.voice_override
+        except Exception:
+            return None
+
     def _load_voip_audio_config(self) -> None:
         """Apply per-instance VAD/STT gating thresholds from shared VoIP config."""
         app_cfg = self._app.config if isinstance(self._app.config, dict) else {}
@@ -625,6 +633,7 @@ class CallSession:
                 try:
                     tts_pcm = await synthesize_pcm(
                         sentence, self._app.config, sample_rate=48000,
+                        voice_override=self._voice_override(),
                     )
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info(
@@ -912,7 +921,10 @@ class CallSession:
                 if not self._tts_track:
                     return
                 try:
-                    tts_pcm = await synthesize_pcm(sentence, self._app.config, sample_rate=48000)
+                    tts_pcm = await synthesize_pcm(
+                        sentence, self._app.config, sample_rate=48000,
+                        voice_override=self._voice_override(),
+                    )
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info("call %s: TTS sentence (%d samples): %s",
                                     self.call_id[:8], len(tts_pcm), sentence[:60])
