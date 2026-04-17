@@ -1,7 +1,7 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────
 # Compiles Python packages that have no musllinux wheels (e.g. cryptography,
 # aiohttp) against Alpine musl so the runtime stage stays build-tool-free.
-FROM alpine:latest AS builder
+FROM alpine:3.21 AS builder
 
 RUN apk add --no-cache \
         python3 \
@@ -25,7 +25,7 @@ RUN /venv/bin/pip install --no-cache-dir \
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
-FROM alpine:latest
+FROM alpine:3.21
 
 # Runtime system deps:
 #   python3      — interpreter

@@ -1,5 +1,5 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────
-FROM alpine:latest AS builder
+FROM alpine:3.21 AS builder
 
 # System deps:
 #   python3 / py3-pip — runtime
@@ -24,7 +24,7 @@ RUN /venv/bin/pip install --no-cache-dir -r requirements.txt
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
-FROM alpine:latest
+FROM alpine:3.21
 
 # Runtime system deps:
 #   python3   — interpreter
