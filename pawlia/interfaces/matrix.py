@@ -676,12 +676,16 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
         Trust anchor is the ``allowed_users`` config (set via the pairing
         flow or explicitly).  Any device belonging to those users gets
-        verified so we can send encrypted messages to them.  Returns the
-        number of devices newly verified in this pass.
+        verified so we can send encrypted messages to them.  Our own other
+        sessions are always trusted — otherwise encrypted sends to rooms
+        where the bot has a second device fail with OlmUnverifiedDeviceError.
+        Returns the number of devices newly verified in this pass.
         """
         if not client.device_store:
             return 0
-        trust_users = allowed_users or []
+        trust_users = list(allowed_users or [])
+        if client.user_id and client.user_id not in trust_users:
+            trust_users.append(client.user_id)
         if not trust_users:
             return 0
         verified = 0
