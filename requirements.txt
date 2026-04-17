@@ -6,11 +6,7 @@ pydantic>=2.0
 langchain-ollama>=0.3
 langchain-openai>=0.3
 markdown>=3.5
-matrix-nio>=0.25
-# E2EE deps (nio[e2e] extra split out — python-olm builds its own libolm via cmake)
-python-olm>=3.2
-peewee>=3.14
-cachetools>=5.3
+matrix-nio[e2e]>=0.25
 python-telegram-bot>=20.0
 PyYAML>=6.0
 requests>=2.32
