@@ -378,7 +378,10 @@ class LLMFactory:
 
         if self._is_ollama(provider_name, api_base):
             ollama_base = api_base.removesuffix("/v1") or "http://localhost:11434"
-            kwargs: Dict[str, Any] = dict(model=model, temperature=temperature, base_url=ollama_base)
+            kwargs: Dict[str, Any] = dict(
+                model=model, temperature=temperature, base_url=ollama_base,
+                client_kwargs={"timeout": timeout},
+            )
             if keep_alive is not None:
                 kwargs["keep_alive"] = keep_alive
             return ChatOllama(**kwargs)

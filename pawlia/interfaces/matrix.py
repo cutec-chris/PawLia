@@ -225,7 +225,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
-        preview_text, format_private_toggle,
+        list_available_models, preview_text, format_private_toggle,
         format_bg_enqueue, bytes_to_data_uri,
     )
 
@@ -320,8 +320,15 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             else:
                 await _send_text(room.room_id, text)
 
+        avail = ", ".join(f"`{m}`" for m in result.available) or "_(keine konfiguriert)_"
         if result.action == "show":
-            await _reply(f"**Aktives Modell** [{result.ctx_label}]: `{result.model}`")
+            await _reply(
+                f"**Aktives Modell** [{result.ctx_label}]: `{result.model}`\n"
+                f"**Verfügbar:** {avail}\n"
+                f"_Wechseln: `//model <name>` — Override löschen: `//model off`_"
+            )
+        elif result.action == "cleared":
+            await _reply(f"✓ Model-Override für **{result.ctx_label}** entfernt — fällt auf Default zurück.")
         else:
             await _reply(f"✓ Modell für **{result.ctx_label}** auf `{result.model}` gesetzt.")
 
@@ -470,7 +477,20 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 await client.room_typing(room.room_id, typing_state=False)
             except Exception:
                 pass
-            await _send(f"Fehler: {e}")
+            session = app.memory.load_session(session_id)
+            override = (
+                app.memory.get_thread_model_override(session, thread_id)
+                if thread_id else session.model_override
+            )
+            hint = ""
+            if override:
+                avail = ", ".join(f"`{m}`" for m in list_available_models(app))
+                hint = (
+                    f"\n\n_Aktiver Model-Override: `{override}`. "
+                    f"Wechseln mit `//model <name>` oder löschen mit `//model off`._"
+                    + (f"\n_Verfügbar: {avail}_" if avail else "")
+                )
+            await _send(f"Fehler: {e}{hint}")
 
     # ------------------------------------------------------------------
     # Call manager (VoIP)
