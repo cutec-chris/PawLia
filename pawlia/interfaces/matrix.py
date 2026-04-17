@@ -34,6 +34,7 @@ from nio import (
     CallInviteEvent,
     DownloadResponse,
     InviteMemberEvent,
+    KeysQueryResponse,
     LoginResponse,
     MegolmEvent,
     MatrixRoom,
@@ -182,29 +183,102 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     store_path = os.path.join(app.session_dir, "nio_store")
     os.makedirs(store_path, exist_ok=True)
 
+    # Persistent bot session: if we already logged in once, reuse device_id
+    # and access_token so restarts don't create a new device every time
+    # (which accumulates zombie bot devices that break E2EE sends).
+    session_path = os.path.join(store_path, "session.json")
+    saved_session: Dict[str, str] = {}
+    if os.path.isfile(session_path):
+        try:
+            import json
+            with open(session_path, encoding="utf-8") as f:
+                saved = json.load(f)
+            if saved.get("user_id") == user_id and saved.get("homeserver") == homeserver:
+                saved_session = saved
+        except Exception as e:
+            logger.warning("Matrix: could not read saved session: %s", e)
+
+    saved_device_id = saved_session.get("device_id")
+    saved_token = saved_session.get("access_token")
+    # Only pre-seed the device_id when we intend to resume the saved session.
+    # If the user set an explicit access_token in config, it may belong to a
+    # different device — don't pin that one.
+    resume_device_id = None if access_token else saved_device_id
+
     # Try to use SqliteStore for E2EE; fall back to plain client if deps missing
     try:
         from nio import ClientConfig
         from nio.store import SqliteStore
         client_config = ClientConfig(store=SqliteStore, store_name="")
-        client = AsyncClient(homeserver, user_id, store_path=store_path, config=client_config)
+        client = AsyncClient(
+            homeserver, user_id,
+            device_id=resume_device_id,
+            store_path=store_path, config=client_config,
+        )
         e2ee = True
     except ImportError:
         logger.warning("Matrix: E2EE unavailable (install matrix-nio[e2e])")
-        client = AsyncClient(homeserver, user_id)
+        client = AsyncClient(homeserver, user_id, device_id=resume_device_id)
         e2ee = False
+
+    def _save_session() -> None:
+        try:
+            import json
+            with open(session_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "user_id": user_id,
+                    "homeserver": homeserver,
+                    "device_id": client.device_id,
+                    "access_token": client.access_token,
+                }, f)
+        except Exception as e:
+            logger.warning("Matrix: could not save session: %s", e)
 
     # Authenticate
     if access_token:
+        # Token explicitly configured — trust it over any saved session
         client.access_token = access_token
         client.user_id = user_id
         if e2ee:
             client.load_store()
         logger.info("Matrix: using access_token for %s", user_id)
+    elif saved_token and saved_device_id:
+        # Reuse previously persisted session
+        client.access_token = saved_token
+        client.user_id = user_id
+        if e2ee:
+            client.load_store()
+        # Verify the token is still valid with a cheap whoami call
+        try:
+            from nio import WhoamiResponse
+            whoami = await client.whoami()
+            if isinstance(whoami, WhoamiResponse):
+                logger.info("Matrix: resumed session as %s (device %s)", user_id, saved_device_id)
+            else:
+                logger.warning("Matrix: saved token invalid (%s), re-logging in", whoami)
+                client.access_token = None
+        except Exception as e:
+            logger.warning("Matrix: whoami failed (%s), re-logging in", e)
+            client.access_token = None
+
+        if not client.access_token:
+            if not password:
+                logger.error("Matrix: saved session expired and no password to re-login")
+                await client.close()
+                return
+            resp = await client.login(password, device_name="PawLia")
+            if isinstance(resp, LoginResponse):
+                logger.info("Matrix: re-logged in as %s (device %s)", user_id, resp.device_id)
+                _save_session()
+            else:
+                logger.error("Matrix: login failed: %s", resp)
+                await client.close()
+                return
     elif password:
         resp = await client.login(password, device_name="PawLia")
         if isinstance(resp, LoginResponse):
             logger.info("Matrix: logged in as %s (device %s)", user_id, resp.device_id)
+            _save_session()
         else:
             logger.error("Matrix: login failed: %s", resp)
             await client.close()
@@ -775,7 +849,16 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             if verified:
                 logger.info("Matrix: auto-verified %d new device(s) from allowed_users", verified)
 
+        async def _on_keys_query(response: KeysQueryResponse) -> None:
+            # Devices show up here (e.g. during a call's olm session negotiation)
+            # before the next /sync delivers them — verify them immediately so
+            # the subsequent encrypted send doesn't crash on the new device.
+            verified = _trust_allowed_devices()
+            if verified:
+                logger.info("Matrix: auto-verified %d device(s) after keys_query", verified)
+
         client.add_response_callback(_on_sync, SyncResponse)
+        client.add_response_callback(_on_keys_query, KeysQueryResponse)
 
         await client.sync_forever(timeout=30000)
     except asyncio.CancelledError:

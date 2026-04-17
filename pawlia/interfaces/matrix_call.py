@@ -605,6 +605,7 @@ class CallSession:
             room_id=self.room_id,
             message_type="m.call.candidates",
             content={"call_id": self.call_id, "version": 0, "candidates": candidates},
+            ignore_unverified_devices=True,
         )
         logger.info("call %s: sent %d local ICE candidates", self.call_id[:8], len(candidates))
 
@@ -1148,6 +1149,7 @@ class CallSession:
                 room_id=self.room_id,
                 message_type="m.call.hangup",
                 content={"call_id": self.call_id, "version": 0},
+                ignore_unverified_devices=True,
             )
         except Exception as e:
             logger.warning("call %s: hangup event failed: %s", self.call_id[:8], e)
@@ -1216,6 +1218,7 @@ class CallManager:
                     "msgtype": "m.text",
                     "body": f"📞 Eingehender Anruf von {event.sender}",
                 },
+                ignore_unverified_devices=True,
             )
             call_thread_id = getattr(resp, "event_id", None)
             logger.info("call %s: thread root event_id=%s", event.call_id[:8], call_thread_id)
@@ -1261,6 +1264,7 @@ class CallManager:
                 "version": 0,
                 "answer": {"type": "answer", "sdp": sdp_answer},
             },
+            ignore_unverified_devices=True,
         )
         logger.info("call %s: answer sent", event.call_id[:8])
 
@@ -1283,6 +1287,7 @@ class CallManager:
                 room_id=room_id,
                 message_type="m.call.hangup",
                 content={"call_id": call_id, "version": 0},
+                ignore_unverified_devices=True,
             )
         except Exception as e:
             logger.warning("could not send hangup for %s: %s", call_id[:8], e)
