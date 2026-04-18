@@ -126,9 +126,6 @@ class ChatAgent(BaseAgent):
         # Resolver for per-thread model overrides: model_name -> ChatOpenAI
         # Set by App.make_agent after construction.
         self._llm_resolver: Optional[Callable[[str], Any]] = None
-        # Resolver for default agent-type LLMs (e.g. "chat", "vision").
-        # Used to fall back when an override model is unreachable.
-        self._fallback_resolver: Optional[Callable[[str], Any]] = None
         # Resolves config keys (e.g. "fast") to actual model names (e.g. "qwen3.5:4b").
         self._model_name_resolver: Optional[Callable[[str], str]] = None
 
@@ -334,26 +331,7 @@ class ChatAgent(BaseAgent):
 
         # Turn 1: LLM decides whether to call a skill or answer directly
         active_llm = bound_llm
-        _override_notice = ""
-        override_model = self._active_override_model(thread_id)
-        try:
-            response, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
-        except Exception as exc:
-            if not override_model:
-                raise
-            self.logger.warning(
-                "Override model '%s' unreachable (%s), falling back to default",
-                override_model, exc,
-            )
-            _override_notice = (
-                f"⚠️ Modell *{override_model}* war nicht erreichbar – "
-                f"Override wurde deaktiviert.\n\n"
-            )
-            bound_llm, unbound_llm = self._clear_override_and_fallback(
-                thread_id, images=bool(images),
-            )
-            active_llm = bound_llm
-            response, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
+        response, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
 
         tool_calls_info: List[Dict[str, Any]] = []
         final = response
@@ -447,8 +425,6 @@ class ChatAgent(BaseAgent):
             )
 
         result = self.extract_text(final)
-        if _override_notice:
-            result = _override_notice + result
         used_skills = bool(tool_calls_info)
         await self._persist(
             user_input, result,
@@ -525,31 +501,9 @@ class ChatAgent(BaseAgent):
             messages.append(HumanMessage(content=user_input))
 
         # ---- Stream turn 1 ----
-        _override_notice = ""
-        override_model = self._active_override_model(thread_id)
-        try:
-            accumulated, raw_text = await self._stream_with_sentences(
-                messages, bound_llm, on_sentence,
-            )
-        except Exception as exc:
-            if not override_model:
-                raise
-            self.logger.warning(
-                "Override model '%s' unreachable (%s), falling back to default",
-                override_model, exc,
-            )
-            _override_notice = (
-                f"⚠️ Modell *{override_model}* war nicht erreichbar – "
-                f"Override wurde deaktiviert.\n\n"
-            )
-            bound_llm, unbound_llm = self._clear_override_and_fallback(
-                thread_id, images=bool(images),
-            )
-            if on_sentence:
-                await on_sentence(_override_notice.strip())
-            accumulated, raw_text = await self._stream_with_sentences(
-                messages, bound_llm, on_sentence,
-            )
+        accumulated, raw_text = await self._stream_with_sentences(
+            messages, bound_llm, on_sentence,
+        )
 
         self.logger.debug("Streamed turn 1: tool_calls=%s, len=%d",
                           bool(getattr(accumulated, "tool_calls", None)), len(raw_text))
@@ -562,8 +516,6 @@ class ChatAgent(BaseAgent):
 
         if not accumulated or not getattr(accumulated, "tool_calls", None):
             result = self.strip_thinking(raw_text)
-            if _override_notice:
-                result = _override_notice + result
             await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
             return result
 
@@ -689,8 +641,6 @@ class ChatAgent(BaseAgent):
                 await on_sentence(remainder.strip())
 
         result = self.strip_thinking(raw_text2)
-        if _override_notice:
-            result = _override_notice + result
         used_skills = bool(tool_calls_info)
         await self._persist(
             user_input, result,
@@ -781,6 +731,11 @@ class ChatAgent(BaseAgent):
                         self.logger.info("Directive: model override set to '%s'", model)
                     if self.on_model_change:
                         self.on_model_change(model)
+            elif directive == "set_voice":
+                if self.memory and self.session:
+                    voice = obj.get("voice")
+                    self.memory.set_voice_override(self.session, voice)
+                    self.logger.info("Directive: voice override set to '%s'", voice)
             elif directive == "set_private":
                 if self.memory and self.session:
                     desired: bool = bool(obj.get("private", True))
@@ -831,38 +786,6 @@ class ChatAgent(BaseAgent):
         if self.session and self.session.model_override:
             return self.session.model_override
         return None
-
-    def _clear_override_and_fallback(
-        self, thread_id: Optional[str], *, images: bool = False,
-    ) -> Tuple[Any, Any]:
-        """Clear all active overrides and return default ``(bound, unbound)`` LLMs."""
-        if thread_id and self.memory and self.session:
-            if self.memory.get_thread_model_override(self.session, thread_id):
-                self.memory.set_thread_model_override(self.session, thread_id, None)
-
-        if self.session and self.session.model_override and self.memory:
-            self.memory.set_model_override(self.session, None)
-
-        if self._fallback_resolver:
-            llm = self._fallback_resolver("chat")
-            vision = self._fallback_resolver("vision")
-        else:
-            llm = self.llm
-            vision = self.llm
-
-        if self._skill_specs:
-            bound = llm.bind_tools(self._skill_specs, tool_choice="auto")
-            vision_bound = vision.bind_tools(self._skill_specs, tool_choice="auto")
-        else:
-            bound = llm
-            vision_bound = vision
-
-        # Update agent LLMs so subsequent calls in this session use defaults
-        self.llm = llm
-        self.bound_llm = bound
-        self.vision_bound_llm = vision_bound
-
-        return (vision_bound if images else bound), llm
 
     def _is_fake_tool_call(self, response: AIMessage) -> bool:
         """Return True if the LLM wrote a tool call as text instead of calling it.

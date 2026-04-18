@@ -35,7 +35,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, md_to_tg_html,
-        handle_model_command, preview_text,
+        handle_model_command, list_available_models, preview_text,
         format_private_toggle, format_bg_enqueue, bytes_to_data_uri,
     )
 
@@ -113,7 +113,23 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             )
         except Exception as e:
             logger.error("Telegram: error processing message: %s", e)
-            await update.message.reply_text(f"Fehler: {e}")
+            session = app.memory.load_session(user_id)
+            tid = str(thread_id) if thread_id else None
+            override = (
+                app.memory.get_thread_model_override(session, tid)
+                if tid else session.model_override
+            )
+            hint = ""
+            if override:
+                avail = ", ".join(f"<code>{m}</code>" for m in list_available_models(app))
+                hint = (
+                    f"\n\n<i>Aktiver Model-Override: <code>{override}</code>. "
+                    f"Wechseln mit /model &lt;name&gt; oder löschen mit /model off</i>"
+                    + (f"\n<i>Verfügbar: {avail}</i>" if avail else "")
+                )
+            await update.message.reply_text(
+                f"Fehler: {e}{hint}", parse_mode=ParseMode.HTML,
+            )
 
     async def on_private_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """/private — toggle private mode for the current thread (threads only)."""
@@ -201,9 +217,17 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         elif result.action == "set":
             logger.info("Telegram: model changed for %s thread %s -> %s", user_id, thread_id, result.model)
 
+        avail = ", ".join(f"<code>{m}</code>" for m in result.available) or "<i>(keine konfiguriert)</i>"
         if result.action == "show":
             await update.message.reply_text(
-                f"<b>Aktives Modell</b> [{result.ctx_label}]: <code>{result.model}</code>",
+                f"<b>Aktives Modell</b> [{result.ctx_label}]: <code>{result.model}</code>\n"
+                f"<b>Verfügbar:</b> {avail}\n"
+                f"<i>Wechseln: /model &lt;name&gt; — Override löschen: /model off</i>",
+                parse_mode=ParseMode.HTML,
+            )
+        elif result.action == "cleared":
+            await update.message.reply_text(
+                f"✓ Model-Override für <b>{result.ctx_label}</b> entfernt — fällt auf Default zurück.",
                 parse_mode=ParseMode.HTML,
             )
         else:

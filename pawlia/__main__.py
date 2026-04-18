@@ -98,37 +98,6 @@ async def _run(args) -> None:
 
     # Server mode: start all interfaces listed under config["interfaces"]
     iface_cfg = app.config.get("interfaces", {})
-    tasks = []
-
-    if "matrix" in iface_cfg:
-        from pawlia.interfaces.matrix import start_matrix
-        tasks.append(asyncio.create_task(
-            start_matrix(app, iface_cfg["matrix"])
-        ))
-
-    if "telegram" in iface_cfg:
-        from pawlia.interfaces.telegram import start_telegram
-        tasks.append(asyncio.create_task(
-            start_telegram(app, iface_cfg["telegram"])
-        ))
-
-    if "webhook" in iface_cfg:
-        from pawlia.interfaces.webhook import start_webhook
-        tasks.append(asyncio.create_task(
-            start_webhook(app, iface_cfg["webhook"])
-        ))
-
-    from pawlia.interfaces.web import start_web
-    tasks.append(asyncio.create_task(
-        start_web(app, iface_cfg.get("web", {}))
-    ))
-
-    if not tasks:
-        logging.getLogger("pawlia").error(
-            "Server mode: no interfaces configured in config.yaml under 'interfaces'."
-        )
-        app.scheduler.stop()
-        return
 
     import signal
     loop = asyncio.get_running_loop()
@@ -140,11 +109,67 @@ async def _run(args) -> None:
         except NotImplementedError:
             pass  # Windows
 
-    shutdown_task = asyncio.create_task(shutdown.wait())
+    log = logging.getLogger("pawlia")
+
+    async def _supervise(name: str, factory) -> None:
+        """Run an interface forever, restarting on crash with exponential backoff.
+
+        A single bug in one interface (e.g. an unhandled E2EE error inside
+        the matrix sync loop) must not bring down the whole process — the
+        container would exit cleanly and Podman's on-failure restart-policy
+        would not retry it.
+        """
+        delay = 1.0
+        while not shutdown.is_set():
+            try:
+                await factory()
+                if shutdown.is_set():
+                    return
+                log.warning("Interface '%s' returned without error — restarting", name)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Interface '%s' crashed — restarting in %.1fs", name, delay)
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=delay)
+                return
+            except asyncio.TimeoutError:
+                pass
+            delay = min(delay * 2, 60.0)
+
+    tasks = []
+
+    if "matrix" in iface_cfg:
+        from pawlia.interfaces.matrix import start_matrix
+        tasks.append(asyncio.create_task(
+            _supervise("matrix", lambda: start_matrix(app, iface_cfg["matrix"]))
+        ))
+
+    if "telegram" in iface_cfg:
+        from pawlia.interfaces.telegram import start_telegram
+        tasks.append(asyncio.create_task(
+            _supervise("telegram", lambda: start_telegram(app, iface_cfg["telegram"]))
+        ))
+
+    if "webhook" in iface_cfg:
+        from pawlia.interfaces.webhook import start_webhook
+        tasks.append(asyncio.create_task(
+            _supervise("webhook", lambda: start_webhook(app, iface_cfg["webhook"]))
+        ))
+
+    from pawlia.interfaces.web import start_web
+    tasks.append(asyncio.create_task(
+        _supervise("web", lambda: start_web(app, iface_cfg.get("web", {})))
+    ))
+
+    if not tasks:
+        log.error("Server mode: no interfaces configured in config.yaml under 'interfaces'.")
+        app.scheduler.stop()
+        return
+
     try:
-        await asyncio.wait([*tasks, shutdown_task], return_when=asyncio.FIRST_COMPLETED)
+        await shutdown.wait()
     finally:
-        shutdown_task.cancel()
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

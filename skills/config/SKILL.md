@@ -67,6 +67,8 @@ python <scripts_dir>/config.py set --path agents.default --value fast
 python <scripts_dir>/config.py set --path skill-config.memory.idle_minutes --value 10
 ```
 
+**TTS validation:** writes to `tts.provider`, `tts.piper.model`, and `tts.edge.voice` are validated — an unknown value is rejected with a list of valid options instead of being written. A wrong voice silently breaks TTS in the VoIP call, so always pick from the returned `available_voices`. To force a value not in the list (e.g. an English Edge voice), append `--force`.
+
 ## Switch the active model (runtime)
 
 Show the current model:
@@ -82,6 +84,40 @@ python <scripts_dir>/config.py model --name qwen3.5:latest
 ```
 
 The model name must match a key in the `models` section of config.yaml.
+
+## Switch the TTS voice (per-user)
+
+The voice command is **provider-aware** — it reads `tts.provider` from `config.yaml` and lists/validates voices for that provider. Always run `voice` (without `--name`) first to see the current `available_voices` for the active provider, then pick one from that list. A name that doesn't match the provider is rejected to avoid silently breaking TTS.
+
+Show current voice + available voices for the active provider:
+
+```
+python <scripts_dir>/config.py voice
+```
+
+Set a voice (persists in `workspace/memory/voice_override.txt`):
+
+```
+# When tts.provider = piper:
+python <scripts_dir>/config.py voice --name de_DE-thorsten-low
+
+# When tts.provider = edge:
+python <scripts_dir>/config.py voice --name de-DE-KatjaNeural
+```
+
+Clear the override (falls back to global `tts.piper.model` / `tts.edge.voice`):
+
+```
+python <scripts_dir>/config.py voice --off
+```
+
+**How `available_voices` is discovered:**
+- Piper: glob `/app/piper/*.onnx` (the voice files baked into the VoIP image). **This list is authoritative** — a voice not listed does not exist on disk. Setting a non-listed Piper voice is always rejected, even with `--force`, because Piper would immediately crash with "Model file doesn't exist" and break TTS. If a user asks for a Piper voice that isn't available, tell them so and offer one from the list; never try to force it.
+- Edge: `edge_tts.list_voices()` (full Microsoft catalog). If the dynamic listing is unreachable (`edge_tts` not installed / no internet) the list may be empty — only then may `--force` be used to write a voice name the user explicitly asked for:
+
+  ```
+  python <scripts_dir>/config.py voice --name en-US-AriaNeural --force
+  ```
 
 ## Private mode
 

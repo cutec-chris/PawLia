@@ -54,6 +54,9 @@ class Session:
         # Optional model override (e.g. set via /model command)
         self.model_override: Optional[str] = None
 
+        # Optional TTS voice override (piper voice name without .onnx)
+        self.voice_override: Optional[str] = None
+
         # Per-thread exchange lists (loaded/seeded lazily by get_thread_context)
         self.thread_contexts: Dict[str, List[Tuple[str, str]]] = {}
 
@@ -161,6 +164,9 @@ class MemoryManager:
     def _model_override_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "model_override.txt")
 
+    def _voice_override_path(self, user_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), "voice_override.txt")
+
     def _private_session_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "private_session")
 
@@ -237,6 +243,8 @@ class MemoryManager:
         session.exchange_count = len(session.exchanges)
         override = self._read(self._model_override_path(user_id)).strip()
         session.model_override = override or None
+        voice = self._read(self._voice_override_path(user_id)).strip()
+        session.voice_override = voice or None
         session.private = os.path.isfile(self._private_session_path(user_id))
 
         self._sessions[user_id] = session
@@ -249,6 +257,16 @@ class MemoryManager:
         if model:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(model)
+        elif os.path.exists(path):
+            os.remove(path)
+
+    def set_voice_override(self, session: Session, voice: Optional[str]) -> None:
+        """Persist a TTS voice override for this session.  Pass None to clear."""
+        session.voice_override = voice
+        path = self._voice_override_path(session.user_id)
+        if voice:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(voice)
         elif os.path.exists(path):
             os.remove(path)
 

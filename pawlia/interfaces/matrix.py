@@ -34,12 +34,14 @@ from nio import (
     CallInviteEvent,
     DownloadResponse,
     InviteMemberEvent,
+    KeysQueryResponse,
     LoginResponse,
     MegolmEvent,
     MatrixRoom,
     RoomMessageAudio,
     RoomMessageImage,
     RoomMessageText,
+    SyncResponse,
 )
 
 if TYPE_CHECKING:
@@ -181,29 +183,102 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     store_path = os.path.join(app.session_dir, "nio_store")
     os.makedirs(store_path, exist_ok=True)
 
+    # Persistent bot session: if we already logged in once, reuse device_id
+    # and access_token so restarts don't create a new device every time
+    # (which accumulates zombie bot devices that break E2EE sends).
+    session_path = os.path.join(store_path, "session.json")
+    saved_session: Dict[str, str] = {}
+    if os.path.isfile(session_path):
+        try:
+            import json
+            with open(session_path, encoding="utf-8") as f:
+                saved = json.load(f)
+            if saved.get("user_id") == user_id and saved.get("homeserver") == homeserver:
+                saved_session = saved
+        except Exception as e:
+            logger.warning("Matrix: could not read saved session: %s", e)
+
+    saved_device_id = saved_session.get("device_id")
+    saved_token = saved_session.get("access_token")
+    # Only pre-seed the device_id when we intend to resume the saved session.
+    # If the user set an explicit access_token in config, it may belong to a
+    # different device — don't pin that one.
+    resume_device_id = None if access_token else saved_device_id
+
     # Try to use SqliteStore for E2EE; fall back to plain client if deps missing
     try:
         from nio import ClientConfig
         from nio.store import SqliteStore
         client_config = ClientConfig(store=SqliteStore, store_name="")
-        client = AsyncClient(homeserver, user_id, store_path=store_path, config=client_config)
+        client = AsyncClient(
+            homeserver, user_id,
+            device_id=resume_device_id,
+            store_path=store_path, config=client_config,
+        )
         e2ee = True
     except ImportError:
         logger.warning("Matrix: E2EE unavailable (install matrix-nio[e2e])")
-        client = AsyncClient(homeserver, user_id)
+        client = AsyncClient(homeserver, user_id, device_id=resume_device_id)
         e2ee = False
+
+    def _save_session() -> None:
+        try:
+            import json
+            with open(session_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "user_id": user_id,
+                    "homeserver": homeserver,
+                    "device_id": client.device_id,
+                    "access_token": client.access_token,
+                }, f)
+        except Exception as e:
+            logger.warning("Matrix: could not save session: %s", e)
 
     # Authenticate
     if access_token:
+        # Token explicitly configured — trust it over any saved session
         client.access_token = access_token
         client.user_id = user_id
         if e2ee:
             client.load_store()
         logger.info("Matrix: using access_token for %s", user_id)
+    elif saved_token and saved_device_id:
+        # Reuse previously persisted session
+        client.access_token = saved_token
+        client.user_id = user_id
+        if e2ee:
+            client.load_store()
+        # Verify the token is still valid with a cheap whoami call
+        try:
+            from nio import WhoamiResponse
+            whoami = await client.whoami()
+            if isinstance(whoami, WhoamiResponse):
+                logger.info("Matrix: resumed session as %s (device %s)", user_id, saved_device_id)
+            else:
+                logger.warning("Matrix: saved token invalid (%s), re-logging in", whoami)
+                client.access_token = None
+        except Exception as e:
+            logger.warning("Matrix: whoami failed (%s), re-logging in", e)
+            client.access_token = None
+
+        if not client.access_token:
+            if not password:
+                logger.error("Matrix: saved session expired and no password to re-login")
+                await client.close()
+                return
+            resp = await client.login(password, device_name="PawLia")
+            if isinstance(resp, LoginResponse):
+                logger.info("Matrix: re-logged in as %s (device %s)", user_id, resp.device_id)
+                _save_session()
+            else:
+                logger.error("Matrix: login failed: %s", resp)
+                await client.close()
+                return
     elif password:
         resp = await client.login(password, device_name="PawLia")
         if isinstance(resp, LoginResponse):
             logger.info("Matrix: logged in as %s (device %s)", user_id, resp.device_id)
+            _save_session()
         else:
             logger.error("Matrix: login failed: %s", resp)
             await client.close()
@@ -224,7 +299,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
-        preview_text, format_private_toggle,
+        list_available_models, preview_text, format_private_toggle,
         format_bg_enqueue, bytes_to_data_uri,
     )
 
@@ -265,6 +340,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 room_id=room_id,
                 message_type="m.room.message",
                 content=_make_content(text),
+                ignore_unverified_devices=True,
             )
         except Exception as e:
             logger.error("Matrix: send_text failed for %s: %s", room_id, e)
@@ -283,6 +359,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 room_id=room_id,
                 message_type="m.room.message",
                 content=content,
+                ignore_unverified_devices=True,
             )
             _remember_thread_event(getattr(resp, "event_id", None), root_event_id)
         except Exception as e:
@@ -317,8 +394,15 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             else:
                 await _send_text(room.room_id, text)
 
+        avail = ", ".join(f"`{m}`" for m in result.available) or "_(keine konfiguriert)_"
         if result.action == "show":
-            await _reply(f"**Aktives Modell** [{result.ctx_label}]: `{result.model}`")
+            await _reply(
+                f"**Aktives Modell** [{result.ctx_label}]: `{result.model}`\n"
+                f"**Verfügbar:** {avail}\n"
+                f"_Wechseln: `//model <name>` — Override löschen: `//model off`_"
+            )
+        elif result.action == "cleared":
+            await _reply(f"✓ Model-Override für **{result.ctx_label}** entfernt — fällt auf Default zurück.")
         else:
             await _reply(f"✓ Modell für **{result.ctx_label}** auf `{result.model}` gesetzt.")
 
@@ -425,6 +509,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     room_id=room.room_id,
                     message_type="m.room.message",
                     content=content,
+                    ignore_unverified_devices=True,
                 )
                 status_event_id = getattr(resp, "event_id", None)
                 _remember_thread_event(status_event_id, thread_id)
@@ -437,6 +522,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                         room_id=room.room_id,
                         message_type="m.room.message",
                         content=_make_status_step(status_event_id, current_skill, step_count, step_text),
+                        ignore_unverified_devices=True,
                     )
 
             async def _on_skill_done(skill_name: str) -> None:
@@ -445,6 +531,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                         room_id=room.room_id,
                         message_type="m.room.message",
                         content=_make_status_done(status_event_id, skill_name, step_count),
+                        ignore_unverified_devices=True,
                     )
 
             agent.on_interim = _on_interim
@@ -464,7 +551,20 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 await client.room_typing(room.room_id, typing_state=False)
             except Exception:
                 pass
-            await _send(f"Fehler: {e}")
+            session = app.memory.load_session(session_id)
+            override = (
+                app.memory.get_thread_model_override(session, thread_id)
+                if thread_id else session.model_override
+            )
+            hint = ""
+            if override:
+                avail = ", ".join(f"`{m}`" for m in list_available_models(app))
+                hint = (
+                    f"\n\n_Aktiver Model-Override: `{override}`. "
+                    f"Wechseln mit `//model <name>` oder löschen mit `//model off`._"
+                    + (f"\n_Verfügbar: {avail}_" if avail else "")
+                )
+            await _send(f"Fehler: {e}{hint}")
 
     # ------------------------------------------------------------------
     # Call manager (VoIP)
@@ -665,6 +765,31 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             room.room_id, event.sender, event.session_id,
         )
 
+    def _trust_allowed_devices() -> int:
+        """TOFU: auto-verify every device of users in allowed_users.
+
+        Trust anchor is the ``allowed_users`` config (set via the pairing
+        flow or explicitly).  Any device belonging to those users gets
+        verified so we can send encrypted messages to them.  Our own other
+        sessions are always trusted — otherwise encrypted sends to rooms
+        where the bot has a second device fail with OlmUnverifiedDeviceError.
+        Returns the number of devices newly verified in this pass.
+        """
+        if not client.device_store:
+            return 0
+        trust_users = list(allowed_users or [])
+        if client.user_id and client.user_id not in trust_users:
+            trust_users.append(client.user_id)
+        if not trust_users:
+            return 0
+        verified = 0
+        for user in trust_users:
+            for device in client.device_store.active_user_devices(user):
+                if not device.verified:
+                    client.verify_device(device)
+                    verified += 1
+        return verified
+
     # ------------------------------------------------------------------
     # Scheduler callback for proactive notifications
     # ------------------------------------------------------------------
@@ -705,6 +830,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                         await client.keys_query()
                         logger.info("Matrix: E2EE keys queried for %d joined rooms", len(client.rooms))
                         break
+            verified = _trust_allowed_devices()
+            if verified:
+                logger.info("Matrix: auto-verified %d device(s) from allowed_users", verified)
 
         client.add_event_callback(on_message, RoomMessageText)
         client.add_event_callback(on_image, RoomMessageImage)
@@ -714,6 +842,23 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         client.add_event_callback(on_call_hangup, CallHangupEvent)
         client.add_event_callback(on_invite, InviteMemberEvent)
         client.add_event_callback(on_megolm, MegolmEvent)
+
+        async def _on_sync(response: SyncResponse) -> None:
+            # Auto-verify any new devices of allowed users (TOFU)
+            verified = _trust_allowed_devices()
+            if verified:
+                logger.info("Matrix: auto-verified %d new device(s) from allowed_users", verified)
+
+        async def _on_keys_query(response: KeysQueryResponse) -> None:
+            # Devices show up here (e.g. during a call's olm session negotiation)
+            # before the next /sync delivers them — verify them immediately so
+            # the subsequent encrypted send doesn't crash on the new device.
+            verified = _trust_allowed_devices()
+            if verified:
+                logger.info("Matrix: auto-verified %d device(s) after keys_query", verified)
+
+        client.add_response_callback(_on_sync, SyncResponse)
+        client.add_response_callback(_on_keys_query, KeysQueryResponse)
 
         await client.sync_forever(timeout=30000)
     except asyncio.CancelledError:

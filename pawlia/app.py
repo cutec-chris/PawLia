@@ -179,8 +179,6 @@ class App:
         )
         # Let the agent resolve per-thread model overrides at run() time
         agent._llm_resolver = self.llm.get_with_model
-        # Let the agent fall back to default LLMs when an override is unreachable
-        agent._fallback_resolver = self.llm.get
         # Resolve config keys (e.g. "fast") to actual model names
         agent._model_name_resolver = self.llm.resolve_model_name
         # Let the ChatAgent re-discover this user's workspace skills after each skill call

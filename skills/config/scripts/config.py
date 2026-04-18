@@ -151,12 +151,118 @@ def cmd_model(args) -> None:
     _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
 
 
+_PIPER_DIR = "/app/piper"
+
+
+def _current_tts_provider() -> str:
+    """Read tts.provider from config.yaml (defaults to 'piper')."""
+    path = _find_config()
+    if not path:
+        return "piper"
+    data = _read(path)
+    return (data.get("tts") or {}).get("provider") or "piper"
+
+
+def _list_piper_voices() -> list:
+    """Return Piper voice names by globbing the model dir."""
+    import glob
+    if not os.path.isdir(_PIPER_DIR):
+        return []
+    return sorted(
+        os.path.basename(p)[:-len(".onnx")]
+        for p in glob.glob(os.path.join(_PIPER_DIR, "*.onnx"))
+    )
+
+
+def _list_edge_voices() -> list:
+    """Return all Edge voices via edge_tts.list_voices(); empty if unavailable."""
+    try:
+        import asyncio as _asyncio
+        import edge_tts  # type: ignore
+        voices = _asyncio.run(edge_tts.list_voices())
+        return sorted(v["ShortName"] for v in voices if "ShortName" in v)
+    except Exception:
+        return []
+
+
+def _voices_for_provider(provider: str) -> list:
+    if provider == "edge":
+        return _list_edge_voices()
+    return _list_piper_voices()
+
+
+def cmd_voice(args) -> None:
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+
+    override_path = os.path.join(
+        session_dir, user_id, "workspace", "memory", "voice_override.txt",
+    )
+
+    provider = _current_tts_provider()
+    available = _voices_for_provider(provider)
+
+    if args.off:
+        if os.path.isfile(override_path):
+            os.remove(override_path)
+        _out({"__directive__": "set_voice", "voice": None})
+        _out({"success": True, "voice": "(default)", "message": "Voice-Override entfernt."})
+        return
+
+    if not args.name:
+        current = ""
+        if os.path.isfile(override_path):
+            with open(override_path, encoding="utf-8") as f:
+                current = f.read().strip()
+        _out({
+            "success": True,
+            "voice": current or "(default)",
+            "provider": provider,
+            "available_voices": available,
+        })
+        return
+
+    if args.name not in available:
+        # For Piper the list is authoritative — it globs the on-disk .onnx files,
+        # so a voice not in the list does not exist and --force cannot conjure it.
+        # For Edge the dynamic list may be incomplete, so --force is allowed there.
+        if provider == "piper" or not args.force:
+            _out({
+                "success": False,
+                "error": (
+                    f"Unknown voice '{args.name}' for provider '{provider}'. "
+                    + ("Pick from available_voices — the Piper list is the on-disk model files."
+                       if provider == "piper"
+                       else "Pick from available_voices or use --force for Edge voices not in the dynamic list.")
+                ),
+                "provider": provider,
+                "available_voices": available,
+            })
+            return
+
+    os.makedirs(os.path.dirname(override_path), exist_ok=True)
+    with open(override_path, "w", encoding="utf-8") as f:
+        f.write(args.name)
+    _out({"__directive__": "set_voice", "voice": args.name})
+    _out({"success": True, "voice": args.name, "provider": provider,
+          "message": f"Voice auf '{args.name}' gesetzt."})
+
+
 def cmd_private(args) -> None:
     scope = f"Thread {args.thread}" if args.thread else "Session"
     private = not args.off
 
     _out({"__directive__": "set_private", "private": private, "thread": args.thread})
     _out({"success": True, "private": private, "scope": scope})
+
+
+_TTS_VOICE_PATHS = {
+    "tts.piper.model": "piper",
+    "tts.edge.voice": "edge",
+}
 
 
 def cmd_set(args) -> None:
@@ -172,8 +278,40 @@ def cmd_set(args) -> None:
                      f"Settable sections: {', '.join(sorted(SETTABLE_SECTIONS))}",
         })
         return
-    data = _read(config_path)
     value = _coerce(args.value)
+
+    # Validate TTS voice/model writes — wrong values silently break TTS.
+    # Piper: the list is authoritative (on-disk .onnx files), --force can't
+    # conjure a missing file. Edge: --force allowed because the dynamic list
+    # may be incomplete when edge_tts isn't installed.
+    if args.path in _TTS_VOICE_PATHS:
+        provider = _TTS_VOICE_PATHS[args.path]
+        available = _voices_for_provider(provider)
+        if value not in available:
+            if provider == "piper" or not args.force:
+                _out({
+                    "success": False,
+                    "error": (
+                        f"'{value}' is not a known {provider} voice. "
+                        + ("Pick from available_voices — the Piper list is the on-disk model files."
+                           if provider == "piper"
+                           else "Pick from available_voices or use --force for Edge voices not in the dynamic list.")
+                    ),
+                    "provider": provider,
+                    "available_voices": available,
+                })
+                return
+
+    # Validate provider switch — only piper/edge are wired up.
+    if args.path == "tts.provider" and not args.force and value not in ("piper", "edge"):
+        _out({
+            "success": False,
+            "error": f"Unknown tts.provider '{value}'. Supported: piper, edge. "
+                     f"Use --force to override.",
+        })
+        return
+
+    data = _read(config_path)
     _set_path(data, args.path, value)
     _write(config_path, data)
     written = _get_path(_read(config_path), args.path)
@@ -197,9 +335,20 @@ def main():
     p = sub.add_parser("set")
     p.add_argument("--path", required=True)
     p.add_argument("--value", required=True, help="Value (YAML scalar: true/false/number/string)")
+    p.add_argument("--force", action="store_true",
+                   help="Skip TTS voice/provider validation (use a voice not in the curated list)")
 
     p = sub.add_parser("model")
     p.add_argument("--name", default=None, help="Model name to switch to (omit to show current)")
+    p.add_argument("--user-id", default=None)
+    p.add_argument("--session-dir", default=None)
+
+    p = sub.add_parser("voice")
+    p.add_argument("--name", default=None,
+                   help="Voice name — Piper (e.g. de_DE-thorsten-low) or Edge (e.g. de-DE-KatjaNeural)")
+    p.add_argument("--off", action="store_true", help="Clear voice override")
+    p.add_argument("--force", action="store_true",
+                   help="Skip validation against the available_voices list for the active provider")
     p.add_argument("--user-id", default=None)
     p.add_argument("--session-dir", default=None)
 
@@ -212,7 +361,10 @@ def main():
         parser.print_help()
         sys.exit(1)
 
-    dispatch = {"show": cmd_show, "get": cmd_get, "set": cmd_set, "model": cmd_model, "private": cmd_private}
+    dispatch = {
+        "show": cmd_show, "get": cmd_get, "set": cmd_set,
+        "model": cmd_model, "voice": cmd_voice, "private": cmd_private,
+    }
     try:
         dispatch[args.cmd](args)
     except Exception as e:

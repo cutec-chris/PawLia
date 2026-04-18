@@ -1,41 +1,48 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────
-FROM python:3.13-alpine AS builder
+FROM alpine:edge AS builder
 
+# System deps:
+#   python3 / py3-pip — runtime
+#   py3-olm          — E2EE for Matrix (visible to venv via --system-site-packages)
+#   gcc/g++/musl-dev/python3-dev/libffi-dev — compile non-wheel packages
 RUN apk add --no-cache \
+        python3 \
+        py3-pip \
+        py3-olm \
         gcc \
         g++ \
         musl-dev \
         python3-dev \
         openssl-dev \
-        libffi-dev \
-        olm-dev
+        libffi-dev
+
+# Create a venv that can see system py3-olm so pip accepts matrix-nio[e2e]
+RUN python3 -m venv --system-site-packages /venv
 
 COPY requirements.txt ./
-# python-olm must link against system libolm; needs --no-build-isolation
-# so the env var reaches olm_build.py inside pip's subprocess.
-RUN pip install --no-cache-dir --prefix=/install cffi \
-    && PYTHON_OLM_USE_SYSTEM_LIB=1 \
-       pip install --no-cache-dir --no-build-isolation --prefix=/install python-olm \
-    && pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN /venv/bin/pip install --no-cache-dir -r requirements.txt
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
-FROM python:3.13-alpine
+FROM alpine:edge
 
 # Runtime system deps:
-#   nodejs/npm  — AgentSkills
-#   olm         — E2EE for Matrix
+#   python3   — interpreter
+#   py3-olm   — E2EE (visible to venv via --system-site-packages)
+#   nodejs/npm — AgentSkills
 RUN apk add --no-cache \
+        python3 \
+        py3-olm \
         nodejs \
         npm \
         openssl \
-        libffi \
-        olm
+        libffi
 
 WORKDIR /app
 
-# Copy compiled Python packages from builder
-COPY --from=builder /install /usr/local
+# Copy the venv from the builder
+COPY --from=builder /venv /venv
+ENV PATH="/venv/bin:$PATH"
 
 # Application code
 COPY pawlia/ pawlia/
@@ -43,11 +50,11 @@ COPY skills/ skills/
 RUN mkdir -p skills/user
 
 # Install deps + compile workflows for all pre-bundled skills
-RUN python -m pawlia.install_skill_deps
+RUN python3 -m pawlia.install_skill_deps --no-compile
 
 # Session data lives in a volume
 VOLUME ["/app/session"]
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "pawlia", "--mode", "server"]
+CMD ["python3", "-m", "pawlia", "--mode", "server"]
