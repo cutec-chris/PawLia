@@ -481,8 +481,23 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             else:
                 await _send_text(room.room_id, text)
 
+        # Keep typing notification alive while agent works
+        typing_stop = asyncio.Event()
+        async def _typing_keepalive() -> None:
+            while not typing_stop.is_set():
+                try:
+                    await asyncio.wait_for(typing_stop.wait(), timeout=2.5)
+                except asyncio.TimeoutError:
+                    pass
+                if not typing_stop.is_set():
+                    try:
+                        await client.room_typing(room.room_id, typing_state=True)
+                    except Exception:
+                        pass
+
         try:
             await client.room_typing(room.room_id, typing_state=True)
+            typing_task = asyncio.ensure_future(_typing_keepalive())
 
             agent = get_agent(room.room_id)
 
@@ -546,10 +561,17 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 on_skill_done=_on_skill_done,
             )
 
+            typing_stop.set()
+            typing_task.cancel()
             await client.room_typing(room.room_id, typing_state=False)
             logger.info("Matrix: response in %s%s: %s", room.room_id, ctx, preview_text(response))
             await _send(response)
         except Exception as e:
+            typing_stop.set()
+            try:
+                typing_task.cancel()
+            except NameError:
+                pass
             logger.error("Matrix: error processing message: %s", e)
             try:
                 await client.room_typing(room.room_id, typing_state=False)
