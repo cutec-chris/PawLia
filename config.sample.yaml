@@ -72,12 +72,13 @@ interfaces:
   #   #   - stun:stun.l.google.com:19302
 
 # voip:
-#   silence_threshold: 0.05           # frame RMS above this counts as speech
-#   silence_seconds: 2.5              # trailing silence that ends a chunk
-#   min_speech_seconds: 0.6           # shorter chunks are discarded early
-#   min_active_speech_ratio: 0.30     # fraction of active frames required per chunk
-#   min_consecutive_speech_frames: 15 # sustained active 20ms frames required
+#   silence_threshold: 0.02           # frame RMS above this counts as speech (after AGC)
+#   silence_seconds: 2.2              # trailing silence that ends a chunk
+#   min_speech_seconds: 0.4           # shorter chunks are discarded early
+#   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
+#   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
+#   bargein_rms_threshold: 0.05       # raw RMS to interrupt TTS playback
 
 # Speech-to-text transcription (voice messages + VoIP calls).
 # Any OpenAI-compatible /audio/transcriptions endpoint works.
@@ -133,7 +134,7 @@ workspace:
 
 skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload
-  allow_workspace: false   # load skills from session/<user>/workspace/skills/ (default: false)
+  allow_workspace: true    # load skills from session/<user>/workspace/skills/ (default: true)
 
 skill-config:
   # searxng:

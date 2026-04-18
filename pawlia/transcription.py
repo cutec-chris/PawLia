@@ -108,6 +108,10 @@ async def transcribe_pcm(
     import numpy as np
 
     pcm_float32 = _bandpass_pcm(pcm_float32, sample_rate)
+    # Peak-normalize so Whisper gets a consistent signal level
+    peak = float(np.max(np.abs(pcm_float32)))
+    if peak > 1e-6:
+        pcm_float32 = pcm_float32 * (0.9 / peak)
     pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)
 
     buf = io.BytesIO()

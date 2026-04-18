@@ -1,9 +1,12 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────
 # Compiles Python packages that have no musllinux wheels (e.g. cryptography,
 # aiohttp) against Alpine musl so the runtime stage stays build-tool-free.
-FROM python:3.13-alpine AS builder
+FROM alpine:edge AS builder
 
 RUN apk add --no-cache \
+        python3 \
+        py3-pip \
+        py3-olm \
         gcc \
         g++ \
         musl-dev \
@@ -12,40 +15,47 @@ RUN apk add --no-cache \
         libffi-dev \
         crc32c-dev
 
+# Create a venv that can see system py3-olm so pip accepts matrix-nio[e2e]
+RUN python3 -m venv --system-site-packages /venv
+
 COPY requirements.txt requirements-voip.txt ./
-RUN pip install --no-cache-dir --prefix=/install \
+RUN /venv/bin/pip install --no-cache-dir \
         -r requirements.txt \
         -r requirements-voip.txt
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
-FROM python:3.13-alpine
+FROM alpine:edge
 
 # Runtime system deps:
+#   python3      — interpreter
+#   py3-olm      — E2EE (visible to venv via --system-site-packages)
 #   nodejs/npm   — AgentSkills
 #   espeak-ng    — phonemisation for Piper
 #   ffmpeg       — audio codec support for aiortc/av
-#   openssl/libffi — runtime for cryptography (compiled in stage 1)
 #   libstdc++    — C++ runtime for Piper
 #   piper-tts    — local TTS engine (Alpine edge/testing, musl-native)
 RUN apk add --no-cache \
+        python3 \
+        py3-olm \
         nodejs \
         npm \
         espeak-ng \
         ffmpeg \
         wget \
         openssl \
+        git \
         libffi \
         libstdc++ \
         crc32c \
-        py3-olm-pyc \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
 WORKDIR /app
 
-# Copy compiled Python packages from builder
-COPY --from=builder /install /usr/local
+# Copy the venv from the builder
+COPY --from=builder /venv /venv
+ENV PATH="/venv/bin:$PATH"
 
 # Application code
 COPY pawlia/ pawlia/
@@ -53,15 +63,18 @@ COPY skills/ skills/
 RUN mkdir -p skills/user
 
 # Install deps + compile workflows for all pre-bundled skills
-RUN python -m pawlia.install_skill_deps
+RUN python3 -m pawlia.install_skill_deps --no-compile
 
-# Default voice model: German Kerstin low (~63 MB, 16 kHz)
+# German Piper voices (low quality, 16 kHz, ~63 MB each → ~252 MB total)
 RUN mkdir -p /app/piper && \
-    wget -O /app/piper/de_DE-kerstin-low.onnx \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx" && \
-    wget -O /app/piper/de_DE-kerstin-low.onnx.json \
-        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/kerstin/low/de_DE-kerstin-low.onnx.json" && \
-    test -s /app/piper/de_DE-kerstin-low.onnx || { echo "ERROR: voice model download failed"; exit 1; }
+    for voice in karlsson kerstin ramona thorsten; do \
+        wget -O "/app/piper/de_DE-${voice}-low.onnx" \
+            "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/${voice}/low/de_DE-${voice}-low.onnx" && \
+        wget -O "/app/piper/de_DE-${voice}-low.onnx.json" \
+            "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/${voice}/low/de_DE-${voice}-low.onnx.json" && \
+        test -s "/app/piper/de_DE-${voice}-low.onnx" \
+            || { echo "ERROR: voice download failed for ${voice}"; exit 1; } ; \
+    done
 
 
 # Session data lives in a volume
@@ -69,4 +82,4 @@ VOLUME ["/app/session"]
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "-m", "pawlia", "--mode", "server"]
+CMD ["python3", "-m", "pawlia", "--mode", "server"]

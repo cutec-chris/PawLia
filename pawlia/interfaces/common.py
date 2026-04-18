@@ -27,13 +27,30 @@ class AgentCache:
 class ModelCommandResult:
     """Result of a /model command, ready for platform-specific formatting."""
 
-    __slots__ = ("action", "model", "ctx_label", "invalidate_agent")
+    __slots__ = ("action", "model", "ctx_label", "available", "invalidate_agent")
 
-    def __init__(self, action: str, model: str, ctx_label: str, invalidate_agent: bool = False):
-        self.action = action            # "show" or "set"
-        self.model = model              # current or new model name
+    def __init__(
+        self,
+        action: str,
+        model: str,
+        ctx_label: str,
+        available: Optional[List[str]] = None,
+        invalidate_agent: bool = False,
+    ):
+        self.action = action            # "show" | "set" | "cleared"
+        self.model = model              # current or new model name (or "(default)")
         self.ctx_label = ctx_label      # "Main", "Thread …", "Room", etc.
+        self.available = available or []  # available model keys from config.models
         self.invalidate_agent = invalidate_agent
+
+
+_CLEAR_TOKENS = {"off", "none", "-", "default", "clear"}
+
+
+def list_available_models(app: "App") -> List[str]:
+    """Return all configured model keys from config.models."""
+    models = app.config.get("models") or {}
+    return sorted(k for k, v in models.items() if isinstance(v, dict))
 
 
 def handle_model_command(
@@ -48,24 +65,40 @@ def handle_model_command(
     Returns a ModelCommandResult describing what happened.
     The caller is responsible for formatting and sending the response,
     and for invalidating the agent cache if ``result.invalidate_agent``.
+
+    Use ``args`` = "off" / "none" / "-" / "default" to clear an override.
     """
     session = app.memory.load_session(user_id)
     if ctx_label is None:
         ctx_label = f"Thread {thread_id}" if thread_id else "Main"
+    available = list_available_models(app)
 
     if not args.strip():
         if thread_id:
             current = app.memory.get_thread_model_override(session, thread_id) or "(default)"
         else:
             current = session.model_override or "(default)"
-        return ModelCommandResult("show", current, ctx_label)
+        return ModelCommandResult("show", current, ctx_label, available=available)
 
     new_model = args.strip()
+    if new_model.lower() in _CLEAR_TOKENS:
+        if thread_id:
+            app.memory.set_thread_model_override(session, thread_id, None)
+        else:
+            app.memory.set_model_override(session, None)
+        return ModelCommandResult(
+            "cleared", "(default)", ctx_label,
+            available=available, invalidate_agent=not thread_id,
+        )
+
     if thread_id:
         app.memory.set_thread_model_override(session, thread_id, new_model)
     else:
         app.memory.set_model_override(session, new_model)
-    return ModelCommandResult("set", new_model, ctx_label, invalidate_agent=not thread_id)
+    return ModelCommandResult(
+        "set", new_model, ctx_label,
+        available=available, invalidate_agent=not thread_id,
+    )
 
 
 def build_status(

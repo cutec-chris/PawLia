@@ -139,6 +139,8 @@ python <scripts_dir>/organizer.py delete-task --task-id "<title or substring>"
 
 Jobs are stored in `automations/jobs.json` (outside the vault) since they are scheduler-internal automation config.
 
+**Automation scripts** (`.py`, `.sh`, etc.) MUST be written to `workspace/.scripts/<name>` — this directory is inside the vault so you can read and edit scripts when the user asks about them. The scheduler resolves scripts from there first, falling back to `automations/` for legacy scripts.
+
 Add a job:
 ```
 python <scripts_dir>/organizer.py add-job --name "<name>" --script "<script_path>" --schedule "<schedule>" [--params '<JSON>'] [--no-notify]
