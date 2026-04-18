@@ -483,6 +483,116 @@ def cmd_package(args):
     }, ensure_ascii=False))
 
 
+def _find_harness(skill_path: Path):
+    """Locate the skill's harness. Returns (path, interpreter_argv) or None."""
+    candidates = [
+        ("harness.sh", ["sh"]),
+        ("harness.py", [sys.executable]),
+        ("harness.mjs", ["node"]),
+        ("harness.js", ["node"]),
+    ]
+    for filename, interp in candidates:
+        p = skill_path / filename
+        if p.is_file():
+            return p, interp + [str(p)]
+    return None
+
+
+def _build_cred_env(meta: dict):
+    """Load CRED_* env vars for credentials declared in requires_credentials.
+
+    Mirrors skill_runner._load_credentials — same key normalization so the
+    harness sees exactly what the skill sees at runtime.
+    Returns (env_dict, missing_keys).
+    """
+    required = meta.get("requires_credentials") or []
+    if not required:
+        return {}, []
+    session_dir = os.environ.get("PAWLIA_SESSION_DIR")
+    user_id = os.environ.get("PAWLIA_USER_ID")
+    if not session_dir or not user_id:
+        return {}, list(required)
+    cred_path = Path(session_dir) / user_id / ".credentials.json"
+    if not cred_path.is_file():
+        return {}, list(required)
+    try:
+        with open(cred_path, encoding="utf-8") as f:
+            all_creds = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}, list(required)
+    env = {}
+    missing = []
+    for key in required:
+        if key in all_creds:
+            env_key = "CRED_" + re.sub(r"[^A-Za-z0-9]", "_", key).upper()
+            env[env_key] = str(all_creds[key])
+        else:
+            missing.append(key)
+    return env, missing
+
+
+def cmd_test(args):
+    """Run the skill's harness with production-equivalent env.
+
+    Loads credentials from .credentials.json, injects them as CRED_* env
+    vars, sets PAWLIA_SESSION_DIR/PAWLIA_USER_ID, and runs the harness
+    script. Returns full stdout/stderr — no truncation, no wrapping.
+    """
+    name = args.name
+    skill_path = _find_skill(name)
+    if not skill_path:
+        print(json.dumps({
+            "success": False,
+            "error": f"Skill '{name}' not found (checked workspace + bundled)",
+        }))
+        sys.exit(1)
+
+    meta, _body, _content = _parse_frontmatter(skill_path / "SKILL.md")
+    if meta is None:
+        print(json.dumps({
+            "success": False, "name": name,
+            "error": "Malformed SKILL.md — cannot parse frontmatter",
+        }))
+        sys.exit(1)
+
+    found = _find_harness(skill_path)
+    if not found:
+        print(json.dumps({
+            "success": False, "name": name,
+            "error": f"No harness found in {skill_path}",
+            "hint": "Add harness.sh, harness.py, or harness.mjs at the skill root. "
+                    "See skill-creator SKILL.md § Harness for the contract.",
+        }))
+        sys.exit(1)
+
+    harness_path, cmd = found
+    cred_env, missing = _build_cred_env(meta)
+    env = {**os.environ, **cred_env}
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=args.timeout, env=env, check=False, cwd=str(skill_path),
+        )
+        stdout, stderr, exit_code, timed_out = proc.stdout, proc.stderr, proc.returncode, False
+    except subprocess.TimeoutExpired as e:
+        stdout = e.stdout or ""
+        stderr = e.stderr or ""
+        exit_code = None
+        timed_out = True
+
+    print(json.dumps({
+        "success": (not timed_out) and exit_code == 0,
+        "name": name,
+        "harness": str(harness_path),
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "missing_credentials": missing,
+        "stdout": stdout,
+        "stderr": stderr,
+    }, ensure_ascii=False))
+
+
 def cmd_compile(args):
     """Compile a skill's SKILL.md into workflow.yaml via the pawlia compiler.
 
@@ -586,6 +696,11 @@ def main():
     p_compile.add_argument("--name", required=True, help="Skill name to compile")
     p_compile.add_argument("--force", action="store_true", help="Re-compile even if version matches")
 
+    # test
+    p_test = sub.add_parser("test", help="Run the skill's harness end-to-end")
+    p_test.add_argument("--name", required=True, help="Skill name to test")
+    p_test.add_argument("--timeout", type=int, default=60, help="Harness timeout in seconds (default: 60)")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -598,6 +713,8 @@ def main():
         cmd_package(args)
     elif args.command == "compile":
         cmd_compile(args)
+    elif args.command == "test":
+        cmd_test(args)
     else:
         parser.print_help()
         sys.exit(1)

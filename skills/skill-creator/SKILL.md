@@ -38,7 +38,8 @@ skill-name/
 ├── SKILL.md            # required — frontmatter + instructions
 ├── scripts/            # optional — executable code (python/bash/node)
 ├── references/         # optional — docs loaded into context as needed
-└── assets/             # optional — templates/boilerplate used in OUTPUT (not read into context)
+├── assets/             # optional — templates/boilerplate used in OUTPUT (not read into context)
+└── harness.sh          # optional — smoke-test, runs via `creator.py test` (may also be .py/.mjs)
 ```
 
 You may see `workflow.yaml` in existing skills. **Never hand-write it** — it is
@@ -274,7 +275,38 @@ python <scripts_dir>/creator.py validate --name "<skill-name>"
 
 Fix all `issues` (fatal); review `warnings` and fix anything that matters.
 
-### 6. Compile (recommended)
+### 6. Harness & Test (REQUIRED before declaring done)
+
+Every non-trivial skill gets a **harness** — a smoke-test script at the skill
+root that exercises the primary workflow end-to-end. The harness is what lets
+you (and future edits to this skill) prove it still works without hand-rolling
+credentials and env vars each time.
+
+**File:** `harness.sh` (POSIX `sh`, preferred), or `harness.py`, or `harness.mjs`.
+Placed at the skill root — sibling to `SKILL.md`, not inside `scripts/`.
+
+**Contract:**
+- Reads the same `CRED_*` env vars the skill uses at runtime
+- Runs one or two read-only probes (e.g. `status` + one simple GET)
+- For write-capable skills: do a write-then-delete roundtrip, or skip writes unless `--write` is passed
+- Prints one final JSON line: `{"success": true, "checks": [{"name": "...", "ok": true, "detail": "..."}]}`
+- Exits 0 on all-green, non-zero on any failure
+- **Leaves no persistent side effects** (clean up test data)
+
+**Run it:**
+```
+python <scripts_dir>/creator.py test --name "<skill-name>"
+```
+
+This loads credentials from `.credentials.json`, injects them as `CRED_*`
+env vars using the same normalization the runtime uses, sets
+`PAWLIA_SESSION_DIR` / `PAWLIA_USER_ID`, and runs the harness. Output
+includes full `stdout`, `stderr`, `exit_code`, and any `missing_credentials`
+— nothing is truncated or wrapped, so errors are readable.
+
+**Do not declare a skill "done" until `test` exits 0.**
+
+### 7. Compile (recommended)
 
 Turn the SKILL.md instructions into a structured `workflow.yaml` so the
 SkillRunner can execute it as building blocks:
@@ -293,7 +325,7 @@ The skill works even without `workflow.yaml` (tool-call / command fallback),
 but compilation is the difference between guided execution and the model
 reasoning about every step from scratch.
 
-### 7. Package (optional)
+### 8. Package (optional)
 
 ```
 python <scripts_dir>/creator.py package --name "<skill-name>"
@@ -301,12 +333,58 @@ python <scripts_dir>/creator.py package --name "<skill-name>"
 
 Produces a `.skill` file (zip archive) for distribution.
 
-### 8. Iterate
+### 9. Iterate
 
 Use the skill on real tasks. Notice struggles (wrong triggers, missing params,
 unclear instructions, brittle error handling). Update SKILL.md or scripts.
-Validate, then **bump `metadata.version`** and re-compile — the compiler skips
-up-to-date skills unless the version changed (or you pass `--force`).
+Validate + `test`, then **bump `metadata.version`** and re-compile — the
+compiler skips up-to-date skills unless the version changed (or you pass
+`--force`).
+
+---
+
+## Fixing / Auditing an Existing Skill
+
+When a user reports "skill X is broken" or asks for an audit, follow this
+loop — do NOT try to guess the fix from SKILL.md alone.
+
+### 1. Reproduce with `test`
+
+```
+python <scripts_dir>/creator.py test --name "<skill-name>"
+```
+
+Read the full `stdout` / `stderr`. If there's no harness yet, write one
+first — you cannot fix what you cannot reproduce.
+
+### 2. Get the real error — never trust a wrapper
+
+Skill scripts often wrap upstream errors into generic messages like
+`"HTTP 500 - server error"`. That strips the information you need. When
+the harness output is too generic:
+
+- Open the script and check whether it swallows response bodies in error
+  branches. Fix the script to **always include status code + full response
+  body** in failure output (see `references/patterns.md` § Error Handling).
+- Re-run the harness. The real error (validation detail, missing field,
+  auth message) should now be visible.
+
+### 3. Compare against a working reference
+
+If the skill integrates an external API, find the closest-working sibling
+(e.g. if `sparkyfitness` is broken, read `fittrackee`'s script + SKILL.md).
+Compare payload shape, auth headers, endpoint paths. Most skill bugs are
+payload-schema mismatches that another skill already got right.
+
+### 4. Fix, re-test, repeat
+
+Edit, run `test` again. Only declare "fixed" when the harness is green.
+
+### 5. If you hit 2–3 failed fix attempts → stop and report
+
+Don't loop indefinitely. Report what you found (full error from step 2,
+what you tried, what you suspect) and ask the user. Looping burns context
+without progress.
 
 ---
 
@@ -317,6 +395,7 @@ up-to-date skills unless the version changed (or you pass `--force`).
 | `init` | creator.py | Scaffold a new skill |
 | `validate` | creator.py | Check SKILL.md for errors |
 | `list` | creator.py | Show all skills (workspace + bundled) |
+| `test` | creator.py | Run the skill's harness with real credentials/env |
 | `compile` | creator.py | LLM-compile SKILL.md → workflow.yaml |
 | `package` | creator.py | Create `.skill` zip |
 | `set` | credentials.py | Store a credential |
