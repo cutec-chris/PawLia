@@ -383,7 +383,8 @@ class Scheduler:
             return
 
         # Auto-commit (throttled to max 1 per 5 min inside auto_commit)
-        auto_commit(workspace)
+        if auto_commit(workspace) and self._git_push:
+            push(workspace)
 
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
