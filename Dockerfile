@@ -36,7 +36,8 @@ RUN apk add --no-cache \
         nodejs \
         npm \
         openssl \
-        libffi
+        libffi \
+        git
 
 WORKDIR /app
 
