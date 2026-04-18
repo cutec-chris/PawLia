@@ -28,7 +28,26 @@ class AgentSkill:
         self.description: str = metadata.get("description", "")
         self.scripts_dir = os.path.join(skill_path, "scripts")
         self.requires_credentials: list = metadata.get("requires_credentials", [])
+        self.max_tool_turns: Optional[int] = self._load_max_tool_turns(metadata)
         self.instructions = self._load_instructions()
+
+    @staticmethod
+    def _load_max_tool_turns(metadata: Dict[str, Any]) -> Optional[int]:
+        """Read metadata.max_tool_turns override (positive int) or None."""
+        raw = (metadata.get("metadata") or {}).get("max_tool_turns")
+        if raw is None:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid metadata.max_tool_turns=%r in skill '%s' — ignoring",
+                raw, metadata.get("name", "?"),
+            )
+            return None
+        if value < 1:
+            return None
+        return value
 
     def _load_instructions(self) -> str:
         """Load the Markdown body from SKILL.md (after YAML frontmatter)."""

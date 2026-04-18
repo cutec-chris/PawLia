@@ -36,9 +36,16 @@ class SkillRunnerAgent(BaseAgent):
 
     Tries tool-call mode first. If ``command_fallback`` is enabled and
     tool-call mode produces no output, falls back to command mode.
+
+    Context policy: the skill's tool-call history is kept **complete** for
+    the entire run. No trimming, no summarization, no truncation of tool
+    outputs between turns. Compaction is allowed ONLY as a guardrail when
+    the real LLM context window is about to overflow — and even then via
+    summary, never by dropping messages. Do not introduce prune/shrink
+    heuristics in this loop.
     """
 
-    MAX_TOOL_TURNS = 12
+    MAX_TOOL_TURNS = 30
     MAX_RETRIES = 2
 
     def __init__(
@@ -218,7 +225,8 @@ class SkillRunnerAgent(BaseAgent):
 
         nudge_count = 0
         total_tool_calls = len(first_response.tool_calls)
-        for _turn in range(1, self.MAX_TOOL_TURNS):
+        max_turns = self.skill.max_tool_turns or self.MAX_TOOL_TURNS
+        for _turn in range(1, max_turns):
             response = await self._invoke(messages, llm=self.bound_llm)
             self.logger.debug(
                 "Tool-call mode turn %d: tool_calls=%s, content=%s",

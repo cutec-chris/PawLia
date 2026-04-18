@@ -14,6 +14,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "3.1"
+  max_tool_turns: 50
 ---
 
 # Skill Creator
@@ -85,6 +86,7 @@ metadata:
   author: Your Name
   version: "1.0"
   compatibility: Requires X       # optional — human-readable deployment note
+  max_tool_turns: 30              # optional — overrides the default tool-call budget (30); bump for skills that need deep iterative work
   requires_config:                # optional — NESTED under metadata
     - url                         # keys that must exist under skill-config.<name>.* in config.yaml
     - timeout
@@ -98,7 +100,7 @@ requires_credentials:             # optional — TOP-LEVEL (sibling to metadata,
 | Field | Location |
 |-------|----------|
 | `name`, `description`, `license` | top-level |
-| `author`, `version`, `compatibility` | under `metadata:` |
+| `author`, `version`, `compatibility`, `max_tool_turns` | under `metadata:` |
 | `requires_config` | under `metadata:` (NESTED) |
 | `requires_credentials` | top-level (SIBLING to `metadata`) |
 
