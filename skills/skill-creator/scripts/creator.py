@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -36,9 +37,8 @@ description: >
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "1.0"
-{credentials_field}
----
+  version: "1.0"{config_field}
+{credentials_field}---
 
 # {title}
 
@@ -49,11 +49,18 @@ metadata:
    ```
    python <scripts_dir>/{script_name} <args>
    ```
-3. Return the output to the user.
+3. Parse the JSON output (`success`, plus result fields or `error`).
+4. Return a clean, formatted result to the user.
 
 ## Output format
 
-The script returns JSON:
+Describe the exact shape you want the sub-agent to return. Example:
+
+```
+Result: <value>
+```
+
+The script itself returns JSON:
 ```json
 {{"success": true, "result": "..."}}
 ```
@@ -69,6 +76,7 @@ On error:
 |-------|-----------------|
 | Connection error | Retry once, then report to user |
 | Invalid input | Tell user what format is expected |
+| Missing credential | Tell user which `CRED_*` env var is missing |
 '''
 
 SCRIPT_TEMPLATES = {
@@ -78,6 +86,7 @@ SCRIPT_TEMPLATES = {
 
 import argparse
 import json
+import os
 import sys
 
 
@@ -86,8 +95,21 @@ def main():
     parser.add_argument("--param", help="Example parameter")
     args = parser.parse_args()
 
-    # TODO: implement your skill logic here
-    result = {{"success": True, "message": "Not implemented yet"}}
+    # Read credentials (if declared in SKILL.md's requires_credentials):
+    #   api_key = os.environ.get("CRED_MY_API_KEY")
+    #
+    # Read PawLia runtime env:
+    #   user_id = os.environ.get("PAWLIA_USER_ID")
+    #   session_dir = os.environ.get("PAWLIA_SESSION_DIR")
+
+    try:
+        # TODO: implement your skill logic here
+        result = {{"success": True, "message": "Not implemented yet"}}
+    except Exception as e:
+        result = {{"success": False, "error": str(e)}}
+        print(json.dumps(result, ensure_ascii=False))
+        sys.exit(1)
+
     print(json.dumps(result, ensure_ascii=False))
 
 
@@ -195,14 +217,23 @@ def cmd_init(args):
     description = args.description or f"The {name} skill."
     title = _title(name)
 
-    # Build credentials field for frontmatter
+    # Build credentials field (TOP-LEVEL — sibling to metadata)
     cred_keys = []
     if args.credentials:
-        cred_keys = [c.strip() for c in args.credentials.split(",")]
+        cred_keys = [c.strip() for c in args.credentials.split(",") if c.strip()]
     if cred_keys:
-        cred_yaml = "requires_credentials:\n" + "\n".join(f"  - {k}" for k in cred_keys)
+        cred_yaml = "requires_credentials:\n" + "\n".join(f"  - {k}" for k in cred_keys) + "\n"
     else:
         cred_yaml = ""
+
+    # Build config field (NESTED under metadata — loader checks metadata.requires_config)
+    config_keys = []
+    if args.config:
+        config_keys = [c.strip() for c in args.config.split(",") if c.strip()]
+    if config_keys:
+        config_yaml = "\n  requires_config:\n" + "\n".join(f"    - {k}" for k in config_keys)
+    else:
+        config_yaml = ""
 
     # Parse resources
     resources = []
@@ -223,6 +254,7 @@ def cmd_init(args):
         title=title,
         script_name=sname,
         credentials_field=cred_yaml,
+        config_field=config_yaml,
     )
     (target / "SKILL.md").write_text(skill_md, encoding="utf-8")
     created = [str(target / "SKILL.md")]
@@ -292,6 +324,20 @@ def cmd_validate(args):
         issues.append("Missing required field: 'description'")
     elif len(meta.get("description", "")) < 20:
         warnings.append("Description is very short (<20 chars) — may not trigger reliably")
+
+    # Placement check: requires_config must be NESTED under metadata (not top-level)
+    if "requires_config" in meta and "requires_config" not in (meta.get("metadata") or {}):
+        issues.append(
+            "'requires_config' is at top-level but the loader reads it from "
+            "metadata.requires_config — move it under the 'metadata:' block"
+        )
+
+    # Placement check: requires_credentials must be TOP-LEVEL (not under metadata)
+    if "requires_credentials" not in meta and (meta.get("metadata") or {}).get("requires_credentials"):
+        issues.append(
+            "'requires_credentials' is nested under metadata but the loader reads it "
+            "from the top level — move it out of the 'metadata:' block"
+        )
 
     # Instruction body
     if not body:
@@ -437,6 +483,76 @@ def cmd_package(args):
     }, ensure_ascii=False))
 
 
+def cmd_compile(args):
+    """Compile a skill's SKILL.md into workflow.yaml via the pawlia compiler.
+
+    The compiler is an LLM call — it can fail if no compiler model is configured
+    or if the SKILL.md is malformed. A skill still runs without workflow.yaml
+    (fallback to tool-call/command mode), so compilation is optional but
+    recommended after substantive edits.
+    """
+    name = args.name
+    skill_path = _find_skill(name)
+
+    if not skill_path:
+        print(json.dumps({
+            "success": False,
+            "error": f"Skill '{name}' not found (checked workspace + bundled)",
+        }))
+        sys.exit(1)
+
+    # Compiler resolves skills by walking the parent dir, so pass the parent
+    skills_dir = str(skill_path.parent)
+
+    cmd = [
+        sys.executable, "-m", "pawlia.skills.compiler",
+        "--skill", name,
+        "--skills-dir", skills_dir,
+    ]
+    if args.force:
+        cmd.append("--force")
+
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=300, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print(json.dumps({
+            "success": False,
+            "error": "Compiler timed out after 300s",
+        }))
+        sys.exit(1)
+    except FileNotFoundError as e:
+        print(json.dumps({
+            "success": False,
+            "error": f"Could not invoke compiler: {e}",
+        }))
+        sys.exit(1)
+
+    workflow_path = skill_path / "workflow.yaml"
+    workflow_exists = workflow_path.is_file()
+
+    if proc.returncode != 0 or not workflow_exists:
+        print(json.dumps({
+            "success": False,
+            "name": name,
+            "error": "Compilation failed",
+            "stderr": (proc.stderr or "")[-1500:],
+            "stdout": (proc.stdout or "")[-500:],
+            "workflow_written": workflow_exists,
+            "hint": "Skill still works in fallback mode without workflow.yaml. "
+                    "Check the compiler model config (agents.compiler in config.yaml).",
+        }))
+        sys.exit(1)
+
+    print(json.dumps({
+        "success": True,
+        "name": name,
+        "workflow": str(workflow_path),
+        "size_bytes": workflow_path.stat().st_size,
+    }, ensure_ascii=False))
+
+
 # ── CLI ────────────────────────────────────────────────────────────────
 
 def main():
@@ -448,7 +564,8 @@ def main():
     p_init.add_argument("--name", required=True, help="Skill name (lowercase, hyphens)")
     p_init.add_argument("--description", help="One-line description")
     p_init.add_argument("--resources", help="Comma-separated: scripts,references,assets")
-    p_init.add_argument("--credentials", help="Comma-separated credential key names (e.g. api_key,token)")
+    p_init.add_argument("--credentials", help="Comma-separated credential key names (top-level requires_credentials, e.g. api_key,token)")
+    p_init.add_argument("--config", help="Comma-separated config key names (nested under metadata.requires_config, e.g. url,timeout)")
     p_init.add_argument("--script", choices=["python", "node", "bash"], default="python")
     p_init.add_argument("--no-script", action="store_true", help="Skip script template")
 
@@ -464,6 +581,11 @@ def main():
     p_package.add_argument("--name", required=True, help="Skill name to package")
     p_package.add_argument("--output", help="Output directory")
 
+    # compile
+    p_compile = sub.add_parser("compile", help="Compile SKILL.md into workflow.yaml (LLM-driven)")
+    p_compile.add_argument("--name", required=True, help="Skill name to compile")
+    p_compile.add_argument("--force", action="store_true", help="Re-compile even if version matches")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -474,6 +596,8 @@ def main():
         cmd_list(args)
     elif args.command == "package":
         cmd_package(args)
+    elif args.command == "compile":
+        cmd_compile(args)
     else:
         parser.print_help()
         sys.exit(1)

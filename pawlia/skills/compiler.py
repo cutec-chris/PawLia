@@ -201,6 +201,7 @@ async def _main() -> None:
     parser.add_argument("--all", action="store_true", help="Compile all skills")
     parser.add_argument("--force", action="store_true", help="Re-compile even if up-to-date")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
+    parser.add_argument("--skills-dir", default=None, help="Directory to look for skills in (default: bundled skills/)")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
 
@@ -216,9 +217,12 @@ async def _main() -> None:
 
     config = load_config(args.config)
 
-    # __file__ is pawlia/skills/compiler.py → 3 levels up to project root
-    pkg_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    skills_dir = os.path.join(pkg_dir, "skills")
+    if args.skills_dir:
+        skills_dir = os.path.abspath(args.skills_dir)
+    else:
+        # __file__ is pawlia/skills/compiler.py → 3 levels up to project root
+        pkg_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        skills_dir = os.path.join(pkg_dir, "skills")
 
     results = await compile_all(
         skills_dir, config,
