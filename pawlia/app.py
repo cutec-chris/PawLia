@@ -74,7 +74,7 @@ class App:
         Returns only the skills from ``session/<user_id>/workspace/skills/``.
         Thread-safe via ``_skills_lock``.
         """
-        allow_workspace = self.config.get("skill-install", {}).get("allow_workspace", False)
+        allow_workspace = self.config.get("skill-install", {}).get("allow_workspace", True)
         if not allow_workspace or not os.path.isdir(self.session_dir):
             return {}
 
