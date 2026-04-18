@@ -13,7 +13,7 @@ description: >
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "3.1"
+  version: "3.2"
   max_tool_turns: 50
 ---
 
@@ -21,372 +21,206 @@ metadata:
 
 Create, edit, improve, or audit PawLia AgentSkills. Manage credentials.
 
-## About Skills
+A skill is a sub-agent with its own LLM session. The dispatcher reads the skill's
+`description` to decide whether to invoke it; the SkillRunner then loads the full
+SKILL.md body, injects credentials as env vars, and hands control to the
+sub-agent with bash + other tools.
 
-Skills are modular packages that extend PawLia's capabilities — specialized
-workflows, tool integrations, domain expertise, and bundled scripts/references/
-assets. They give the agent procedural knowledge no model can possess on its own.
-
-A skill runs as a sub-agent with its own LLM session: the dispatcher reads the
-skill's `description` to decide whether to invoke it, then the SkillRunner loads
-the full SKILL.md body, injects credentials as env vars, and hands control to
-the sub-agent with access to bash and other tools.
-
-## Anatomy of a Skill
+## Anatomy
 
 ```
 skill-name/
-├── SKILL.md            # required — frontmatter + instructions
-├── scripts/            # optional — executable code (python/bash/node)
-├── references/         # optional — docs loaded into context as needed
-├── assets/             # optional — templates/boilerplate used in OUTPUT (not read into context)
-└── harness.sh          # optional — smoke-test, runs via `creator.py test` (may also be .py/.mjs)
+├── SKILL.md        # required — frontmatter + instructions
+├── scripts/        # optional — executable code (python/bash/node)
+├── references/     # optional — docs the agent reads while working
+├── assets/         # optional — templates/boilerplate used IN the output
+└── harness.sh      # optional — smoke-test (also .py / .mjs); run via `creator.py test`
 ```
 
-You may see `workflow.yaml` in existing skills. **Never hand-write it** — it is
-LLM-compiled from SKILL.md by the workflow compiler. Compilation is NOT
-automatic on load or on file change — trigger it explicitly via
-`creator.py compile --name <name>` after you finish implementing or edit
-SKILL.md substantively. Without a fresh `workflow.yaml`, the skill still runs
-(falls back to tool-call mode or command mode) — just without the optimised
-building-block pipeline.
+Three loading levels: **frontmatter** always in context (~100 tokens, triggers
+the skill) → **SKILL.md body** loaded when triggered (keep <500 lines) →
+**bundled resources** loaded on demand (scripts execute without entering
+context).
 
-### Three loading levels (progressive disclosure)
+No README / CHANGELOG / test-suites / setup guides. Only files the agent needs.
 
-1. **Frontmatter** (`name` + `description`) — always in context; triggers the skill
-2. **SKILL.md body** — loaded only when the skill triggers; keep under 500 lines
-3. **Bundled resources** — loaded as needed; scripts execute without being read into context
+`workflow.yaml`, if present, was LLM-compiled from SKILL.md — never hand-write it.
+Compile with `creator.py compile --name <name>` after substantive SKILL.md edits.
 
-`references/` = docs the agent reads WHILE working (schemas, API docs, policies).
-`assets/` = files used IN the output (templates, images, boilerplate) — not read into context.
-
-### What NOT to include
-
-No README.md, CHANGELOG.md, INSTALLATION_GUIDE.md, test files, or auxiliary
-docs. Only files the agent needs to do its job.
-
-For design principles and writing patterns, read `references/design-principles.md`
-and `references/patterns.md` before writing or reviewing a SKILL.md.
+For design patterns, read [references/patterns.md](references/patterns.md) and
+[references/design-principles.md](references/design-principles.md).
 
 ---
 
-## Frontmatter Reference
-
-The complete frontmatter for a PawLia skill. Note the exact nesting — the loader
-is strict about where each field lives:
+## Frontmatter
 
 ```yaml
 ---
-name: my-skill                    # required — lowercase + hyphens, matches folder name
-description: >                    # required — THE dispatch trigger. Include what + when
-  What the skill does. Use when [trigger phrases and contexts]. Also triggers
-  on phrases like "X", "Y", "Z".
-license: MIT                      # convention
+name: my-skill                    # required — lowercase+hyphens, matches folder
+description: >                    # required — the dispatch trigger; include what AND when
+  What the skill does. Use when [trigger phrases and contexts]. Triggers on
+  phrases like "X", "Y", "Z".
+license: MIT
 metadata:
   author: Your Name
   version: "1.0"
-  compatibility: Requires X       # optional — human-readable deployment note
-  max_tool_turns: 30              # optional — overrides the default tool-call budget (30); bump for skills that need deep iterative work
+  max_tool_turns: 30              # optional — overrides the default budget (30)
   requires_config:                # optional — NESTED under metadata
-    - url                         # keys that must exist under skill-config.<name>.* in config.yaml
-    - timeout
-requires_credentials:             # optional — TOP-LEVEL (sibling to metadata, NOT nested)
-  - my_api_key                    # each becomes env var CRED_MY_API_KEY at runtime
+    - url                         # keys under skill-config.<name>.* in config.yaml
+requires_credentials:             # optional — TOP-LEVEL (sibling to metadata)
+  - my_api_key                    # each becomes CRED_MY_API_KEY at runtime
 ---
 ```
 
-**Placement rules** (these are enforced by the loader — getting them wrong breaks the skill):
+Placement matters — the loader reads `requires_config` from `metadata`,
+`requires_credentials` from top-level. Getting it wrong silently breaks the
+skill.
 
-| Field | Location |
-|-------|----------|
-| `name`, `description`, `license` | top-level |
-| `author`, `version`, `compatibility`, `max_tool_turns` | under `metadata:` |
-| `requires_config` | under `metadata:` (NESTED) |
-| `requires_credentials` | top-level (SIBLING to `metadata`) |
+**Description writing** decides whether your skill triggers at all. Include
+both *what* and *when*, list trigger phrases, cover edge cases. Be slightly
+pushy — models tend to undertrigger. Put all "when to use" info here, never
+in the body (the body is invisible to the dispatcher).
 
-### Credentials vs. Configuration
+## Credentials vs. Config
 
-Two distinct mechanisms — pick the right one:
+- `requires_credentials` — per-user secrets (API keys, tokens). Stored in
+  `session/<user_id>/.credentials.json` via `credentials.py`. Injected as
+  `CRED_<NORMALIZED>` where `<NORMALIZED>` is the key uppercased with
+  non-alphanumerics → `_`. Example: `api-key` → `CRED_API_KEY`.
+- `metadata.requires_config` — deployment-level settings in `config.yaml` under
+  `skill-config.<name>.*`. Not auto-injected; pass on the CLI. Skills with
+  missing config are not loaded.
 
-- **`requires_credentials`** — per-user secrets (API keys, tokens). Stored in
-  `session/<user_id>/.credentials.json` via `credentials.py`. Injected as env
-  vars `CRED_<KEY>` where `<KEY>` is uppercased and non-alphanumeric chars become
-  underscores. Example: key `api-key` → env var `CRED_API_KEY`.
-- **`metadata.requires_config`** — deployment-level settings in `config.yaml`
-  under `skill-config.<skill-name>.*`. The web UI prompts the user to fill
-  missing keys. Skills without these values configured are not loaded at all.
-  Use for URLs, model names, hostnames — shared, non-secret settings.
+## Runtime Environment
 
-### Description writing (CRITICAL — this is what triggers the skill)
+Scripts receive:
 
-The `description` is the ONLY field the dispatcher reads to decide whether to
-invoke your skill. Put ALL "when to use" information here. Body content is
-invisible to the dispatcher.
+| Env var | Value |
+|---------|-------|
+| `PAWLIA_SESSION_DIR` | Absolute path to the session root |
+| `PAWLIA_USER_ID` | Current user ID |
+| `CRED_<KEY>` | Each credential declared in `requires_credentials` |
 
-Bad:
-```yaml
-description: Search the web.
-```
-
-Good:
-```yaml
-description: >
-  Perform web searches. Use when the user asks for current information, news,
-  or wants to find online resources. Also triggers on "what is...", "look up...",
-  "search for..." — even without the explicit word "search".
-```
-
-Rules:
-- Include **what** + **when** (both required)
-- List specific trigger phrases
-- Be slightly "pushy" — models tend to undertrigger
-- Cover edge cases where the skill SHOULD activate
-
----
-
-## Runtime Environment (what scripts can read)
-
-When a skill's script runs, the SkillRunner injects these env vars:
-
-| Env var | What it is | Set when |
-|---------|------------|----------|
-| `PAWLIA_SESSION_DIR` | Absolute path to the session root | always |
-| `PAWLIA_USER_ID` | Current user ID | always |
-| `CRED_<KEY>` | Each credential from `requires_credentials` | credential is stored |
-
-Config values (`metadata.requires_config`) are **not** auto-injected — they are
-passed explicitly on the command line, the sub-agent fills them in when calling
-the script. Example: `python <scripts_dir>/search.py --url "<url>"`.
-
-**Placeholders in SKILL.md text** (substituted by the runner before the sub-agent
-sees the prompt):
-
-| Placeholder | Becomes |
-|-------------|---------|
-| `<scripts_dir>` | Absolute path to the skill's `scripts/` directory |
-| `<user_id>` | Current user ID |
-| `<session_dir>` | Absolute session directory |
-
-Always reference scripts with `<scripts_dir>/<script_name>`, never a relative path.
+Placeholders in the SKILL.md body — substituted by the runner before the
+sub-agent sees them: `<scripts_dir>`, `<user_id>`, `<session_dir>`. Always
+reference scripts as `<scripts_dir>/<name>`, never relative paths.
 
 ---
 
 ## Credential Management
 
-### Store a credential
-
-Ask the user for the value, then:
 ```
-python <scripts_dir>/credentials.py set --key "<key_name>" --value "<value>"
-```
-
-The response includes `value_read_back` — compare it to what you intended to
-set and report any discrepancy to the user.
-
-### Check / list / delete
-
-```
-python <scripts_dir>/credentials.py check --keys "api_key,other_key"
+python <scripts_dir>/credentials.py set --key "<name>" --value "<val>"
+python <scripts_dir>/credentials.py check --keys "a,b,c"
 python <scripts_dir>/credentials.py list
-python <scripts_dir>/credentials.py delete --key "<key_name>"
+python <scripts_dir>/credentials.py delete --key "<name>"
 ```
+
+After `set`, the response includes `value_read_back` — compare it to what you
+intended and flag any mismatch.
 
 ---
 
 ## Creating a Skill
 
-### 1. Understand Intent
+1. **Understand intent.** Ask for concrete examples: what should trigger it,
+   what's the input/output, does it need credentials or config? One question
+   at a time.
 
-To build an effective skill, gather concrete examples. Without these, the skill
-will be too generic to trigger reliably and too vague to guide the sub-agent.
+2. **Plan resources.** For each example, ask *"what would be rewritten or
+   re-discovered every time?"* — that becomes `scripts/`, `references/`, or
+   `assets/`.
 
-Ask:
-- "What should this skill do? Can you give me a concrete example?"
-- "What would a user say to trigger this skill?"
-- "What's the expected input and output?"
-- "Does it need API keys (credentials) or instance settings (config.yaml)?"
+3. **Scaffold.**
+   ```
+   python <scripts_dir>/creator.py init \
+     --name "<name>" --description "<desc>" \
+     [--resources scripts,references,assets] \
+     [--credentials "k1,k2"] [--config "url,timeout"] \
+     [--script python|node|bash]
+   ```
 
-Don't ask all questions at once — start with the most important, follow up.
-Conclude when you have a clear picture of functionality and triggers.
+4. **Implement.** Write scripts first, test each one by running it directly
+   with the right env vars, then write the SKILL.md body that guides the
+   sub-agent. SKILL.md is imperative ("Run the script", "Parse the output"),
+   shows the exact output shape, lists error-recovery steps in a table, and
+   references any `references/` files with a note on *when* to read them.
 
-### 2. Plan Resources
+   Scripts must: parse args via `argparse` (or equivalent), read credentials
+   from `CRED_*`, output `{"success": bool, ...}` as JSON, exit 0 on success
+   and non-zero on failure.
 
-For each concrete example, ask:
-> "What would need to be rewritten or re-discovered from scratch each time?"
+5. **Validate.** `creator.py validate --name "<name>"` — fix all `issues`,
+   review `warnings`.
 
-That becomes a script, reference, or asset.
+6. **Harness (recommended).** Add `harness.sh` at the skill root (also `.py`
+   or `.mjs`) that runs 1–3 read-only probes and prints one JSON line
+   `{"success": true, "checks": [...]}`. Write-capable skills do a
+   write-then-delete roundtrip or gate writes behind `--write`. Harness
+   leaves no side effects.
 
-Examples:
-- "Rotate this PDF" → same code every time → `scripts/rotate_pdf.py`
-- "Build a todo app" → same HTML boilerplate every time → `assets/todo-template/`
-- "How many users logged in today?" → re-discovering schemas → `references/schema.md`
+   Run via `creator.py test --name "<name>"` — loads real credentials and
+   env, prints full stdout/stderr (no truncation). See
+   [references/patterns.md](references/patterns.md) § Harness for the
+   skeleton.
 
-| Resource | When needed |
-|----------|-------------|
-| `scripts/` | Repeated logic; deterministic reliability |
-| `references/` | Docs the agent should read while working |
-| `assets/` | Templates/boilerplate used IN the output |
-| `requires_credentials` | User-specific API keys |
-| `metadata.requires_config` | Deployment settings from config.yaml |
+7. **Compile.** `creator.py compile --name "<name>"` — LLM-compiles SKILL.md
+   into `workflow.yaml`. Skipped if version matches; pass `--force` to
+   override. The skill runs without it (fallback mode), but compiled is
+   better.
 
-### 3. Scaffold
+8. **Package (optional).** `creator.py package --name "<name>"` produces a
+   `.skill` zip.
 
-**Naming:** lowercase + hyphens only, max 63 chars, matches directory name
-(e.g., `pdf-editor`, `gh-address-comments`). Prefer short, verb-led phrases.
-Namespace by tool when it clarifies triggering.
-
-```
-python <scripts_dir>/creator.py init \
-  --name "<skill-name>" \
-  --description "<desc with triggers>" \
-  [--resources scripts,references,assets] \
-  [--credentials "key1,key2"] \
-  [--config "url,timeout"] \
-  [--script python|node|bash]
-```
-
-Creates the skill in `$PAWLIA_SESSION_DIR/$PAWLIA_USER_ID/workspace/skills/<name>/`.
-
-### 4. Implement
-
-**SKILL.md body** — write in imperative form ("Run the script", "Parse the output"):
-
-1. Clear step-by-step workflow
-2. Output format section (explicit structure — show the exact shape)
-3. Error handling table for self-repair (agent recovers, doesn't escalate)
-4. Reference any `references/` files with a note on WHEN to read them
-5. Keep under 500 lines; split overflow into `references/`
-
-**Scripts** — every script must:
-- Accept arguments via `argparse`
-- Read credentials via `os.environ.get("CRED_<KEY>")` (remember the uppercase/underscore normalization)
-- Read PawLia env: `os.environ.get("PAWLIA_USER_ID")`, `os.environ.get("PAWLIA_SESSION_DIR")`
-- Output valid JSON: `{"success": true, ...}` or `{"success": false, "error": "..."}`
-- Exit 0 on success, non-zero on failure
-
-**Test the script** by running it manually before declaring the skill done.
-
-See `references/patterns.md` for writing patterns (workflows, error handling,
-output formats, description writing).
-
-### 5. Validate
-
-```
-python <scripts_dir>/creator.py validate --name "<skill-name>"
-```
-
-Fix all `issues` (fatal); review `warnings` and fix anything that matters.
-
-### 6. Harness & Test (REQUIRED before declaring done)
-
-Every non-trivial skill gets a **harness** — a smoke-test script at the skill
-root that exercises the primary workflow end-to-end. The harness is what lets
-you (and future edits to this skill) prove it still works without hand-rolling
-credentials and env vars each time.
-
-**File:** `harness.sh` (POSIX `sh`, preferred), or `harness.py`, or `harness.mjs`.
-Placed at the skill root — sibling to `SKILL.md`, not inside `scripts/`.
-
-**Contract:**
-- Reads the same `CRED_*` env vars the skill uses at runtime
-- Runs one or two read-only probes (e.g. `status` + one simple GET)
-- For write-capable skills: do a write-then-delete roundtrip, or skip writes unless `--write` is passed
-- Prints one final JSON line: `{"success": true, "checks": [{"name": "...", "ok": true, "detail": "..."}]}`
-- Exits 0 on all-green, non-zero on any failure
-- **Leaves no persistent side effects** (clean up test data)
-
-**Run it:**
-```
-python <scripts_dir>/creator.py test --name "<skill-name>"
-```
-
-This loads credentials from `.credentials.json`, injects them as `CRED_*`
-env vars using the same normalization the runtime uses, sets
-`PAWLIA_SESSION_DIR` / `PAWLIA_USER_ID`, and runs the harness. Output
-includes full `stdout`, `stderr`, `exit_code`, and any `missing_credentials`
-— nothing is truncated or wrapped, so errors are readable.
-
-**Do not declare a skill "done" until `test` exits 0.**
-
-### 7. Compile (recommended)
-
-Turn the SKILL.md instructions into a structured `workflow.yaml` so the
-SkillRunner can execute it as building blocks:
-
-```
-python <scripts_dir>/creator.py compile --name "<skill-name>"
-```
-
-This invokes the workflow compiler LLM — it reads SKILL.md + the `scripts/`
-listing and produces `workflow.yaml` with verified commands, parameter
-extraction, and error-recovery blocks. Re-run after every substantive SKILL.md
-edit. If the skill's metadata `version` is unchanged and `workflow.yaml`
-already exists, it's skipped — pass `--force` to override.
-
-The skill works even without `workflow.yaml` (tool-call / command fallback),
-but compilation is the difference between guided execution and the model
-reasoning about every step from scratch.
-
-### 8. Package (optional)
-
-```
-python <scripts_dir>/creator.py package --name "<skill-name>"
-```
-
-Produces a `.skill` file (zip archive) for distribution.
-
-### 9. Iterate
-
-Use the skill on real tasks. Notice struggles (wrong triggers, missing params,
-unclear instructions, brittle error handling). Update SKILL.md or scripts.
-Validate + `test`, then **bump `metadata.version`** and re-compile — the
-compiler skips up-to-date skills unless the version changed (or you pass
-`--force`).
+9. **Iterate.** Use it on real tasks, notice struggles, update SKILL.md or
+   scripts, bump `metadata.version`, re-compile.
 
 ---
 
 ## Fixing / Auditing an Existing Skill
 
-When a user reports "skill X is broken" or asks for an audit, follow this
-loop — do NOT try to guess the fix from SKILL.md alone.
+Three phases with hard stop-gates. Do not blur them.
 
-### 1. Reproduce with `test`
+### Phase 1 — Diagnose (≤5 tool calls)
 
-```
-python <scripts_dir>/creator.py test --name "<skill-name>"
-```
+Read the skill files **once**. Run the harness or reproduce the failing
+command. Capture the full error (status code + response body).
 
-Read the full `stdout` / `stderr`. If there's no harness yet, write one
-first — you cannot fix what you cannot reproduce.
+Skill scripts often wrap upstream errors into generic "HTTP 500 - server
+error" strings. If the output is too generic, **the first fix is to the
+script's error branch** — make it print the real status + body — before any
+further investigation.
 
-### 2. Get the real error — never trust a wrapper
+**Stop-gate:** as soon as you have a concrete, actionable root cause
+(specific missing field, wrong endpoint, validation message), **stop
+diagnosing**. Do not fuzz parameter names or endpoint variants once you have
+a working signal.
 
-Skill scripts often wrap upstream errors into generic messages like
-`"HTTP 500 - server error"`. That strips the information you need. When
-the harness output is too generic:
+### Phase 2 — Implement (≤5 tool calls)
 
-- Open the script and check whether it swallows response bodies in error
-  branches. Fix the script to **always include status code + full response
-  body** in failure output (see `references/patterns.md` § Error Handling).
-- Re-run the harness. The real error (validation detail, missing field,
-  auth message) should now be visible.
+Edit the script. Update SKILL.md only if the external contract changed
+(endpoint path, payload shape, auth flow).
 
-### 3. Compare against a working reference
+**Rule:** in Phase 2, no new probes. Every tool call must be `write_file`,
+`edit_file`, or a single targeted re-read of a file you are editing. If you
+feel the urge to probe again, you ended Phase 1 too early — go back and
+capture what you missed, then resume Phase 2 fresh.
 
-If the skill integrates an external API, find the closest-working sibling
-(e.g. if `sparkyfitness` is broken, read `fittrackee`'s script + SKILL.md).
-Compare payload shape, auth headers, endpoint paths. Most skill bugs are
-payload-schema mismatches that another skill already got right.
+If an external reference skill exists (e.g. `fittrackee` vs. `sparkyfitness`),
+read it for payload / auth patterns. That's allowed in Phase 2 — it's
+referencing, not probing.
 
-### 4. Fix, re-test, repeat
+### Phase 3 — Verify (≤3 tool calls)
 
-Edit, run `test` again. Only declare "fixed" when the harness is green.
+Run the harness (or reproduce the original failing command). Green → done,
+report a short summary to the user. Red → one loop back to Phase 2, same
+budget. Never go back to Phase 1 from here.
 
-### 5. If you hit 2–3 failed fix attempts → stop and report
+### Failure exit
 
-Don't loop indefinitely. Report what you found (full error from step 2,
-what you tried, what you suspect) and ask the user. Looping burns context
-without progress.
+After 2–3 failed fix attempts → stop and report. Include: full error from
+Phase 1, what you changed in Phase 2, what still fails. Do not keep looping
+— it burns context without progress.
 
 ---
 
@@ -400,7 +234,4 @@ without progress.
 | `test` | creator.py | Run the skill's harness with real credentials/env |
 | `compile` | creator.py | LLM-compile SKILL.md → workflow.yaml |
 | `package` | creator.py | Create `.skill` zip |
-| `set` | credentials.py | Store a credential |
-| `list` | credentials.py | List credential keys |
-| `delete` | credentials.py | Remove a credential |
-| `check` | credentials.py | Check if keys exist |
+| `set` / `list` / `delete` / `check` | credentials.py | Manage credentials |
