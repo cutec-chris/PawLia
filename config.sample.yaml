@@ -134,7 +134,7 @@ workspace:
 
 skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload
-  allow_workspace: false   # load skills from session/<user>/workspace/skills/ (default: false)
+  allow_workspace: true    # load skills from session/<user>/workspace/skills/ (default: true)
 
 skill-config:
   # searxng:

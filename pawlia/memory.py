@@ -23,7 +23,7 @@ from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import ensure_dir
 
 # Summarization trigger thresholds
-MAX_EXCHANGES_BEFORE_SUMMARY = 10
+MAX_EXCHANGES_BEFORE_SUMMARY = 20
 FORCE_SUMMARY_EXCHANGES = 30  # force summarize even if user is active
 KEEP_RECENT_EXCHANGES = 5  # exchanges to keep intact after summarization
 SIMILARITY_THRESHOLD = 0.6  # 0-1, how similar two bot responses must be

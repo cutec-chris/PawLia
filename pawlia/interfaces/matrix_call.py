@@ -951,9 +951,15 @@ class CallSession:
             async def _on_skill_start(skill_name: str, query: str) -> None:
                 short_q = (query[:60] + "…") if len(query) > 60 else query
                 await self._send_cb(f"⚙ *{skill_name}*: {short_q}")
+                # Restart hold audio while this skill is executing
+                if self._tts_track:
+                    self._tts_track.start_hold()
 
             async def _on_skill_done(skill_name: str) -> None:
                 await self._send_cb(f"✓ *{skill_name}*")
+                # Restart hold audio for the next skill or agent thinking phase
+                if self._tts_track:
+                    self._tts_track.start_hold()
 
             response = await self._agent.run_streamed(
                 text,
