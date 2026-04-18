@@ -492,11 +492,13 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
             async def _on_interim(interim_text: str) -> None:
                 await _send(interim_text)
+                await client.room_typing(room.room_id, typing_state=True)
 
             async def _on_skill_start(skill_name: str, query: str) -> None:
                 nonlocal status_event_id, step_count, current_skill
                 current_skill = skill_name
                 step_count = 0
+                await client.room_typing(room.room_id, typing_state=True)
                 content = _make_status(skill_name, query)
                 if thread_id:
                     content["m.relates_to"] = {
@@ -517,6 +519,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             async def _on_skill_step(step_text: str) -> None:
                 nonlocal step_count
                 step_count += 1
+                await client.room_typing(room.room_id, typing_state=True)
                 if status_event_id and current_skill:
                     await client.room_send(
                         room_id=room.room_id,
@@ -526,6 +529,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     )
 
             async def _on_skill_done(skill_name: str) -> None:
+                await client.room_typing(room.room_id, typing_state=True)
                 if status_event_id:
                     await client.room_send(
                         room_id=room.room_id,

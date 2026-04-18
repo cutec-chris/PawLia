@@ -49,7 +49,6 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         """Shared handler for text and photo messages."""
         app.scheduler.touch_activity(user_id)
         try:
-            # Show typing indicator while processing
             await update.message.chat.send_action(ChatAction.TYPING)
 
             agent = agent_cache.get(user_id)
@@ -58,7 +57,6 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                 await update.message.reply_text(
                     md_to_tg_html(interim_text), parse_mode=ParseMode.HTML,
                 )
-                # Re-send typing after interim message so it stays visible
                 await update.message.chat.send_action(ChatAction.TYPING)
 
             status_message = None
@@ -69,6 +67,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                 nonlocal status_message, step_count, current_skill
                 current_skill = skill_name
                 step_count = 0
+                await update.message.chat.send_action(ChatAction.TYPING)
                 short_q = (query[:60] + "…") if len(query) > 60 else query
                 status_message = await update.message.reply_text(
                     f"<i>⚙ {skill_name}: {short_q}</i>", parse_mode=ParseMode.HTML,
@@ -77,6 +76,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             async def _on_skill_step(step_text: str) -> None:
                 nonlocal step_count
                 step_count += 1
+                await update.message.chat.send_action(ChatAction.TYPING)
                 if status_message and current_skill:
                     short = (step_text[:100] + "…") if len(step_text) > 100 else step_text
                     try:
@@ -88,6 +88,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                         pass
 
             async def _on_skill_done(skill_name: str) -> None:
+                await update.message.chat.send_action(ChatAction.TYPING)
                 if status_message:
                     try:
                         await status_message.edit_text(

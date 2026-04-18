@@ -60,6 +60,8 @@ async def test_process_speech_uses_call_system_prompt():
         system_prompt="CALL PROMPT",
         thread_id="thread-1",
         on_sentence=agent.run_streamed.await_args.kwargs["on_sentence"],
+        on_skill_start=agent.run_streamed.await_args.kwargs["on_skill_start"],
+        on_skill_done=agent.run_streamed.await_args.kwargs["on_skill_done"],
     )
     assert send_cb.await_args_list[0].args[0] == "🎙️ *Hallo da*"
     assert send_cb.await_args_list[1].args[0] == "Kurze Antwort"
