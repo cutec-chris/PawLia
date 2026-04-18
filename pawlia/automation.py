@@ -104,6 +104,9 @@ class ScriptExecutor:
             allowed.append(os.path.realpath(
                 os.path.join(session_dir, user_id, "automations")
             ))
+            allowed.append(os.path.realpath(
+                os.path.join(session_dir, user_id, "workspace", ".scripts")
+            ))
         return any(real.startswith(base + os.sep) for base in allowed)
 
     @staticmethod

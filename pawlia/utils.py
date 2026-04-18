@@ -138,8 +138,9 @@ def ensure_dir(path: str) -> str:
 def resolve_script(session_dir: str, user_id: str, script: str) -> str:
     """Resolve a script name to an absolute path.
 
-    Automation scripts are restricted to the user's automations directory:
-      session/<user_id>/automations/<script>
+    Checks workspace/.scripts/ first (LLM-visible), then automations/ (legacy).
     """
-    user_path = os.path.join(session_dir, user_id, "automations", script)
-    return user_path
+    workspace_scripts = os.path.join(session_dir, user_id, "workspace", ".scripts", script)
+    if os.path.isfile(workspace_scripts):
+        return workspace_scripts
+    return os.path.join(session_dir, user_id, "automations", script)
