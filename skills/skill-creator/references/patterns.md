@@ -8,6 +8,8 @@ Proven patterns for writing effective PawLia skills.
 - [Command Reference Table](#command-reference-table)
 - [Output Format Templates](#output-format-templates)
 - [Error Handling / Self-Repair](#error-handling--self-repair)
+- [Never Swallow Upstream Errors](#never-swallow-upstream-errors)
+- [Harness](#harness)
 - [Conditional Logic](#conditional-logic)
 - [Description Writing](#description-writing)
 
@@ -124,6 +126,96 @@ General recovery strategy:
 ```
 
 Key principle: the sub-agent should self-recover rather than bubble errors up.
+
+---
+
+## Never Swallow Upstream Errors
+
+Scripts that talk to external APIs must propagate **the real upstream
+response** on failure — status code AND body. A generic
+`"HTTP 500 - server error"` strips away the exact field that makes the
+failure fixable (validation message, missing-column detail, auth reason).
+
+Bad:
+```sh
+5*) die "HTTP $http_code - server error. Try again later." ;;
+```
+
+Good:
+```sh
+5*) printf '{"success": false, "status": %s, "error": "HTTP %s", "body": %s}\n' \
+       "$http_code" "$http_code" "$(printf '%s' "$rbod" | json_escape)"
+    exit 1 ;;
+```
+
+Apply the same rule to 4xx branches. If an endpoint returns structured
+error JSON, pass it through untouched under a `body` or `details` field.
+
+This is what lets the harness (and a human debugger) see the actual
+constraint violation or schema mismatch — not just "something broke".
+
+---
+
+## Harness
+
+Every skill should ship a **harness** at the skill root
+(`harness.sh` / `harness.py` / `harness.mjs`) that smoke-tests the primary
+workflow end-to-end. It's what `creator.py test --name <skill>` runs.
+
+**Contract:**
+- Reads the same `CRED_*` env vars the skill uses at runtime
+- Runs 1–3 read-only probes (e.g. `status` + one simple GET)
+- Write-capable skills: do a write-then-delete roundtrip, or gate writes
+  behind `--write`
+- Prints exactly one final JSON line — final line must parse as JSON
+- Exits 0 on all-green, non-zero on any failure
+- Leaves no persistent side effects
+
+**Output format:**
+
+```json
+{
+  "success": true,
+  "checks": [
+    {"name": "status",    "ok": true,  "detail": "{\"status\":\"UP\"}"},
+    {"name": "list_recent", "ok": true, "detail": "5 entries"}
+  ]
+}
+```
+
+On failure, `success: false` and at least one check has `ok: false` with
+the **full upstream error** in `detail` (status code + body). This is
+what makes debugging possible — see § Never Swallow Upstream Errors.
+
+**Minimal `harness.sh` skeleton:**
+
+```sh
+#!/bin/sh
+# Harness for <skill-name>
+set -e
+SCRIPT="$(dirname "$0")/scripts/<script>.sh"
+
+run_check() {
+  _name="$1"; shift
+  _out=$("$@" 2>&1) && _ok=true || _ok=false
+  printf '{"name":"%s","ok":%s,"detail":%s}' \
+    "$_name" "$_ok" "$(printf '%s' "$_out" | node -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')"
+}
+
+c1=$(run_check "status" sh "$SCRIPT" status)
+c2=$(run_check "list"   sh "$SCRIPT" list 1)
+
+if printf '%s\n%s' "$c1" "$c2" | grep -q '"ok":false'; then
+  success=false; code=1
+else
+  success=true; code=0
+fi
+
+printf '{"success":%s,"checks":[%s,%s]}\n' "$success" "$c1" "$c2"
+exit $code
+```
+
+Keep it small. The harness is a smoke test, not an integration-test suite.
 
 ---
 

@@ -36,6 +36,7 @@ RUN apk add --no-cache \
         nodejs \
         npm \
         openssl \
+        openssh-client \
         libffi \
         git
 

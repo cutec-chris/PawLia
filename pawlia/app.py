@@ -9,11 +9,9 @@ import os
 import threading
 from typing import Any, Callable, Dict, Optional
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from pawlia.config import load_config
 from pawlia.llm import LLMFactory
 from pawlia.memory import MemoryManager
-from pawlia.prompt_utils import load_system_prompt
 from pawlia.tools.base import ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.skills.loader import AgentSkill, SkillLoader
@@ -66,7 +64,6 @@ class App:
         # Scheduler for proactive reminders / event notifications
         self.scheduler = Scheduler(self.session_dir, config=self.config)
         self.scheduler.set_app(self)
-        self.scheduler.set_llm_formatter(self._format_notification)
 
     def _discover_user_workspace_skills(self, user_id: str) -> Dict[str, AgentSkill]:
         """Discover workspace skills for a single user.
@@ -101,29 +98,6 @@ class App:
         user_skills = self._discover_user_workspace_skills(user_id)
         skills.update(user_skills)
         return skills
-
-    async def _format_notification(self, user_id: str, raw_message: str) -> str:
-        """Pass a raw notification through the LLM for personalized delivery.
-
-        The LLM receives the raw data (reminder text, script output, etc.)
-        and produces a natural, personalized message for the user.
-        If the LLM is busy (e.g. handling a chat request on a local model),
-        the scheduler's timeout + fallback ensures the raw message still
-        gets delivered.
-        """
-        session = self.memory.load_session(user_id)
-        llm = self.llm.get("chat")
-
-        # Minimal prompt — keep it short so local models respond fast
-        system = load_system_prompt("notifications/formatter.md")
-
-        messages = [
-            SystemMessage(content=system),
-            HumanMessage(content=raw_message),
-        ]
-
-        response = await llm.ainvoke(messages)
-        return response.content or raw_message
 
     def make_agent(self, user_id: str = "default", **kwargs) -> ChatAgent:
         """Create a new ChatAgent for a user session.

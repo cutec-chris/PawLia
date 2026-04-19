@@ -2,9 +2,15 @@
 
 import argparse
 import asyncio
+import faulthandler
 import logging
 import os
 import warnings
+
+# Install signal handlers for SIGSEGV/SIGABRT/SIGBUS/SIGILL so that C-extension
+# crashes (aiortc/av/opus/olm) surface a Python traceback to stderr before exit,
+# instead of disappearing silently.
+faulthandler.enable()
 
 
 _DARK_GRAY = "\033[90m"
