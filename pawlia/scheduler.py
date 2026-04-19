@@ -367,7 +367,7 @@ class Scheduler:
 
     async def _git_sync(self, user_id: str) -> None:
         """Auto-commit workspace changes and run daily/weekly squash when due."""
-        from pawlia.workspace_git import auto_commit, daily_squash, ensure_repo, push, weekly_squash
+        from pawlia.workspace_git import auto_commit, daily_squash, ensure_repo, pull, push, weekly_squash
 
         workspace = os.path.join(self.session_dir, user_id, "workspace")
         if not os.path.isdir(workspace):
@@ -376,6 +376,10 @@ class Scheduler:
         # Ensure git repo exists
         if not ensure_repo(workspace):
             return
+
+        # Pull from remote (throttled to 1/h inside pull), only if push is enabled
+        if self._git_push:
+            pull(workspace)
 
         # Auto-commit (throttled to max 1 per 5 min inside auto_commit)
         if auto_commit(workspace) and self._git_push:

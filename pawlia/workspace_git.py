@@ -17,6 +17,7 @@ from datetime import datetime
 logger = logging.getLogger("pawlia.workspace_git")
 
 COMMIT_COOLDOWN = 300  # seconds — max 1 commit per 5 minutes
+PULL_COOLDOWN = 3600  # seconds — max 1 pull per hour
 
 
 def _run(cmd: list[str], cwd: str) -> tuple[int, str]:
@@ -25,6 +26,10 @@ def _run(cmd: list[str], cwd: str) -> tuple[int, str]:
         r = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True, timeout=30,
         )
+        if r.returncode != 0:
+            logger.warning("git %s failed (rc=%d) in %s: %s",
+                           " ".join(cmd[1:]), r.returncode, cwd,
+                           (r.stderr or r.stdout).strip())
         return r.returncode, r.stdout.strip()
     except Exception as e:
         logger.error("git command failed: %s: %s", cmd, e)
@@ -35,13 +40,35 @@ def _git(cwd: str, *args: str) -> tuple[int, str]:
     return _run(["git", *args], cwd)
 
 
+def _config_get(workspace: str, key: str) -> str:
+    """Quietly read a git config value (empty string if unset — no warning)."""
+    try:
+        r = subprocess.run(
+            ["git", "config", "--get", key],
+            cwd=workspace, capture_output=True, text=True, timeout=10,
+        )
+        return r.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _ensure_identity(workspace: str) -> None:
+    """Ensure repo-local user.name/user.email are set so commits don't fail."""
+    if not _config_get(workspace, "user.name"):
+        _git(workspace, "config", "user.name", "pawlia")
+    if not _config_get(workspace, "user.email"):
+        _git(workspace, "config", "user.email", "pawlia@localhost")
+
+
 def ensure_repo(workspace: str) -> bool:
     """Initialize a git repo in workspace if not already one. Returns True if repo exists."""
     if os.path.isdir(os.path.join(workspace, ".git")):
+        _ensure_identity(workspace)
         return True
     rc, _ = _git(workspace, "init")
     if rc != 0:
         return False
+    _ensure_identity(workspace)
     # Write .gitignore for internal files
     gitignore = os.path.join(workspace, ".gitignore")
     if not os.path.exists(gitignore):
@@ -172,6 +199,35 @@ def weekly_squash(workspace: str) -> bool:
     _git(workspace, "commit", "-m", f"Week: {week_label}")
     logger.info("Weekly squash: %d commits → 1 (%s)", len(commits), week_label)
     return True
+
+
+def pull(workspace: str, remote: str = "origin") -> bool:
+    """Fast-forward pull from remote if configured. Throttled to PULL_COOLDOWN.
+
+    Returns True if a pull was attempted and succeeded (including no-op fast-forward).
+    Non-fast-forward divergence is logged as a warning; no merge is created.
+    """
+    if not os.path.isdir(os.path.join(workspace, ".git")):
+        return False
+    rc, _ = _git(workspace, "remote", "get-url", remote)
+    if rc != 0:
+        return False
+
+    # Throttle via FETCH_HEAD mtime
+    fetch_head = os.path.join(workspace, ".git", "FETCH_HEAD")
+    if os.path.exists(fetch_head):
+        if time.time() - os.path.getmtime(fetch_head) < PULL_COOLDOWN:
+            return False
+
+    rc, _ = _git(workspace, "fetch", remote)
+    if rc != 0:
+        return False
+    rc, _ = _git(workspace, "merge", "--ff-only", f"{remote}/HEAD")
+    if rc == 0:
+        logger.debug("Pulled workspace from %s (ff-only)", remote)
+        return True
+    logger.warning("Pull from %s skipped: local diverges from remote (no ff-only possible)", remote)
+    return False
 
 
 def push(workspace: str, remote: str = "origin") -> bool:
