@@ -59,6 +59,72 @@ else:
 - Scripts must be self-contained (no imports from pawlia)
 - Scripts can read JSON files from the session directory for data
 
+### Optional: LLM-Schritt im Automations-Skript
+
+Wenn ein Schritt zwingend das Sprachmodell braucht (Texte zusammenfassen,
+natürlichsprachliche Ausgabe erzeugen), **niemals** das Modell direkt
+importieren — stattdessen den mitgelieferten Harness als Subprocess aufrufen.
+Der Harness garantiert eine Retry/Nudge-Schleife bis ein nicht-leeres
+Ergebnis vorliegt (oder mit Non-Zero-Exit hart fehlschlägt — kein stilles
+Leerergebnis).
+
+Der Harness liegt unter `<skills_dir>/automation/scripts/llm.py`.
+
+**Beispiel** (`news_digest.py`, fasst ein paar Schlagzeilen mit dem LLM zu
+einer kurzen Nachricht zusammen):
+
+```python
+import subprocess
+import sys
+
+SOURCES = [
+    "Regierung beschließt neues Energiegesetz",
+    "Bahn kündigt Streik für Donnerstag an",
+    "Warnstreik im öffentlichen Dienst beendet",
+]
+
+prompt = (
+    "Fasse die folgenden Schlagzeilen in zwei Sätzen auf Deutsch zusammen:\n\n"
+    + "\n".join(f"- {s}" for s in SOURCES)
+)
+
+result = subprocess.run(
+    [sys.executable, "<skills_dir>/automation/scripts/llm.py",
+     "--prompt", prompt,
+     "--retries", "4",
+     "--min-chars", "20"],
+    capture_output=True, text=True, timeout=90,
+)
+
+if result.returncode != 0:
+    print(f"LLM-Schritt fehlgeschlagen: {result.stderr.strip()}", file=sys.stderr)
+    sys.exit(1)
+
+print(result.stdout.strip())
+```
+
+Regeln für LLM-Schritte:
+- Nur einsetzen, wenn ein deterministischer Schritt die Aufgabe nicht erledigen
+  kann. Die Laufzeit von Automationen soll so reproduzierbar wie möglich sein.
+- `--min-chars` setzen, damit offensichtlich leere/abgeschnittene Antworten
+  einen Retry auslösen.
+- Exit-Code prüfen und bei Fehler den Job mit Non-Zero-Exit beenden — so wird
+  der Fehler sichtbar statt verschluckt.
+
+### Step 1b: Skript testen (Pflicht, bevor der Job registriert wird)
+
+Nach dem Schreiben das Skript einmal direkt ausführen und den Output prüfen:
+
+```bash
+AUTOMATION_PARAMS='{}' \
+PAWLIA_USER_ID="<user_id>" \
+PAWLIA_SESSION_DIR="<session_dir>" \
+python <path_to_script>
+```
+
+Erst wenn der Testlauf einen sinnvollen, nicht-leeren stdout liefert, wird der
+Job registriert. Ein nicht-getestetes Skript wird nicht registriert.
+
 ### Step 2: Register the job
 
 Use the organizer script to register the job:

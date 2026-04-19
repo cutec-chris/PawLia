@@ -11,3 +11,4 @@ skills/user/*
 tmp/*
 log/*
 .venv/*
+logs.sh

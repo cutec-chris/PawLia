@@ -37,7 +37,6 @@ IDLE_BACKGROUND_MIN = 10
 IDLE_MEMORY_MIN = 20
 
 NotifyCallback = Callable[[str, str], Coroutine[Any, Any, None]]
-LLMFormatter = Callable[[str, str], Coroutine[Any, Any, str]]
 
 logger = logging.getLogger("pawlia.scheduler")
 
@@ -208,7 +207,6 @@ class Scheduler:
         self._app: Optional[Any] = None
         self._callbacks: List[NotifyCallback] = []
         self._task: Optional[asyncio.Task] = None
-        self._llm_formatter: Optional[LLMFormatter] = None
 
         self._checklist: Optional[ChecklistProcessor] = None
         self._jobs: Optional[JobRunner] = None
@@ -253,9 +251,6 @@ class Scheduler:
 
     def touch_activity(self, user_id: str) -> None:
         self._last_activity[user_id] = time.monotonic()
-
-    def set_llm_formatter(self, formatter: LLMFormatter) -> None:
-        self._llm_formatter = formatter
 
     def start(self) -> None:
         if self._task and not self._task.done():
@@ -568,19 +563,9 @@ class Scheduler:
             _save_state(self.session_dir, user_id, state)
 
     async def _notify(self, user_id: str, message: str) -> None:
-        formatted = message
-        if self._llm_formatter:
-            try:
-                formatted = await self._llm_formatter(user_id, message)
-                if not formatted or not formatted.strip():
-                    formatted = message
-            except Exception as e:
-                logger.warning("LLM formatting failed for %s: %s, using raw message", user_id, e)
-                formatted = message
-
         for callback in self._callbacks:
             try:
-                await callback(user_id, formatted)
+                await callback(user_id, message)
             except Exception as e:
                 logger.error("Notify callback failed for %s: %s", user_id, e)
 
