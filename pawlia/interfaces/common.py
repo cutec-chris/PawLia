@@ -6,22 +6,38 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 class AgentCache:
-    """Per-user agent cache shared across interface handlers."""
+    """Agent cache shared across interface handlers.
+
+    Entries are keyed by ``cache_key`` (defaults to ``user_id``). When an
+    interface needs per-thread isolation (e.g. Matrix threads) it passes a
+    composite key like ``f"{user_id}#{thread_id}"`` so concurrent conversations
+    don't share mutable agent state (callbacks, in-flight turn data). The
+    underlying ``user_id`` still determines the Session/memory store, so
+    thread-scoped memory keeps working across per-thread agents.
+    """
 
     def __init__(self, app: "App"):
         self._app = app
         self._agents: Dict[str, Any] = {}
 
-    def get(self, user_id: str, **kwargs) -> Any:
-        if user_id not in self._agents:
+    def get(self, user_id: str, *, cache_key: Optional[str] = None, **kwargs) -> Any:
+        key = cache_key or user_id
+        if key not in self._agents:
             agent = self._app.make_agent(user_id, **kwargs)
             agent.on_model_change = lambda _model: self.invalidate(user_id)
-            self._agents[user_id] = agent
-        return self._agents[user_id]
+            self._agents[key] = agent
+        return self._agents[key]
 
     def invalidate(self, user_id: str) -> None:
-        """Remove cached agent so it gets recreated on next access."""
-        self._agents.pop(user_id, None)
+        """Drop all cached agents whose cache_key starts with ``user_id``.
+
+        Matches both bare ``user_id`` entries and composite keys like
+        ``"{user_id}#{thread_id}"``, so a model-change for a user clears every
+        per-thread agent belonging to that user.
+        """
+        prefix = f"{user_id}#"
+        for k in [k for k in self._agents if k == user_id or k.startswith(prefix)]:
+            self._agents.pop(k, None)
 
 
 class ModelCommandResult:

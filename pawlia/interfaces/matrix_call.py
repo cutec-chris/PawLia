@@ -1241,7 +1241,7 @@ class CallManager:
         except Exception as e:
             logger.warning("call %s: could not create thread root: %s", event.call_id[:8], e)
 
-        agent = self._get_agent(room.room_id)
+        agent = self._get_agent(room.room_id, call_thread_id)
 
         # Build a send callback already bound to the call's thread
         _tid = call_thread_id

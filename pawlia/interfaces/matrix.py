@@ -308,8 +308,13 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     thread_events: Dict[str, str] = {}        # event_id → thread_root_id
     thread_members: Dict[str, List[str]] = {} # thread_root_id → [event_ids]
 
-    def get_agent(room_id: str):
-        return agent_cache.get(f"mx_{room_id}")
+    def get_agent(room_id: str, thread_id: Optional[str] = None):
+        """Return the agent for ``(room, thread)``. Per-thread cache prevents
+        concurrent turns in different threads from clobbering each other's
+        callbacks (on_interim, on_skill_*) on a shared instance."""
+        user_id = f"mx_{room_id}"
+        key = f"{user_id}#{thread_id}" if thread_id else user_id
+        return agent_cache.get(user_id, cache_key=key)
 
     def _remember_thread_event(event_id: Optional[str], thread_root_id: Optional[str]) -> None:
         if not event_id or not thread_root_id:
@@ -420,7 +425,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
         # Commands (// or / — Element strips one / from //)
         if _cmd(text, "status") is not None:
-            agent = get_agent(room.room_id)
+            agent = get_agent(room.room_id, thread_id)
             status = build_status(app, session_id, agent, thread_id=thread_id)
             text_out = format_status(status)
             if thread_id:
@@ -499,7 +504,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             await client.room_typing(room.room_id, typing_state=True)
             typing_task = asyncio.ensure_future(_typing_keepalive())
 
-            agent = get_agent(room.room_id)
+            agent = get_agent(room.room_id, thread_id)
 
             status_event_id: Optional[str] = None
             step_count = 0
