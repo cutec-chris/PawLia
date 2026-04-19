@@ -20,13 +20,17 @@ COMMIT_COOLDOWN = 300  # seconds — max 1 commit per 5 minutes
 PULL_COOLDOWN = 3600  # seconds — max 1 pull per hour
 
 
-def _run(cmd: list[str], cwd: str) -> tuple[int, str]:
-    """Run a git command, return (returncode, stdout)."""
+def _run(cmd: list[str], cwd: str, quiet: bool = False) -> tuple[int, str]:
+    """Run a git command, return (returncode, stdout).
+
+    quiet=True: don't log on non-zero rc (used for probe-style calls where
+    a non-zero rc is an expected outcome, not an error).
+    """
     try:
         r = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True, timeout=30,
         )
-        if r.returncode != 0:
+        if r.returncode != 0 and not quiet:
             logger.warning("git %s failed (rc=%d) in %s: %s",
                            " ".join(cmd[1:]), r.returncode, cwd,
                            (r.stderr or r.stdout).strip())
@@ -36,8 +40,8 @@ def _run(cmd: list[str], cwd: str) -> tuple[int, str]:
         return 1, ""
 
 
-def _git(cwd: str, *args: str) -> tuple[int, str]:
-    return _run(["git", *args], cwd)
+def _git(cwd: str, *args: str, quiet: bool = False) -> tuple[int, str]:
+    return _run(["git", *args], cwd, quiet=quiet)
 
 
 def _config_get(workspace: str, key: str) -> str:
@@ -88,8 +92,8 @@ def auto_commit(workspace: str) -> bool:
     if not os.path.isdir(os.path.join(workspace, ".git")):
         return False
 
-    # Check cooldown: look at last commit timestamp
-    rc, ts = _git(workspace, "log", "-1", "--format=%ct")
+    # Check cooldown: look at last commit timestamp (quiet — empty repo returns rc=128)
+    rc, ts = _git(workspace, "log", "-1", "--format=%ct", quiet=True)
     if rc == 0 and ts:
         try:
             last_commit = int(ts)
@@ -209,7 +213,7 @@ def pull(workspace: str, remote: str = "origin") -> bool:
     """
     if not os.path.isdir(os.path.join(workspace, ".git")):
         return False
-    rc, _ = _git(workspace, "remote", "get-url", remote)
+    rc, _ = _git(workspace, "remote", "get-url", remote, quiet=True)
     if rc != 0:
         return False
 
@@ -234,8 +238,8 @@ def push(workspace: str, remote: str = "origin") -> bool:
     """Push to remote if configured. Returns True on success."""
     if not os.path.isdir(os.path.join(workspace, ".git")):
         return False
-    # Check if remote exists
-    rc, _ = _git(workspace, "remote", "get-url", remote)
+    # Check if remote exists (quiet — absent remote is an expected no-op)
+    rc, _ = _git(workspace, "remote", "get-url", remote, quiet=True)
     if rc != 0:
         return False
     rc, _ = _git(workspace, "push", "--force-with-lease", remote)

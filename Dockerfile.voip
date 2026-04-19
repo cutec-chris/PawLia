@@ -44,6 +44,7 @@ RUN apk add --no-cache \
         ffmpeg \
         wget \
         openssl \
+        openssh-client \
         git \
         libffi \
         libstdc++ \
