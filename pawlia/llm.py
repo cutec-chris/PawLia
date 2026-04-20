@@ -99,37 +99,66 @@ class _FallbackLLMWrapper:
         self._llms = llms
         self._labels = labels
 
+    def _is_retryable_error(self, exc: Exception) -> bool:
+        """Check if the error should be retried instead of falling back."""
+        error_str = str(exc)
+        return "400" in error_str or "tool_use_failed" in error_str
+
     def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
         for idx, llm in enumerate(self._llms):
-            try:
-                return llm.invoke(messages, **kwargs)
-            except Exception as exc:
-                last_exc = exc
-                if idx < len(self._llms) - 1:
-                    logger.warning(
-                        "LLM fallback: model '%s' failed (%s), trying '%s'",
-                        self._labels[idx],
-                        exc,
-                        self._labels[idx + 1],
-                    )
+            retries = 0
+            while retries <= 3:  # max 3 retries
+                try:
+                    return llm.invoke(messages, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    if self._is_retryable_error(exc) and retries < 3:
+                        logger.warning(
+                            "LLM retry: model '%s' failed with retryable error (%s), retrying (%d/3)",
+                            self._labels[idx],
+                            exc,
+                            retries + 1,
+                        )
+                        retries += 1
+                        continue
+                    break
+            if idx < len(self._llms) - 1:
+                logger.warning(
+                    "LLM fallback: model '%s' failed (%s), trying '%s'",
+                    self._labels[idx],
+                    last_exc,
+                    self._labels[idx + 1],
+                )
         assert last_exc is not None
         raise last_exc
 
     async def ainvoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
         for idx, llm in enumerate(self._llms):
-            try:
-                return await llm.ainvoke(messages, **kwargs)
-            except Exception as exc:
-                last_exc = exc
-                if idx < len(self._llms) - 1:
-                    logger.warning(
-                        "LLM fallback: model '%s' failed (%s), trying '%s'",
-                        self._labels[idx],
-                        exc,
-                        self._labels[idx + 1],
-                    )
+            retries = 0
+            while retries <= 3:  # max 3 retries
+                try:
+                    return await llm.ainvoke(messages, **kwargs)
+                except Exception as exc:
+                    last_exc = exc
+                    if self._is_retryable_error(exc) and retries < 3:
+                        logger.warning(
+                            "LLM retry: model '%s' failed with retryable error (%s), retrying (%d/3)",
+                            self._labels[idx],
+                            exc,
+                            retries + 1,
+                        )
+                        retries += 1
+                        continue
+                    break
+            if idx < len(self._llms) - 1:
+                logger.warning(
+                    "LLM fallback: model '%s' failed (%s), trying '%s'",
+                    self._labels[idx],
+                    last_exc,
+                    self._labels[idx + 1],
+                )
         assert last_exc is not None
         raise last_exc
 
