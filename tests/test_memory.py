@@ -262,9 +262,13 @@ class TestShouldSummarize:
                 "Python is great", "The sky is blue", "42 is the answer",
                 "Cats are fluffy", "Berlin is a city", "Coffee is good",
                 "Rain tomorrow", "Books are nice", "Music rocks",
+                "Sun is shining", "Water is wet", "Fire is hot",
+                "Earth is round", "Moon orbits Earth", "Stars twinkle",
+                "Trees grow tall", "Rivers flow", "Mountains are high",
+                "Oceans are deep"
             ]
             for i in range(MAX_EXCHANGES_BEFORE_SUMMARY - 1):
-                mm.append_exchange(session, f"q{i}", f"unique answer {i}")
+                mm.append_exchange(session, f"q{i}", answers[i])
             assert mm.should_summarize(session) == ""
 
     def test_force_trigger(self):
