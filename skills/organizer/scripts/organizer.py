@@ -696,9 +696,8 @@ def cmd_add_job(args) -> None:
     job = {
         "id": f"job-{uuid.uuid4().hex[:8]}",
         "name": args.name,
-        "script": args.script,
         "schedule": args.schedule,
-        "params": json.loads(_strip_quotes(args.params)) if args.params else {},
+        "instruction": args.instruction,
         "notify": not args.no_notify,
         "enabled": True,
         "created_at": datetime.now().isoformat(),
@@ -828,9 +827,8 @@ def main():
     p = sub.add_parser("add-job")
     _base(p)
     p.add_argument("--name", required=True)
-    p.add_argument("--script", required=True)
+    p.add_argument("--instruction", required=True)
     p.add_argument("--schedule", required=True)
-    p.add_argument("--params", help="JSON object of script params")
     p.add_argument("--no-notify", action="store_true")
 
     # list-jobs

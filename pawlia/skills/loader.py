@@ -83,6 +83,27 @@ class AgentSkill:
             logger.warning("Failed to load workflow for '%s': %s", self.name, exc)
             return None
 
+    @classmethod
+    def from_instruction(cls, name: str, instruction: str, working_dir: str = "") -> "AgentSkill":
+        """Create a virtual skill from a raw instruction string.
+
+        Used by the automation system to execute scheduled instructions
+        via the same SkillRunnerAgent infrastructure as real skills.
+        """
+        obj = cls.__new__(cls)
+        obj.skill_path = working_dir
+        obj.base_dir = working_dir
+        obj.metadata = {"name": name, "description": instruction}
+        obj.name = name
+        obj.description = instruction
+        obj.scripts_dir = ""
+        obj.requires_credentials = []
+        obj.max_tool_turns = None
+        obj.instructions = instruction
+        # Disable workflow for virtual skills
+        obj.__dict__["workflow"] = None
+        return obj
+
     def as_openai_spec(self) -> Dict[str, Any]:
         """OpenAI tool spec for the ChatAgent (only name + description + query param)."""
         return {

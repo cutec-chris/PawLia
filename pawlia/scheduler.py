@@ -277,7 +277,7 @@ class Scheduler:
     def _ensure_processors(self) -> None:
         if self._checklist is None:
             self._checklist = ChecklistProcessor(self.session_dir, self._notify)
-            self._jobs = JobRunner(self.session_dir, self._notify)
+            self._jobs = JobRunner(self.session_dir, self._notify, app=self._app)
             self._task_reminders = TaskReminderProcessor(self.session_dir, self._notify)
         _ = self.memory_indexer
 

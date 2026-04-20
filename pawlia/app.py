@@ -99,6 +99,33 @@ class App:
         skills.update(user_skills)
         return skills
 
+    def run_instruction(self, instruction: str, user_id: str = "default") -> SkillRunnerAgent:
+        """Create a SkillRunnerAgent for a raw instruction (used by automations).
+
+        Builds a virtual skill from the instruction and returns a runner
+        that executes it with the same tools and context as a real skill.
+        """
+        session = self.memory.load_session(user_id)
+        workspace = os.path.join(self.session_dir, user_id, "workspace")
+
+        virtual_skill = AgentSkill.from_instruction(
+            name="automation",
+            instruction=instruction,
+            working_dir=workspace,
+        )
+
+        return SkillRunnerAgent(
+            llm=self.llm.get("skill.automation") or self.llm.get("chat"),
+            skill=virtual_skill,
+            tool_registry=self.tools,
+            context={
+                "user_id": user_id,
+                "session_dir": self.session_dir,
+                "session": session,
+                "config_path": self.config_path,
+            },
+        )
+
     def make_agent(self, user_id: str = "default", **kwargs) -> ChatAgent:
         """Create a new ChatAgent for a user session.
 
