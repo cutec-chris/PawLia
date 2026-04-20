@@ -1,14 +1,15 @@
-"""Automation engine — executes scripts for checklist items and scheduled jobs.
+"""Automation engine — executes scheduled jobs via LLM.
 
 Data sources (Obsidian-native):
   - Event checklists: workspace/calendar/*.md  (checklist in YAML frontmatter)
   - Task reminders:   scheduler_state.json     (reminder offsets per task title)
-  - Jobs:             automations/jobs.json     (scheduler-internal)
+  - Jobs:             automations/jobs.json     (schedule + instruction)
   - State:            scheduler_state.json      (checklist status, fired flags)
 
-Two execution contexts:
-- Checklist items: triggered relative to an event start time or on creation
-- Scheduled jobs: triggered by cron expressions (daily, weekly, etc.)
+Execution:
+  - Checklist items: triggered relative to an event start time or on creation
+  - Scheduled jobs: triggered by cron expressions, executed by LLM
+  - Task reminders: triggered by due date offsets
 """
 
 import asyncio
@@ -71,7 +72,7 @@ def _save_state(session_dir: str, user_id: str, state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Script Executor
+# Script Executor (used by ChecklistProcessor for script-based checklist items)
 # ---------------------------------------------------------------------------
 
 _INTERPRETERS: Dict[str, str] = {
@@ -90,10 +91,6 @@ class ScriptExecutor:
     @staticmethod
     def _is_allowed_path(script_path: str, user_id: Optional[str],
                          session_dir: Optional[str]) -> bool:
-        """Verify script resides in an allowed directory.
-
-        Allowed: user automations dir, project skills/, project scripts/.
-        """
         real = os.path.realpath(script_path)
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         allowed = [
@@ -320,15 +317,16 @@ class ChecklistProcessor:
 
 
 # ---------------------------------------------------------------------------
-# Job Runner (unchanged — reads automations/jobs.json)
+# Job Runner — executes scheduled jobs via LLM
 # ---------------------------------------------------------------------------
 
 class JobRunner:
-    """Executes scheduled jobs based on cron-like expressions."""
+    """Executes scheduled jobs by running the instruction through the LLM."""
 
-    def __init__(self, session_dir: str, notify: NotifyFn):
+    def __init__(self, session_dir: str, notify: NotifyFn, app: Any = None):
         self.session_dir = session_dir
         self._notify = notify
+        self._app = app
 
     async def process_user(self, user_id: str) -> None:
         jobs_path = os.path.join(self.session_dir, user_id, "automations", "jobs.json")
@@ -345,50 +343,39 @@ class JobRunner:
             if not self._is_due(job, now):
                 continue
 
-            script = job.get("script", "")
-            if not script:
-                continue
-
-            script_path = resolve_script(self.session_dir, user_id, script)
+            instruction = job.get("instruction", "")
             job_name = job.get("name", "Job")
 
-            if not os.path.isfile(script_path):
+            if not instruction:
+                logger.warning("Job '%s' has no instruction, skipping", job_name)
+                continue
+
+            if not self._app:
+                logger.error("Job '%s': no app reference, cannot execute", job_name)
+                continue
+
+            logger.info("Running job '%s' for %s via LLM", job_name, user_id)
+
+            try:
+                runner = self._app.run_instruction(instruction, user_id)
+                result = await runner.run(query=instruction)
+                job["last_run"] = now.isoformat()
+                job["last_result"] = "success"
+                changed = True
+
+                if job.get("notify", True):
+                    output = result[:500] if result else "erledigt"
+                    await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{output}")
+
+            except Exception as e:
+                logger.error("Job '%s' failed for %s: %s", job_name, user_id, e)
                 job["last_run"] = now.isoformat()
                 job["last_result"] = "failed"
                 changed = True
-                logger.error(
-                    "Job '%s' for %s: script '%s' not found at %s",
-                    job_name, user_id, script, script_path,
-                )
-                await self._notify(
-                    user_id,
-                    f"\u26a0\ufe0f Job '{job_name}': Skript '{script}' wurde "
-                    f"nicht gefunden.\n"
-                    f"Bitte erstelle das Skript neu oder passe den Job an.",
-                )
-                continue
 
-            params = dict(job.get("params", {}))
-            params["job_name"] = job_name
-            params["user_id"] = user_id
-
-            logger.info("Running job '%s' for %s", job_name, user_id)
-            result = await ScriptExecutor.run(
-                script_path, params,
-                user_id=user_id, session_dir=self.session_dir,
-            )
-
-            job["last_run"] = now.isoformat()
-            job["last_result"] = "success" if result["success"] else "failed"
-            changed = True
-
-            if job.get("notify", True):
-                if result["success"]:
-                    output = result["output"][:500] if result["output"] else "erledigt"
-                    await self._notify(user_id, f"\u2699\ufe0f {job_name}: {output}")
-                else:
+                if job.get("notify", True):
                     await self._notify(user_id,
-                        f"\u26a0\ufe0f Job '{job_name}' fehlgeschlagen: {result['error'][:200]}")
+                        f"\u26a0\ufe0f Job '{job_name}' fehlgeschlagen: {str(e)[:200]}")
 
         if changed:
             save_json(jobs_path, jobs)
@@ -411,12 +398,6 @@ class JobRunner:
             return last_run is None or (now - last_run).total_seconds() > 120
 
         def _in_window(hour: int, minute: int) -> bool:
-            """Check if target HH:MM falls within the current check window.
-
-            Instead of requiring an exact minute match (which drifts and
-            misses targets), we check whether the target time is between
-            the last run (or 2 min ago) and now.
-            """
             target_today = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             window_start = last_run if last_run else (now - timedelta(minutes=2))
             return window_start < target_today <= now
@@ -578,17 +559,15 @@ def create_checklist_item(
 
 def create_job(
     name: str,
-    script: str,
     schedule: str,
-    params: Optional[Dict[str, Any]] = None,
+    instruction: str,
     notify: bool = True,
 ) -> Dict[str, Any]:
     return {
         "id": f"job-{uuid.uuid4().hex[:8]}",
         "name": name,
-        "script": script,
         "schedule": schedule,
-        "params": params or {},
+        "instruction": instruction,
         "notify": notify,
         "enabled": True,
         "created_at": datetime.now().isoformat(),

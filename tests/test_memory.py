@@ -264,7 +264,7 @@ class TestShouldSummarize:
                 "Rain tomorrow", "Books are nice", "Music rocks",
             ]
             for i in range(MAX_EXCHANGES_BEFORE_SUMMARY - 1):
-                mm.append_exchange(session, f"q{i}", answers[i])
+                mm.append_exchange(session, f"q{i}", f"unique answer {i}")
             assert mm.should_summarize(session) == ""
 
     def test_force_trigger(self):

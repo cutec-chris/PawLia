@@ -1,139 +1,62 @@
 ---
 name: automation
-description: "Write and schedule automation scripts. Use when the user wants something to happen automatically or repeatedly (e.g. 'show my tasks every 5 minutes', 'send me a daily report at 16:00', 'check the weather every hour'). This skill writes the script and registers the scheduled job."
+description: "Create and manage scheduled automations. Use when the user wants something to happen automatically on a schedule (e.g. 'send me a daily report at 16:00', 'check the weather every morning', 'remind me to stand up every hour')."
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "1.0"
+  version: "2.0"
 ---
 
 # Automation
 
-Writes automation scripts and registers them as scheduled jobs. The system then executes them automatically — no LLM needed at runtime.
+Creates scheduled automations that are executed by the LLM at the specified times. No scripts needed — the LLM runs the instruction directly using its available skills.
+
+## Two Approaches
+
+### Variante A — Simple (for trivial tasks)
+
+When the task is simple and can be done with existing skills in one step:
+
+1. Register the job directly with a natural-language instruction
+
+Example: "Zeige offene Aufgaben", "Was steht heute im Kalender?", "Wie spät ist es"
+
+### Variante B — Skill + Automation (for non-trivial tasks)
+
+When the task requires API calls, data processing, complex logic, or needs to be reliable:
+
+1. **First**: Use the skill-creator to build a dedicated skill for the task
+2. **Then**: Register an automation that calls the skill via a simple instruction
+
+Example: "Erstelle einen Wetterbericht" → Build weather skill first, then automate "Nutze den weather Skill"
+
+### When to use which
+
+- **Simple**: Single-step tasks that any existing skill can handle directly
+- **Skill + Automation**: Everything else — API calls, multi-step logic, web scraping, data processing
+- **In doubt**: Build a skill. A dedicated skill is always more robust than a fragile instruction.
 
 ## Instructions
 
-When the user wants something to happen automatically or on a schedule, follow these steps:
+### Step 1 (only for Variante B): Build the skill
 
-### Step 1: Write the automation script
+If the task is non-trivial, use the skill-creator skill first:
 
-Write a Python script to the user's automations directory.
-Use the files skill or bash tool to write the script to the `automations/` subdirectory in the user's workspace.
-
-The script:
-- Receives parameters via `AUTOMATION_PARAMS` env var (JSON string)
-- Receives user context via `PAWLIA_USER_ID` and `PAWLIA_SESSION_DIR` env vars
-- Should print its result to stdout (this becomes the notification message)
-- Exit code 0 = success, non-zero = failure
-- Keep output concise (1-5 lines)
-
-**Example script** (`show_tasks.py`):
-```python
-import json
-import os
-
-session_dir = os.environ.get("PAWLIA_SESSION_DIR", "session")
-user_id = os.environ.get("PAWLIA_USER_ID", "")
-
-tasks_path = os.path.join(session_dir, user_id, "tasks", "tasks.json")
-if not os.path.exists(tasks_path):
-    print("Keine offenen Aufgaben.")
-else:
-    with open(tasks_path, "r") as f:
-        tasks = json.load(f)
-    pending = [t for t in tasks if t.get("status") == "pending"]
-    if not pending:
-        print("Alle Aufgaben erledigt!")
-    else:
-        for t in pending:
-            prio = t.get("priority", "medium")
-            due = t.get("due_date", "")
-            line = f"- [{prio}] {t['title']}"
-            if due:
-                line += f" (fällig: {due})"
-            print(line)
+```
+Call skill-creator with: "Baue einen Skill der [task description]"
 ```
 
-**IMPORTANT:**
-- Always use `os.environ.get("PAWLIA_USER_ID")` and `os.environ.get("PAWLIA_SESSION_DIR")` in scripts
-- Scripts must be self-contained (no imports from pawlia)
-- Scripts can read JSON files from the session directory for data
+Wait for the skill to be created and confirmed before proceeding.
 
-### Optional: LLM-Schritt im Automations-Skript
-
-Wenn ein Schritt zwingend das Sprachmodell braucht (Texte zusammenfassen,
-natürlichsprachliche Ausgabe erzeugen), **niemals** das Modell direkt
-importieren — stattdessen den mitgelieferten Harness als Subprocess aufrufen.
-Der Harness garantiert eine Retry/Nudge-Schleife bis ein nicht-leeres
-Ergebnis vorliegt (oder mit Non-Zero-Exit hart fehlschlägt — kein stilles
-Leerergebnis).
-
-Der Harness liegt unter `<skills_dir>/automation/scripts/llm.py`.
-
-**Beispiel** (`news_digest.py`, fasst ein paar Schlagzeilen mit dem LLM zu
-einer kurzen Nachricht zusammen):
-
-```python
-import subprocess
-import sys
-
-SOURCES = [
-    "Regierung beschließt neues Energiegesetz",
-    "Bahn kündigt Streik für Donnerstag an",
-    "Warnstreik im öffentlichen Dienst beendet",
-]
-
-prompt = (
-    "Fasse die folgenden Schlagzeilen in zwei Sätzen auf Deutsch zusammen:\n\n"
-    + "\n".join(f"- {s}" for s in SOURCES)
-)
-
-result = subprocess.run(
-    [sys.executable, "<skills_dir>/automation/scripts/llm.py",
-     "--prompt", prompt,
-     "--retries", "4",
-     "--min-chars", "20"],
-    capture_output=True, text=True, timeout=90,
-)
-
-if result.returncode != 0:
-    print(f"LLM-Schritt fehlgeschlagen: {result.stderr.strip()}", file=sys.stderr)
-    sys.exit(1)
-
-print(result.stdout.strip())
-```
-
-Regeln für LLM-Schritte:
-- Nur einsetzen, wenn ein deterministischer Schritt die Aufgabe nicht erledigen
-  kann. Die Laufzeit von Automationen soll so reproduzierbar wie möglich sein.
-- `--min-chars` setzen, damit offensichtlich leere/abgeschnittene Antworten
-  einen Retry auslösen.
-- Exit-Code prüfen und bei Fehler den Job mit Non-Zero-Exit beenden — so wird
-  der Fehler sichtbar statt verschluckt.
-
-### Step 1b: Skript testen (Pflicht, bevor der Job registriert wird)
-
-Nach dem Schreiben das Skript einmal direkt ausführen und den Output prüfen:
-
-```bash
-AUTOMATION_PARAMS='{}' \
-PAWLIA_USER_ID="<user_id>" \
-PAWLIA_SESSION_DIR="<session_dir>" \
-python <path_to_script>
-```
-
-Erst wenn der Testlauf einen sinnvollen, nicht-leeren stdout liefert, wird der
-Job registriert. Ein nicht-getestetes Skript wird nicht registriert.
-
-### Step 2: Register the job
+### Step 2: Register the automation
 
 Use the organizer script to register the job:
 
 ```bash
 python <scripts_dir>/../organizer/scripts/organizer.py add-job \
   --name "<descriptive name>" \
-  --script "<script_filename>.py" \
-  --schedule "<schedule>"
+  --schedule "<schedule>" \
+  --instruction "<instruction>"
 ```
 
 **Schedule formats:**
@@ -142,6 +65,11 @@ python <scripts_dir>/../organizer/scripts/organizer.py add-job \
 - `"interval:1h"` — every hour
 - `"weekly:0:09:00"` — weekly Monday at 09:00 (0=Mon..6=Sun)
 - `"monthly:1:10:00"` — monthly on the 1st at 10:00
+
+**Instruction examples:**
+- Simple: `"Lies die Datei workspace/tasks.md und zeige die offenen Aufgaben"`
+- Skill call: `"Nutze den weather Skill um mir das aktuelle Wetter für Hamburg zu zeigen"`
+- Multi-step: `"Prüfe Kalender und Aufgaben für heute, dann fasse beides kurz zusammen"`
 
 ### Managing existing jobs
 
@@ -162,7 +90,8 @@ python <scripts_dir>/../organizer/scripts/organizer.py toggle-job --job-id "<id>
 
 ## Output
 
-After creating the script and registering the job, confirm to the user:
-- What the script does
-- How often it runs
+After registering, confirm to the user:
+- What the automation does (the instruction)
+- How often it runs (the schedule)
+- If a skill was built: mention the skill name
 - That they can ask to list, disable, or delete it later
