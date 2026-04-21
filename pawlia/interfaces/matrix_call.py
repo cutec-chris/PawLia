@@ -153,9 +153,23 @@ if _AIORTC_AVAILABLE:
 
         def enqueue_pcm_float32(self, pcm: np.ndarray) -> None:
             """Enqueue float32 mono PCM for playback (chunks it into 20 ms frames)."""
-            pcm_int16 = (np.clip(pcm, -1.0, 1.0) * 32767).astype(np.int16)
+            # Debug: Check if we received valid audio data
+            if pcm is None or len(pcm) == 0:
+                logger.warning("TTS: Received empty or None audio data")
+                return
+
+            # Ensure proper range and convert to int16
+            pcm_normalized = np.clip(pcm, -1.0, 1.0)
+            pcm_int16 = (pcm_normalized * 32767).astype(np.int16)
+
+            # Debug: Log audio statistics
+            logger.debug("TTS: Enqueuing audio - samples: %d, min: %.4f, max: %.4f, mean: %.4f",
+                       len(pcm), float(np.min(pcm)), float(np.max(pcm)), float(np.mean(pcm)))
+
             for i in range(0, len(pcm_int16), self.SAMPLES_PER_FRAME):
-                self._queue.put_nowait(pcm_int16[i : i + self.SAMPLES_PER_FRAME])
+                chunk = pcm_int16[i : i + self.SAMPLES_PER_FRAME]
+                if len(chunk) > 0:
+                    self._queue.put_nowait(chunk)
 
 
 # ---------------------------------------------------------------------------
