@@ -192,6 +192,103 @@ def test_should_transcribe_chunk_accepts_sustained_speech():
     assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
 
 
+def test_meaningful_interrupt_accepts_keywords_and_full_sentences():
+    session = CallSession(
+        call_id="call-interrupt-ok",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-interrupt-ok",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    assert session._is_meaningful_interrupt("warte kurz") is True
+    assert session._is_meaningful_interrupt("Kannst du kurz anhalten?") is True
+    assert session._is_meaningful_interrupt("Ich bin gleich da.") is True
+
+
+def test_meaningful_interrupt_rejects_short_noise_like_transcripts():
+    session = CallSession(
+        call_id="call-interrupt-no",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-interrupt-no",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    assert session._is_meaningful_interrupt("hm") is False
+    assert session._is_meaningful_interrupt("ja") is False
+    assert session._is_meaningful_interrupt("fahrrad wind") is False
+
+
+@pytest.mark.asyncio
+async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    agent = MagicMock()
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-barge-no",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-barge-no",
+        client=client,
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=send_cb,
+    )
+
+    session._tts_track = SimpleNamespace(interrupt=MagicMock(), stop_hold=MagicMock())
+    session._cancel_active_response = AsyncMock()
+    session._respond_to_transcript = AsyncMock()
+
+    with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="hm")):
+        await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
+
+    session._tts_track.interrupt.assert_not_called()
+    session._cancel_active_response.assert_not_awaited()
+    session._respond_to_transcript.assert_not_awaited()
+    send_cb.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_speech_interrupts_for_meaningful_barge_in():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    agent = MagicMock()
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-barge-yes",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-barge-yes",
+        client=client,
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=send_cb,
+    )
+
+    session._tts_track = SimpleNamespace(interrupt=MagicMock(), stop_hold=MagicMock())
+    session._cancel_active_response = AsyncMock()
+    session._respond_to_transcript = AsyncMock()
+
+    with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="warte kurz")):
+        await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
+
+    session._tts_track.interrupt.assert_called_once()
+    session._cancel_active_response.assert_awaited_once()
+    session._respond_to_transcript.assert_awaited_once_with("warte kurz")
+
+
 def test_call_session_loads_voip_audio_thresholds_from_config():
     session = CallSession(
         call_id="call-config",

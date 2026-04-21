@@ -26,6 +26,7 @@ import asyncio
 import fractions
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
@@ -51,6 +52,11 @@ if TYPE_CHECKING:
     from pawlia.app import App
 
 logger = logging.getLogger("pawlia.interfaces.matrix_call")
+
+_INTERRUPT_KEYWORD_RE = re.compile(
+    r"\b(?:halt|stop|stopp|wait|warte|warten|moment|sekunde|pause)\b",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Outgoing audio track (TTS playback)
@@ -251,8 +257,11 @@ class CallSession:
     AGC_TARGET_RMS = 0.08         # target RMS level for normalization
     AGC_MAX_GAIN = 10.0           # don't amplify more than this
     AGC_SMOOTHING = 0.05          # EMA alpha for gain updates (lower = smoother)
-    # Barge-in: interrupt TTS when user speaks loudly enough
-    BARGEIN_RMS_THRESHOLD = 0.05  # raw RMS to trigger barge-in during TTS
+    # Barge-in: buffer possible interruptions during TTS above this RMS and
+    # only stop playback after the transcript looks meaningful.
+    BARGEIN_RMS_THRESHOLD = 0.05
+    BARGEIN_MIN_WORDS = 4
+    BARGEIN_MIN_CHARS = 12
 
     def __init__(
         self,
@@ -287,6 +296,7 @@ class CallSession:
         # AGC state
         self._agc_until: float = 0.0   # monotonic timestamp; AGC active while now < this
         self._agc_gain: float = 1.0    # current smoothed gain factor
+        self._active_response_task: Optional[asyncio.Task] = None
         self._load_voip_audio_config()
 
     def _mark_activity(self) -> None:
@@ -740,139 +750,52 @@ class CallSession:
             and stats["longest_run"] >= self.MIN_CONSECUTIVE_SPEECH_FRAMES
         )
 
-    async def _audio_pipeline(self, track) -> None:
-        """Continuously read audio frames, detect speech, transcribe, respond."""
-        SAMPLE_RATE = 48000
-        fps = 50  # aiortc default: 20 ms frames
-        silence_threshold = int(self.SILENCE_SECONDS * fps)
-        min_speech_frames = int(self.MIN_SPEECH_SECONDS * fps)
+    def _is_meaningful_interrupt(self, text: str) -> bool:
+        """Return True when a transcript is strong enough to justify barge-in."""
+        normalized = " ".join((text or "").strip().split())
+        if not normalized:
+            return False
+        if _INTERRUPT_KEYWORD_RE.search(normalized):
+            return True
 
-        speech_buffer: List[np.ndarray] = []
-        silence_count = 0
+        words = re.findall(r"\b\w+\b", normalized, flags=re.UNICODE)
+        if len(words) >= self.BARGEIN_MIN_WORDS and len(normalized) >= self.BARGEIN_MIN_CHARS:
+            return True
+        if len(words) >= 3 and bool(re.search(r"[.!?…]\s*$", normalized)):
+            return True
+        return False
 
-        logger.info("call %s: audio pipeline started", self.call_id[:8])
-        frames_received = 0
+    def _track_response_task(self, task: asyncio.Task) -> None:
+        """Remember the currently active speech-response task."""
+        self._active_response_task = task
+
+        def _clear(done_task: asyncio.Task) -> None:
+            if self._active_response_task is done_task:
+                self._active_response_task = None
+
+        task.add_done_callback(_clear)
+
+    async def _cancel_active_response(self) -> None:
+        """Cancel any in-flight response generation for this call."""
+        task = self._active_response_task
+        current = asyncio.current_task()
+        if not task or task.done() or task is current:
+            return
+        task.cancel()
         try:
-            while not self._done.is_set():
-                try:
-                    frame = await asyncio.wait_for(track.recv(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    if frames_received == 0:
-                        logger.warning("call %s: no audio frames received yet", self.call_id[:8])
-                    continue
-                except MediaStreamError:
-                    logger.warning("call %s: MediaStreamError after %d frames — track ended",
-                                   self.call_id[:8], frames_received)
-                    break
-
-                frames_received += 1
-
-                # Convert AudioFrame → float32 mono
-                raw_bytes = bytes(frame.planes[0])
-                n_channels = max(len(frame.layout.channels), 1)
-                n_int16 = frame.samples * n_channels
-                raw = np.frombuffer(raw_bytes, dtype=np.int16)[:n_int16]
-                if n_channels > 1:
-                    # Stereo → mono: average as float (no int16 truncation)
-                    pcm = raw.reshape(-1, n_channels).astype(np.float32).mean(axis=1) / 32768.0
-                else:
-                    pcm = raw.astype(np.float32) / 32768.0
-
-                rms = float(np.sqrt(np.mean(pcm ** 2)))
-                if frames_received <= 5:
-                    nz_count = int(np.count_nonzero(raw))
-                    logger.debug("call %s: frame #%d fmt=%s pts=%s ch=%d "
-                                 "pcm_len=%d nz_samples=%d rms=%.4f "
-                                 "raw_first10=%s",
-                                 self.call_id[:8], frames_received,
-                                 frame.format.name, frame.pts, n_channels,
-                                 len(pcm), nz_count, rms,
-                                 raw[:10].tolist())
-                elif frames_received % 50 == 0:
-                    import hashlib
-                    h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
-                    logger.debug("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
-                                 self.call_id[:8], frames_received, rms,
-                                 len(speech_buffer), silence_count, h)
-
-                # Barge-in: if TTS is playing, check for loud speech to interrupt
-                if self._tts_track and self._tts_track.is_playing:
-                    if rms >= self.BARGEIN_RMS_THRESHOLD:
-                        logger.info("call %s: barge-in detected (rms=%.4f), stopping TTS",
-                                    self.call_id[:8], rms)
-                        self._tts_track.interrupt()
-                        self._activate_agc()
-                        speech_buffer = [pcm]
-                        silence_count = 0
-                    else:
-                        # TTS playing, no barge-in — discard
-                        if speech_buffer:
-                            speech_buffer = []
-                            silence_count = 0
-                    continue
-
-                # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
-                adjusted_rms = self._agc_rms(rms)
-
-                if adjusted_rms > self.SILENCE_THRESHOLD:
-                    if not speech_buffer and silence_count == 0:
-                        logger.info("call %s: speech started (rms=%.4f)",
-                                    self.call_id[:8], rms)
-                    speech_buffer.append(pcm)
-                    silence_count = 0
-                elif speech_buffer:
-                    silence_count += 1
-                    speech_buffer.append(pcm)  # keep trailing silence for context
-
-                    if silence_count >= silence_threshold:
-                        chunk = np.concatenate(speech_buffer)
-                        duration = len(chunk) / SAMPLE_RATE
-                        logger.info("call %s: speech ended — %.1fs, %d samples",
-                                    self.call_id[:8], duration, len(chunk))
-                        speech_buffer = []
-                        silence_count = 0
-
-                        if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
-                            chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
-                            if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
-                                logger.info(
-                                    "call %s: sending chunk for transcription "
-                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
-                                    self.call_id[:8],
-                                    chunk_stats["active_ratio"],
-                                    int(chunk_stats["longest_run"]),
-                                    chunk_stats["p90_rms"],
-                                )
-                                self._mark_activity()
-                                asyncio.ensure_future(
-                                    self._process_speech(chunk, SAMPLE_RATE)
-                                )
-                            else:
-                                logger.info(
-                                    "call %s: skipping chunk as background noise "
-                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
-                                    self.call_id[:8],
-                                    chunk_stats["active_ratio"],
-                                    int(chunk_stats["longest_run"]),
-                                    chunk_stats["p90_rms"],
-                                )
-                        else:
-                            logger.info("call %s: chunk too short (%.1fs), skipping",
-                                        self.call_id[:8], duration)
+            await task
+        except asyncio.CancelledError:
+            logger.info("call %s: active response cancelled", self.call_id[:8])
         except Exception as e:
-            logger.error("call %s: audio pipeline error: %s", self.call_id[:8], e)
-        finally:
-            self._done.set()
-            logger.info("call %s: audio pipeline ended", self.call_id[:8])
+            logger.debug("call %s: active response cancel cleanup failed: %s", self.call_id[:8], e)
 
-    async def _process_speech(self, pcm: "np.ndarray", sample_rate: int) -> None:
-        """Transcribe a speech chunk, stream the agent response with sentence-by-sentence TTS."""
+    async def _transcribe_speech(self, pcm: "np.ndarray", sample_rate: int) -> Optional[str]:
+        """Transcribe raw speech audio to text."""
         try:
             from pawlia.transcription import transcribe_pcm
-            from pawlia.tts import synthesize_pcm
         except ImportError as e:
             logger.error("call %s: missing dependency: %s", self.call_id[:8], e)
-            return
+            return None
 
         # Debug mode: save audio chunk to disk for inspection
         if logger.isEnabledFor(logging.DEBUG):
@@ -903,12 +826,14 @@ class CallSession:
         audio_info = self._app.llm.audio_model_info(active_model or "chat")
         if audio_info:
             from pawlia.transcription import transcribe_pcm_via_model
-            text = await transcribe_pcm_via_model(pcm, sample_rate, audio_info[0], audio_info[1])
-        else:
-            text = await transcribe_pcm(pcm, sample_rate, self._app.config)
-        if not text:
-            logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
-            return
+            return await transcribe_pcm_via_model(
+                pcm, sample_rate, audio_info[0], audio_info[1]
+            )
+        return await transcribe_pcm(pcm, sample_rate, self._app.config)
+
+    async def _respond_to_transcript(self, text: str) -> None:
+        """Stream the agent response for an already transcribed utterance."""
+        from pawlia.tts import synthesize_pcm
 
         logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
 
@@ -969,9 +894,6 @@ class CallSession:
                 on_skill_start=_on_skill_start,
                 on_skill_done=_on_skill_done,
             )
-        except Exception as e:
-            logger.error("call %s: agent error: %s", self.call_id[:8], e)
-            return
         finally:
             typing_task.cancel()
             if self._tts_track:
@@ -983,6 +905,218 @@ class CallSession:
                 pass
 
         await self._send_cb(response)
+
+    async def _audio_pipeline(self, track) -> None:
+        """Continuously read audio frames, detect speech, transcribe, respond."""
+        SAMPLE_RATE = 48000
+        fps = 50  # aiortc default: 20 ms frames
+        silence_threshold = int(self.SILENCE_SECONDS * fps)
+        min_speech_frames = int(self.MIN_SPEECH_SECONDS * fps)
+
+        speech_buffer: List[np.ndarray] = []
+        silence_count = 0
+
+        logger.info("call %s: audio pipeline started", self.call_id[:8])
+        frames_received = 0
+        try:
+            while not self._done.is_set():
+                try:
+                    frame = await asyncio.wait_for(track.recv(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    if frames_received == 0:
+                        logger.warning("call %s: no audio frames received yet", self.call_id[:8])
+                    continue
+                except MediaStreamError:
+                    logger.warning("call %s: MediaStreamError after %d frames — track ended",
+                                   self.call_id[:8], frames_received)
+                    break
+
+                frames_received += 1
+
+                # Convert AudioFrame → float32 mono
+                raw_bytes = bytes(frame.planes[0])
+                n_channels = max(len(frame.layout.channels), 1)
+                n_int16 = frame.samples * n_channels
+                raw = np.frombuffer(raw_bytes, dtype=np.int16)[:n_int16]
+                if n_channels > 1:
+                    # Stereo → mono: average as float (no int16 truncation)
+                    pcm = raw.reshape(-1, n_channels).astype(np.float32).mean(axis=1) / 32768.0
+                else:
+                    pcm = raw.astype(np.float32) / 32768.0
+
+                rms = float(np.sqrt(np.mean(pcm ** 2)))
+                if frames_received <= 5:
+                    nz_count = int(np.count_nonzero(raw))
+                    logger.debug("call %s: frame #%d fmt=%s pts=%s ch=%d "
+                                 "pcm_len=%d nz_samples=%d rms=%.4f "
+                                 "raw_first10=%s",
+                                 self.call_id[:8], frames_received,
+                                 frame.format.name, frame.pts, n_channels,
+                                 len(pcm), nz_count, rms,
+                                 raw[:10].tolist())
+                elif frames_received % 50 == 0:
+                    import hashlib
+                    h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
+                    logger.debug("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
+                                 self.call_id[:8], frames_received, rms,
+                                 len(speech_buffer), silence_count, h)
+
+                # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
+                adjusted_rms = self._agc_rms(rms)
+
+                # While TTS is playing, keep buffering possible interruptions, but
+                # only stop playback after the resulting transcript is meaningful.
+                if self._tts_track and self._tts_track.is_playing:
+                    if rms >= max(self.BARGEIN_RMS_THRESHOLD, self.SILENCE_THRESHOLD):
+                        if not speech_buffer and silence_count == 0:
+                            logger.info(
+                                "call %s: possible barge-in started (rms=%.4f)",
+                                self.call_id[:8],
+                                rms,
+                            )
+                        speech_buffer.append(pcm)
+                        silence_count = 0
+                    elif speech_buffer:
+                        silence_count += 1
+                        speech_buffer.append(pcm)
+
+                        if silence_count >= silence_threshold:
+                            chunk = np.concatenate(speech_buffer)
+                            duration = len(chunk) / SAMPLE_RATE
+                            logger.info(
+                                "call %s: possible barge-in ended — %.1fs, %d samples",
+                                self.call_id[:8], duration, len(chunk),
+                            )
+                            speech_buffer = []
+                            silence_count = 0
+
+                            if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
+                                chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
+                                if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
+                                    logger.info(
+                                        "call %s: transcribing barge-in candidate "
+                                        "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                        self.call_id[:8],
+                                        chunk_stats["active_ratio"],
+                                        int(chunk_stats["longest_run"]),
+                                        chunk_stats["p90_rms"],
+                                    )
+                                    self._mark_activity()
+                                    task = asyncio.create_task(
+                                        self._process_speech(
+                                            chunk,
+                                            SAMPLE_RATE,
+                                            interrupt_playback=True,
+                                        )
+                                    )
+                                    self._track_response_task(task)
+                                else:
+                                    logger.info(
+                                        "call %s: barge-in candidate looked like noise "
+                                        "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                        self.call_id[:8],
+                                        chunk_stats["active_ratio"],
+                                        int(chunk_stats["longest_run"]),
+                                        chunk_stats["p90_rms"],
+                                    )
+                    continue
+
+                if adjusted_rms > self.SILENCE_THRESHOLD:
+                    if not speech_buffer and silence_count == 0:
+                        logger.info("call %s: speech started (rms=%.4f)",
+                                    self.call_id[:8], rms)
+                    speech_buffer.append(pcm)
+                    silence_count = 0
+                elif speech_buffer:
+                    silence_count += 1
+                    speech_buffer.append(pcm)  # keep trailing silence for context
+
+                    if silence_count >= silence_threshold:
+                        chunk = np.concatenate(speech_buffer)
+                        duration = len(chunk) / SAMPLE_RATE
+                        logger.info("call %s: speech ended — %.1fs, %d samples",
+                                    self.call_id[:8], duration, len(chunk))
+                        speech_buffer = []
+                        silence_count = 0
+
+                        if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
+                            chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
+                            if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
+                                logger.info(
+                                    "call %s: sending chunk for transcription "
+                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                    self.call_id[:8],
+                                    chunk_stats["active_ratio"],
+                                    int(chunk_stats["longest_run"]),
+                                    chunk_stats["p90_rms"],
+                                )
+                                self._mark_activity()
+                                task = asyncio.create_task(
+                                    self._process_speech(chunk, SAMPLE_RATE)
+                                )
+                                self._track_response_task(task)
+                            else:
+                                logger.info(
+                                    "call %s: skipping chunk as background noise "
+                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                    self.call_id[:8],
+                                    chunk_stats["active_ratio"],
+                                    int(chunk_stats["longest_run"]),
+                                    chunk_stats["p90_rms"],
+                                )
+                        else:
+                            logger.info("call %s: chunk too short (%.1fs), skipping",
+                                        self.call_id[:8], duration)
+        except Exception as e:
+            logger.error("call %s: audio pipeline error: %s", self.call_id[:8], e)
+        finally:
+            self._done.set()
+            logger.info("call %s: audio pipeline ended", self.call_id[:8])
+
+    async def _process_speech(
+        self,
+        pcm: "np.ndarray",
+        sample_rate: int,
+        interrupt_playback: bool = False,
+    ) -> None:
+        """Transcribe a speech chunk and optionally use it to barge into TTS."""
+        try:
+            text = await self._transcribe_speech(pcm, sample_rate)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error("call %s: transcription error: %s", self.call_id[:8], e)
+            return
+
+        if not text:
+            logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
+            return
+
+        try:
+            if interrupt_playback:
+                if not self._is_meaningful_interrupt(text):
+                    logger.info(
+                        "call %s: ignoring non-meaningful barge-in transcript: %s",
+                        self.call_id[:8],
+                        text[:120],
+                    )
+                    return
+                logger.info(
+                    "call %s: meaningful barge-in transcript detected, interrupting playback: %s",
+                    self.call_id[:8],
+                    text[:120],
+                )
+                if self._tts_track:
+                    self._tts_track.interrupt()
+                await self._cancel_active_response()
+
+            await self._respond_to_transcript(text)
+        except asyncio.CancelledError:
+            if self._tts_track:
+                self._tts_track.stop_hold()
+            raise
+        except Exception as e:
+            logger.error("call %s: agent error: %s", self.call_id[:8], e)
 
     def _load_hold_audio(self) -> Optional["np.ndarray"]:
         """Load hold audio from config and decode to int16 mono PCM at 48 kHz.
