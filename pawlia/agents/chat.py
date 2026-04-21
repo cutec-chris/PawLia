@@ -47,6 +47,8 @@ _CHAT_CONTINUE_NUDGE = (
 )
 _MAX_CHAT_TOOL_TURNS = 8
 _MAX_CHAT_NUDGES = 3
+_REPLAY_TOOL_RESULT_LIMIT = 240
+_REPLAY_TOOL_CALLS_LIMIT = 3
 _DEFERRED_TOOL_INTENT_RE = re.compile(
     r"(?:\b(?:let me|i(?:'ll| will| am going to)|first\s*,?\s*i(?:'ll| will)|now\s+i(?:'ll| will)|"
     r"ich\s+(?:werde|schaue|suche|pruefe|prüfe|checke|oeffne|öffne)|lass\s+mich)\b.{0,140}"
@@ -242,6 +244,51 @@ class ChatAgent(BaseAgent):
             )
         return skill_name, args, ""
 
+    @staticmethod
+    def _compact_text(value: Any, *, limit: int = _REPLAY_TOOL_RESULT_LIMIT) -> str:
+        """Collapse whitespace and trim long text for replay context."""
+        if value is None:
+            return ""
+        text = re.sub(r"\s+", " ", str(value)).strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    def _format_replayed_assistant_turn(
+        self,
+        bot_text: str,
+        tool_calls_info: Optional[List[Dict[str, Any]]],
+    ) -> str:
+        """Return a compact assistant turn for replay into the chat context.
+
+        Prior skill-backed exchanges are replayed as plain assistant text with a
+        concise note about earlier skill usage. This avoids re-inflating the
+        prompt with full ToolMessage payloads and raw tool outputs.
+        """
+        base = self._compact_text(bot_text, limit=600)
+        if not tool_calls_info:
+            return base
+
+        lines: List[str] = []
+        for tc in tool_calls_info[:_REPLAY_TOOL_CALLS_LIMIT]:
+            name = self._resolve_skill_name(str(tc.get("name", "") or "").strip()) or "unknown"
+            args = self._normalize_skill_args(tc.get("args", {}))
+            query = self._compact_text(args.get("query", ""), limit=100)
+            result = self._compact_text(tc.get("result", ""), limit=_REPLAY_TOOL_RESULT_LIMIT)
+
+            detail = f"- {name}"
+            if query:
+                detail += f": {query}"
+            if result:
+                detail += f" -> {result}"
+            lines.append(detail)
+
+        if len(tool_calls_info) > _REPLAY_TOOL_CALLS_LIMIT:
+            lines.append(f"- ... {len(tool_calls_info) - _REPLAY_TOOL_CALLS_LIMIT} more earlier skill call(s)")
+
+        summary = "Earlier skill use:\n" + "\n".join(lines)
+        return f"{base}\n\n{summary}" if base else summary
+
     async def run(
         self,
         user_input: str,
@@ -291,29 +338,9 @@ class ChatAgent(BaseAgent):
                     user_text, bot_text, tool_calls_info = exchange  # type: ignore
 
                 messages.append(HumanMessage(content=user_text))
-
-                # Restore tool calls if present
-                if tool_calls_info:
-                    # Create AIMessage with reconstructed tool_calls
-                    reconstructed_tool_calls = []
-                    for tc in tool_calls_info:
-                        reconstructed_tool_calls.append({
-                            "name": tc["name"],
-                            "args": tc["args"],
-                            "id": f"restored_{len(reconstructed_tool_calls)}",
-                        })
-                    messages.append(AIMessage(
-                        content=bot_text,
-                        tool_calls=reconstructed_tool_calls,
-                    ))
-                    # Add ToolMessage for each restored tool call with its result
-                    for i, tc in enumerate(tool_calls_info):
-                        messages.append(ToolMessage(
-                            content=tc["result"],
-                            tool_call_id=f"restored_{i}",
-                        ))
-                else:
-                    messages.append(AIMessage(content=bot_text))
+                messages.append(AIMessage(
+                    content=self._format_replayed_assistant_turn(bot_text, tool_calls_info)
+                ))
 
         # Resolve the LLMs to use for this call.
         # A thread-specific model override takes priority over the session default.
@@ -479,16 +506,9 @@ class ChatAgent(BaseAgent):
                 else:
                     user_text, bot_text, tc_info = exchange  # type: ignore
                 messages.append(HumanMessage(content=user_text))
-                if tc_info:
-                    reconstructed = [
-                        {"name": tc["name"], "args": tc["args"], "id": f"restored_{i}"}
-                        for i, tc in enumerate(tc_info)
-                    ]
-                    messages.append(AIMessage(content=bot_text, tool_calls=reconstructed))
-                    for i, tc in enumerate(tc_info):
-                        messages.append(ToolMessage(content=tc["result"], tool_call_id=f"restored_{i}"))
-                else:
-                    messages.append(AIMessage(content=bot_text))
+                messages.append(AIMessage(
+                    content=self._format_replayed_assistant_turn(bot_text, tc_info)
+                ))
 
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
 

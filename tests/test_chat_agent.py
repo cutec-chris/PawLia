@@ -380,6 +380,39 @@ class TestChatAgentPersist:
             assert messages[2].content == "prev_a"
             assert messages[3].content == "New question"
 
+    @pytest.mark.asyncio
+    async def test_replays_skill_history_as_compact_plain_text(self):
+        """Historical tool usage should be replayed compactly, without ToolMessages."""
+        llm = _mock_llm([_make_ai_message("Response")])
+
+        skill_history = [{
+            "name": "searxng",
+            "args": {"query": "python tutorials for absolute beginners"},
+            "result": "Result line " * 80,
+        }]
+
+        session = MagicMock()
+        session.exchanges = [("prev_q", "prev_a", skill_history)]
+        memory = MagicMock()
+        agent = ChatAgent(
+            llm=llm,
+            skills={},
+            skill_runner_factory=lambda s: None,
+            memory=memory,
+            session=session,
+        )
+
+        await agent.run("New question")
+
+        messages = llm.invoke.call_args[0][0]
+        assert len(messages) == 4
+        assert messages[1].content == "prev_q"
+        assert isinstance(messages[2], AIMessage)
+        assert "Earlier skill use:" in messages[2].content
+        assert "searxng: python tutorials for absolute beginners" in messages[2].content
+        assert "Result line Result line" in messages[2].content
+        assert len(messages[2].content) < 500
+
 
 class TestChatAgentMultiSkill:
     @pytest.mark.asyncio
