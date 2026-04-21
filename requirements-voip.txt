@@ -9,6 +9,5 @@ numpy>=1.24
 
 # TTS providers
 edge-tts>=6.1        # Microsoft Edge TTS (needs internet, no local model)
-# piper-tts itself comes from Alpine package (has compiled espeakbridge extension)
-# pathvalidate is a missing dep in Alpine's piper-tts package declaration
-pathvalidate>=2.0
+# piper-tts comes from Alpine package (has compiled espeakbridge + onnxruntime)
+# pathvalidate installed system-wide in Dockerfile.voip (missing dep in Alpine's piper-tts)
