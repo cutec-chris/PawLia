@@ -802,7 +802,7 @@ class CallSession:
                                  frame.format.name, frame.pts, n_channels,
                                  len(pcm), nz_count, rms,
                                  raw[:10].tolist())
-                elif frames_received % 50 == 0:
+                elif frames_received % 50 == 0 and logger.isEnabledFor(logging.DEBUG):
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
                     logger.debug("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
