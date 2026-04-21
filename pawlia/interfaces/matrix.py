@@ -207,8 +207,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     # Try to use SqliteStore for E2EE; fall back to plain client if deps missing
     try:
-        # Disable SQLite debug logging for E2EE keystore through logging system
-        logging.getLogger('sqlalchemy').setLevel(logging.WARNING)
+        # The nio E2EE store uses peewee/sqlite, not sqlalchemy.
+        # Keep those SQL traces out of --debug so app-level debugging stays usable.
+        logging.getLogger("peewee").setLevel(logging.WARNING)
+        logging.getLogger("nio.store").setLevel(logging.WARNING)
+        logging.getLogger("sqlite3").setLevel(logging.WARNING)
         from nio import ClientConfig
         from nio.store import SqliteStore
         client_config = ClientConfig(store=SqliteStore, store_name="")
