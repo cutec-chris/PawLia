@@ -36,6 +36,7 @@ RUN apk add --no-cache \
         py3-olm \
         nodejs \
         npm \
+        py3-numpy \
         openssl \
         openssh-client \
         libffi \

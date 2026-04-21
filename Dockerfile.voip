@@ -44,6 +44,7 @@ RUN apk add --no-cache \
         espeak-ng \
         ffmpeg \
         wget \
+        py3-numpy \
         openssl \
         openssh-client \
         git \
