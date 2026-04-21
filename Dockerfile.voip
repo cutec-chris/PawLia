@@ -8,8 +8,6 @@ RUN apk add --no-cache \
         py3-pip \
         py3-olm \
         py3-numpy \
-        py3-onnxruntime \
-        espeak-ng \
         gcc \
         g++ \
         musl-dev \
@@ -53,7 +51,9 @@ RUN apk add --no-cache \
         git \
         libffi \
         libstdc++ \
-        crc32c
+        crc32c \
+    && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
+        piper-tts
 
 WORKDIR /app
 
