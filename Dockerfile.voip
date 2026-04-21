@@ -54,14 +54,14 @@ RUN apk add --no-cache \
         libstdc++ \
         crc32c \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
-        piper-tts \
-    && pip install --break-system-packages --no-cache-dir pathvalidate
+        piper-tts
 
 WORKDIR /app
 
 # Copy the venv from the builder
 COPY --from=builder /venv /venv
 ENV PATH="/venv/bin:$PATH"
+ENV PYTHONPATH="/usr/lib/python3.14/site-packages"
 
 # Application code
 COPY pawlia/ pawlia/
