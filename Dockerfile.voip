@@ -56,6 +56,7 @@ RUN apk add --no-cache \
         crc32c \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
+RUN /usr/bin/python3 -m pip install --break-system-packages pathvalidate
 
 WORKDIR /app
 
