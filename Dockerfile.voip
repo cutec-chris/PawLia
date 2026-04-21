@@ -39,6 +39,7 @@ FROM alpine:edge
 RUN apk add --no-cache \
         python3 \
         py3-olm \
+        py3-pathvalidate \
         nodejs \
         npm \
         espeak-ng \
