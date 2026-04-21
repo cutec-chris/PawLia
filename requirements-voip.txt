@@ -9,5 +9,5 @@ numpy>=1.24
 
 # TTS providers
 edge-tts>=6.1        # Microsoft Edge TTS (needs internet, no local model)
-# piper-tts: not installable on Alpine (onnxruntime/piper-phonemize have no musl wheels)
-# → piper binary is bundled in Dockerfile.voip instead
+# piper-tts comes from Alpine package (has compiled espeakbridge + onnxruntime)
+# pathvalidate installed system-wide in Dockerfile.voip (missing dep in Alpine's piper-tts)

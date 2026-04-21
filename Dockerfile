@@ -9,6 +9,7 @@ RUN apk add --no-cache \
         python3 \
         py3-pip \
         py3-olm \
+        py3-numpy \
         gcc \
         g++ \
         musl-dev \
@@ -35,6 +36,7 @@ RUN apk add --no-cache \
         py3-olm \
         nodejs \
         npm \
+        py3-numpy \
         openssl \
         openssh-client \
         libffi \

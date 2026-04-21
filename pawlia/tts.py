@@ -213,6 +213,11 @@ async def _synthesize_piper(text: str, cfg: Dict) -> bytes:
 
     if proc.returncode != 0:
         err = stderr.decode(errors="replace").strip()
+        if "ModuleNotFoundError: No module named 'numpy'" in err:
+            raise RuntimeError(
+                f"piper failed: numpy is not installed. "
+                f"Please install numpy: pip install numpy. Original error: {err}"
+            )
         raise RuntimeError(f"piper exited with code {proc.returncode}: {err}")
 
     return stdout
