@@ -71,6 +71,7 @@ RUN mkdir -p skills/user
 
 # Install deps + compile workflows for all pre-bundled skills
 RUN python3 -m pawlia.install_skill_deps --no-compile
+RUN python3 -m pip install --break-system-packages pathvalidate
 
 # German Piper voices (low quality, 16 kHz, ~63 MB each → ~252 MB total)
 RUN mkdir -p /app/piper && \
