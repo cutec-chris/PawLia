@@ -492,8 +492,12 @@ class LLMFactory:
         provider_cfg = self._get_provider(provider_name)
         return (
             model_cfg.get("model", "llama3.1:latest"),
+            provider_name,
             provider_cfg.get("apiBase", ""),
             model_cfg.get("temperature", 0.7),
+            model_cfg.get("think"),
+            model_cfg.get("max_tokens"),
+            provider_cfg.get("keepAlive"),
         )
 
     def _is_ollama(self, provider_name: str, api_base: str) -> bool:

@@ -106,3 +106,50 @@ def test_agent_model_list_raises_last_error_if_all_fail(monkeypatch: pytest.Monk
 
     with pytest.raises(RuntimeError, match="boom-m2"):
         llm.invoke([])
+
+
+def test_cache_key_distinguishes_think_setting(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["models"] = {
+        "plain": {"model": "shared", "provider": "test"},
+        "no_think": {"model": "shared", "provider": "test", "think": False},
+    }
+
+    built: List[Dict[str, Any]] = []
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        built.append(dict(model_cfg))
+        suffix = "no_think" if model_cfg.get("think") is False else "plain"
+        return _DummyLLM(model_name=f"{model_cfg['model']}-{suffix}")
+
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    plain = factory.get_with_model("plain")
+    no_think = factory.get_with_model("no_think")
+
+    assert plain is not no_think
+    assert len(built) == 2
+
+
+def test_cache_key_distinguishes_max_tokens(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["models"] = {
+        "short": {"model": "shared", "provider": "test", "max_tokens": 64},
+        "long": {"model": "shared", "provider": "test", "max_tokens": 512},
+    }
+
+    built: List[Dict[str, Any]] = []
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        built.append(dict(model_cfg))
+        return _DummyLLM(model_name=f"{model_cfg['model']}-{model_cfg.get('max_tokens')}")
+
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    short = factory.get_with_model("short")
+    long = factory.get_with_model("long")
+
+    assert short is not long
+    assert len(built) == 2
