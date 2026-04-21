@@ -51,6 +51,7 @@ RUN apk add --no-cache \
         libffi \
         libstdc++ \
         crc32c \
+        py3-onnxruntime \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
