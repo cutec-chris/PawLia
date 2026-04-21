@@ -8,6 +8,8 @@ RUN apk add --no-cache \
         py3-pip \
         py3-olm \
         py3-numpy \
+        py3-onnxruntime \
+        espeak-ng \
         gcc \
         g++ \
         musl-dev \
@@ -29,13 +31,13 @@ RUN /venv/bin/pip install --no-cache-dir \
 FROM alpine:edge
 
 # Runtime system deps:
-#   python3      — interpreter
-#   py3-olm      — E2EE (visible to venv via --system-site-packages)
-#   nodejs/npm   — AgentSkills
-#   espeak-ng    — phonemisation for Piper
-#   ffmpeg       — audio codec support for aiortc/av
-#   libstdc++    — C++ runtime for Piper
-#   piper-tts    — local TTS engine (Alpine edge/testing, musl-native)
+#   python3         — interpreter
+#   py3-olm         — E2EE (visible to venv via --system-site-packages)
+#   nodejs/npm      — AgentSkills
+#   espeak-ng       — phonemisation for Piper
+#   ffmpeg          — audio codec support for aiortc/av
+#   libstdc++       — C++ runtime
+#   py3-onnxruntime — ONNX runtime for piper-tts (musl-native, visible to venv)
 RUN apk add --no-cache \
         python3 \
         py3-olm \
@@ -45,15 +47,13 @@ RUN apk add --no-cache \
         ffmpeg \
         wget \
         py3-numpy \
+        py3-onnxruntime \
         openssl \
         openssh-client \
         git \
         libffi \
         libstdc++ \
-        crc32c \
-        py3-onnxruntime \
-    && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
-        piper-tts
+        crc32c
 
 WORKDIR /app
 
