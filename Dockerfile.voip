@@ -22,7 +22,8 @@ RUN python3 -m venv --system-site-packages /venv
 COPY requirements.txt requirements-voip.txt ./
 RUN /venv/bin/pip install --no-cache-dir \
         -r requirements.txt \
-        -r requirements-voip.txt
+        -r requirements-voip.txt \
+        pathvalidate
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
