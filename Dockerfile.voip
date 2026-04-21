@@ -1,8 +1,7 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────
-# Compiles Python packages that have no musllinux wheels (e.g. cryptography,
-# aiohttp) against Alpine musl so the runtime stage stays build-tool-free.
 FROM alpine:edge AS builder
 
+# Wir installieren alles direkt ins System
 RUN apk add --no-cache \
         python3 \
         py3-pip \
@@ -16,31 +15,23 @@ RUN apk add --no-cache \
         libffi-dev \
         crc32c-dev
 
-# Create a venv that can see system py3-olm so pip accepts matrix-nio[e2e]
-RUN python3 -m venv --system-site-packages /venv
-
 COPY requirements.txt requirements-voip.txt ./
-RUN /venv/bin/pip install --no-cache-dir \
+
+# Installation direkt in die System-Packages
+# --break-system-packages ist in neuen Python-Versionen Pflicht
+RUN pip install --break-system-packages --no-cache-dir \
         -r requirements.txt \
         -r requirements-voip.txt \
         pathvalidate
 
-
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
 FROM alpine:edge
 
-# Runtime system deps:
-#   python3         — interpreter
-#   py3-olm         — E2EE (visible to venv via --system-site-packages)
-#   nodejs/npm      — AgentSkills
-#   espeak-ng       — phonemisation for Piper
-#   ffmpeg          — audio codec support for aiortc/av
-#   libstdc++       — C++ runtime
-#   py3-onnxruntime — ONNX runtime for piper-tts (musl-native, visible to venv)
+# System-Abhängigkeiten
 RUN apk add --no-cache \
         python3 \
+        py3-pip \
         py3-olm \
-        py3-pathvalidate \
         nodejs \
         npm \
         espeak-ng \
@@ -56,25 +47,22 @@ RUN apk add --no-cache \
         crc32c \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
-RUN /usr/bin/python3 -m pip install --break-system-packages pathvalidate
 
 WORKDIR /app
 
-# Copy the venv from the builder
-COPY --from=builder /venv /venv
-ENV PATH="/venv/bin:$PATH"
-ENV PYTHONPATH="/usr/lib/python3.14/site-packages"
+# Wir kopieren nur die installierten Python-Packages aus dem Builder
+# Anstatt des ganzen venv kopieren wir den site-packages Ordner
+COPY --from=builder /usr/lib/python3.14/site-packages /usr/lib/python3.14/site-packages
 
 # Application code
 COPY pawlia/ pawlia/
 COPY skills/ skills/
 RUN mkdir -p skills/user
 
-# Install deps + compile workflows for all pre-bundled skills
+# Da wir kein venv haben, nutzen wir einfach das System-Python
 RUN python3 -m pawlia.install_skill_deps --no-compile
-RUN python3 -m pip install --break-system-packages pathvalidate
 
-# German Piper voices (low quality, 16 kHz, ~63 MB each → ~252 MB total)
+# Stimmen-Download
 RUN mkdir -p /app/piper && \
     for voice in karlsson kerstin ramona thorsten; do \
         wget -O "/app/piper/de_DE-${voice}-low.onnx" \
@@ -85,10 +73,8 @@ RUN mkdir -p /app/piper && \
             || { echo "ERROR: voice download failed for ${voice}"; exit 1; } ; \
     done
 
-
-# Session data lives in a volume
 VOLUME ["/app/session"]
-
 ENV PYTHONUNBUFFERED=1
 
+# Kein PATH-Hacking mehr nötig
 CMD ["python3", "-m", "pawlia", "--mode", "server"]
