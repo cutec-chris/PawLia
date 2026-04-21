@@ -699,3 +699,55 @@ class TestWorkflowExecutor:
 
         tools = executor._blocks_to_tools(workflow)
         assert tools[0]["function"]["parameters"]["additionalProperties"] is False
+
+    @pytest.mark.asyncio
+    async def test_execute_does_not_reuse_previous_response_after_llm_error(self):
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=[
+            _make_ai_message("", tool_calls=[
+                {"id": "tc1", "name": "step_a", "args": {}}
+            ]),
+            RuntimeError("model boom"),
+        ])
+        llm = MagicMock()
+        llm.bind_tools = MagicMock(return_value=bound)
+
+        class CountingBash(Tool):
+            name = "bash"
+            description = "Counting bash"
+
+            def parameters(self):
+                return {"command": {"type": "string"}}
+
+            def required_parameters(self):
+                return ["command"]
+
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, args, context=None):
+                self.calls += 1
+                return f"ran:{args['command']}"
+
+        tool = CountingBash()
+        tools = ToolRegistry()
+        tools.register(tool)
+
+        executor = WorkflowExecutor(
+            tool_registry=tools,
+            context={},
+            llm=llm,
+        )
+        workflow = Workflow(
+            id="workflow_a",
+            trigger="A",
+            max_steps=3,
+            building_blocks=[
+                BuildingBlock(id="step_a", command="echo a", description="A")
+            ],
+        )
+
+        result = await executor.execute(workflow, "do A")
+
+        assert result == "ran:echo a"
+        assert tool.calls == 1

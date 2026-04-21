@@ -172,6 +172,7 @@ class WorkflowExecutor:
         outputs: List[str] = []
 
         for step in range(workflow.max_steps):
+            response = None
             step_retries = 0
             max_step_retries = 3
             while True:
@@ -196,11 +197,6 @@ class WorkflowExecutor:
                     self.logger.error("LLM error in workflow step %d (attempt %d): %s",
                                       step, step_retries, exc)
                     break
-
-            # If we still have no response from a successful invoke, move on
-            if 'response' not in dir() or response is None:
-                step_retries = 0
-                response = None
 
             if response is None:
                 break
