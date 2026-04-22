@@ -41,6 +41,11 @@ mkdir -p "$output_dir"
 target_file="${output_dir}/${safe_host}-${safe_container}-${timestamp}.log"
 
 echo "Lade Logs von ${container} auf ${ssh_host} ..."
-ssh "$ssh_host" podman logs "${since_args[@]}" "$container" >"$target_file"
+remote_command=(
+    podman logs
+    "${since_args[@]}"
+    "$container"
+)
+ssh "$ssh_host" "${remote_command[@]}" >"$target_file" 2>&1
 
 echo "Gespeichert in: $target_file"
