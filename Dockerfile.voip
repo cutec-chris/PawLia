@@ -15,12 +15,13 @@ RUN apk add --no-cache \
         libffi-dev \
         crc32c-dev
 
-COPY requirements.txt requirements-voip.txt ./
+COPY requirements.txt requirements-e2e.txt requirements-voip.txt ./
 
 # Installation direkt in die System-Packages
 # --break-system-packages ist in neuen Python-Versionen Pflicht
 RUN pip install --break-system-packages --no-cache-dir \
         -r requirements.txt \
+        -r requirements-e2e.txt \
         -r requirements-voip.txt \
         pathvalidate
 

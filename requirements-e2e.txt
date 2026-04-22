@@ -1,0 +1,7 @@
+# Optional Matrix E2EE extras.
+#
+# Install this in environments that should support encrypted Matrix rooms:
+#   pip install -r requirements.txt -r requirements-e2e.txt
+#
+# CI can skip this file when libolm / python-olm is unavailable.
+matrix-nio[e2e]>=0.25

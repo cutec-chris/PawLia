@@ -20,8 +20,8 @@ RUN apk add --no-cache \
 # Create a venv that can see system py3-olm so pip accepts matrix-nio[e2e]
 RUN python3 -m venv --system-site-packages /venv
 
-COPY requirements.txt ./
-RUN /venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-e2e.txt ./
+RUN /venv/bin/pip install --no-cache-dir -r requirements.txt -r requirements-e2e.txt
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
