@@ -316,6 +316,13 @@ class CallSession:
         """Record user or bot activity to keep the call alive."""
         self._last_activity_at = time.monotonic()
 
+    def _bot_is_active(self) -> bool:
+        """Return True while Pawlia is still speaking or generating audio."""
+        if self._tts_track and self._tts_track.is_playing:
+            return True
+        task = self._active_response_task
+        return bool(task and not task.done())
+
     def _activate_agc(self) -> None:
         """Open an AGC window for the next AGC_WINDOW_SECONDS."""
         self._agc_until = time.monotonic() + self.AGC_WINDOW_SECONDS
@@ -1232,6 +1239,19 @@ class CallSession:
     async def _watchdog(self) -> None:
         """Auto-hangup after prolonged call inactivity."""
         while not self._done.is_set():
+            # Do not count our own live response generation or playback as
+            # inactivity. Otherwise long spoken replies can trip the timeout
+            # mid-sentence and drop an otherwise healthy call.
+            if self._bot_is_active():
+                self._mark_activity()
+                try:
+                    await asyncio.wait_for(
+                        self._done.wait(),
+                        timeout=self.WATCHDOG_POLL_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
             idle_for = time.monotonic() - self._last_activity_at
             remaining = self.CALL_INACTIVITY_SECONDS - idle_for
             if remaining <= 0:
