@@ -254,7 +254,7 @@ class CallSession:
     """Manages a single active VoIP call."""
 
     # Silence detection: RMS below this (after AGC) → silence
-    SILENCE_THRESHOLD = 0.02
+    SILENCE_THRESHOLD = 0.018
     # Seconds of silence that end a speech chunk
     SILENCE_SECONDS = 2.2
     # Minimum seconds of speech before we transcribe (filter short noise bursts)
@@ -266,10 +266,10 @@ class CallSession:
     CALL_INACTIVITY_SECONDS = 180
     WATCHDOG_POLL_SECONDS = 5.0
     # AGC: boost gain in windows where we expect the user to speak
-    AGC_WINDOW_SECONDS = 8.0      # how long the AGC stays active
-    AGC_TARGET_RMS = 0.08         # target RMS level for normalization
-    AGC_MAX_GAIN = 10.0           # don't amplify more than this
-    AGC_SMOOTHING = 0.05          # EMA alpha for gain updates (lower = smoother)
+    AGC_WINDOW_SECONDS = 15.0     # how long the AGC stays active
+    AGC_TARGET_RMS = 0.10         # target RMS level for normalization
+    AGC_MAX_GAIN = 12.0           # don't amplify more than this
+    AGC_SMOOTHING = 0.15          # EMA alpha for gain updates (higher = faster)
     # Barge-in: buffer possible interruptions during TTS above this RMS and
     # only stop playback after the transcript looks meaningful.
     BARGEIN_RMS_THRESHOLD = 0.05
@@ -402,6 +402,31 @@ class CallSession:
             "call_inactivity_seconds",
             self.CALL_INACTIVITY_SECONDS,
             minimum=1,
+        )
+        self.AGC_WINDOW_SECONDS = self._get_float_config(
+            voip_cfg,
+            "agc_window_seconds",
+            self.AGC_WINDOW_SECONDS,
+            minimum=0.1,
+        )
+        self.AGC_TARGET_RMS = self._get_float_config(
+            voip_cfg,
+            "agc_target_rms",
+            self.AGC_TARGET_RMS,
+            minimum=0.001,
+        )
+        self.AGC_MAX_GAIN = self._get_float_config(
+            voip_cfg,
+            "agc_max_gain",
+            self.AGC_MAX_GAIN,
+            minimum=1.0,
+        )
+        self.AGC_SMOOTHING = self._get_float_config(
+            voip_cfg,
+            "agc_smoothing",
+            self.AGC_SMOOTHING,
+            minimum=0.001,
+            maximum=1.0,
         )
         self.BARGEIN_RMS_THRESHOLD = self._get_float_config(
             voip_cfg,

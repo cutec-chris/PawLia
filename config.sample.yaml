@@ -72,12 +72,16 @@ interfaces:
   #   #   - stun:stun.l.google.com:19302
 
 # voip:
-#   silence_threshold: 0.02           # frame RMS above this counts as speech (after AGC)
+#   silence_threshold: 0.018          # frame RMS above this counts as speech (after AGC)
 #   silence_seconds: 2.2              # trailing silence that ends a chunk
 #   min_speech_seconds: 0.4           # shorter chunks are discarded early
 #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
 #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
+#   agc_window_seconds: 15.0          # keep AGC active this long after bot/user activity
+#   agc_target_rms: 0.10              # target loudness used for VAD normalization
+#   agc_max_gain: 12.0                # upper cap for AGC amplification
+#   agc_smoothing: 0.15               # how quickly AGC reacts (higher = faster)
 #   bargein_rms_threshold: 0.05       # raw RMS to interrupt TTS playback
 
 # Speech-to-text transcription (voice messages + VoIP calls).

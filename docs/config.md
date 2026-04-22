@@ -113,12 +113,16 @@ Shared VoIP behavior is configured globally so the same settings can be reused b
 
 ```yaml
 voip:
-  silence_threshold: 0.02
+  silence_threshold: 0.018
   silence_seconds: 1.5
   min_speech_seconds: 0.4
   min_active_speech_ratio: 0.12
   min_consecutive_speech_frames: 8
   call_inactivity_seconds: 180
+  agc_window_seconds: 15.0
+  agc_target_rms: 0.10
+  agc_max_gain: 12.0
+  agc_smoothing: 0.15
 ```
 
 | Key | Description |
@@ -129,6 +133,10 @@ voip:
 | `voip.min_active_speech_ratio` | Minimum share of active 20 ms frames required before a chunk is sent to STT |
 | `voip.min_consecutive_speech_frames` | Minimum sustained run of active 20 ms frames required before a chunk is sent to STT |
 | `voip.call_inactivity_seconds` | Hang up the VoIP call when no speech chunk has been sent to STT for this many seconds |
+| `voip.agc_window_seconds` | How long PawLia keeps automatic gain control active after recent speech / call activity |
+| `voip.agc_target_rms` | Target loudness AGC tries to normalize incoming audio toward for VAD decisions |
+| `voip.agc_max_gain` | Upper amplification cap AGC may apply to quiet incoming audio |
+| `voip.agc_smoothing` | How quickly AGC adapts toward the target loudness (`1.0` = very fast) |
 
   webhook:
     port: 8080

@@ -11,12 +11,16 @@ Config (in config.yaml under "interfaces.matrix"):
             #   - stun:stun.l.google.com:19302
 
         voip:
-            # silence_threshold: 0.02
+            # silence_threshold: 0.018
             # silence_seconds: 1.5
             # min_speech_seconds: 0.4
             # min_active_speech_ratio: 0.12
             # min_consecutive_speech_frames: 8
             # call_inactivity_seconds: 180
+            # agc_window_seconds: 15.0
+            # agc_target_rms: 0.10
+            # agc_max_gain: 12.0
+            # agc_smoothing: 0.15
 """
 
 import asyncio

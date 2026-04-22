@@ -110,6 +110,11 @@ interfaces:
 
 voip:
   call_inactivity_seconds: 180
+  silence_threshold: 0.018
+  agc_window_seconds: 15.0
+  agc_target_rms: 0.10
+  agc_max_gain: 12.0
+  agc_smoothing: 0.15
 
 tts:
   provider: piper
