@@ -130,6 +130,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
     from pawlia.interfaces.common import (
         AgentCache, preview_text, build_status, format_status,
         handle_model_command, format_private_toggle, format_bg_enqueue,
+        handle_reload_command,
     )
 
     agent_cache = AgentCache(app)
@@ -196,7 +197,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
         if not message and not images:
             return web.json_response({"error": "empty message"}, status=400)
 
-        # ── Commands (/status, /model, /private, /thread) ──
+        # ── Commands (/status, /model, /private, /reload, /thread) ──
         lower = message.lower().strip()
 
         if lower == "/status":
@@ -212,6 +213,12 @@ async def start_web(app: "App", cfg: Dict) -> None:
             if result.action == "show":
                 return web.json_response({"response": f"**Model ({result.ctx_label}):** `{result.model}`"})
             return web.json_response({"response": f"Model auf `{result.model}` gesetzt ({result.ctx_label})."})
+
+        if lower == "/reload":
+            result = handle_reload_command(app)
+            agent_cache.invalidate_all()
+            logger.info("Web: app config reloaded")
+            return web.json_response({"response": result.message})
 
         if lower == "/private":
             session = app.memory.load_session(user_id)

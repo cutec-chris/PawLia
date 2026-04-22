@@ -105,6 +105,31 @@ When sent inside a thread, the output reflects the thread's context (exchanges, 
 
 ---
 
+## `/reload` — Reload config-driven runtime state
+
+Reloads the active configuration from disk and rebuilds the app's runtime state without stopping the process.
+
+```
+/reload          # Telegram, CLI & Web
+//reload         # Matrix
+```
+
+Reload currently refreshes:
+
+- config values from `config.yaml`
+- model/provider definitions and the LLM factory
+- bundled skill discovery
+- scheduler config
+
+Still requires a full process restart:
+
+- interface listener settings such as ports, bot tokens, Matrix login/session details
+- `session_dir` changes
+
+Use this after editing providers, models, workflow settings, or bundled skills when you want PawLia to pick them up immediately.
+
+---
+
 ## `/background` — Run a message in the background
 
 Queues a message for deferred processing. The agent processes it when the system is idle (all users inactive for 20+ minutes and no active chat requests).

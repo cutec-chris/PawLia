@@ -39,6 +39,10 @@ class AgentCache:
         for k in [k for k in self._agents if k == user_id or k.startswith(prefix)]:
             self._agents.pop(k, None)
 
+    def invalidate_all(self) -> None:
+        """Drop every cached agent after a global app reload."""
+        self._agents.clear()
+
 
 class ModelCommandResult:
     """Result of a /model command, ready for platform-specific formatting."""
@@ -58,6 +62,16 @@ class ModelCommandResult:
         self.ctx_label = ctx_label      # "Main", "Thread …", "Room", etc.
         self.available = available or []  # available model keys from config.models
         self.invalidate_agent = invalidate_agent
+
+
+class ReloadCommandResult:
+    """Result of a /reload command."""
+
+    __slots__ = ("message", "warnings")
+
+    def __init__(self, message: str, warnings: Optional[List[str]] = None):
+        self.message = message
+        self.warnings = warnings or []
 
 
 _CLEAR_TOKENS = {"off", "none", "-", "default", "clear"}
@@ -115,6 +129,28 @@ def handle_model_command(
         "set", new_model, ctx_label,
         available=available, invalidate_agent=not thread_id,
     )
+
+
+def handle_reload_command(app: "App") -> ReloadCommandResult:
+    """Reload config-driven app state and return a human-readable summary."""
+    details = app.reload()
+    config_label = details.get("config_path") or "auto-discovered config"
+    skill_count = len(details.get("bundled_skills") or [])
+    model_count = details.get("model_count", 0)
+    warnings = list(details.get("warnings") or [])
+
+    lines = [
+        "✓ Konfiguration neu geladen.",
+        f"**Config:** `{config_label}`",
+        f"**Modelle:** {model_count}",
+        f"**Bundled Skills:** {skill_count}",
+    ]
+    if warnings:
+        lines.extend(f"_Hinweis: {warning}._" for warning in warnings)
+        lines.append("_Für Ports, Tokens oder andere Interface-Listener-Einstellungen bitte den Prozess neu starten._")
+    else:
+        lines.append("_Falls du Ports, Tokens oder session_dir geändert hast, ist weiterhin ein Prozess-Neustart nötig._")
+    return ReloadCommandResult("\n".join(lines), warnings=warnings)
 
 
 def build_status(

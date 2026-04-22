@@ -305,7 +305,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
         list_available_models, preview_text, format_private_toggle,
-        format_bg_enqueue, bytes_to_data_uri,
+        format_bg_enqueue, bytes_to_data_uri, handle_reload_command,
     )
 
     # One agent per Matrix room (shared context for everyone in the room)
@@ -446,6 +446,16 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             session = app.memory.load_session(session_id)
             active = app.memory.toggle_private_thread(session, thread_id)
             await _send_text(room.room_id, format_private_toggle(active))
+            return
+
+        if _cmd(text, "reload") is not None:
+            result = handle_reload_command(app)
+            agent_cache.invalidate_all()
+            logger.info("Matrix: app config reloaded")
+            if thread_id:
+                await _send_thread_reply(room.room_id, thread_id, result.message)
+            else:
+                await _send_text(room.room_id, result.message)
             return
 
         model_args = _cmd(text, "model")

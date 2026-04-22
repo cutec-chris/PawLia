@@ -37,6 +37,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         AgentCache, build_status, format_status, md_to_tg_html,
         handle_model_command, list_available_models, preview_text,
         format_private_toggle, format_bg_enqueue, bytes_to_data_uri,
+        handle_reload_command,
     )
 
     # One agent per user; thread context is passed at run() time
@@ -237,6 +238,17 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                 parse_mode=ParseMode.HTML,
             )
 
+    async def on_reload_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/reload — reload config-driven state and rebuild cached agents."""
+        if not update.message:
+            return
+        result = handle_reload_command(app)
+        agent_cache.invalidate_all()
+        logger.info("Telegram: app config reloaded")
+        await update.message.reply_text(
+            md_to_tg_html(result.message), parse_mode=ParseMode.HTML,
+        )
+
     async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message or not update.message.text:
             return
@@ -334,6 +346,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("private", on_private_command))
     application.add_handler(CommandHandler("model", on_model_command))
+    application.add_handler(CommandHandler("reload", on_reload_command))
     application.add_handler(CommandHandler("thread", on_thread_command))
     application.add_handler(CommandHandler("status", on_status_command))
     application.add_handler(

@@ -40,7 +40,7 @@ async def start_cli(app: "App") -> None:
 
     from pawlia.interfaces.common import (
         build_status, format_status, md_to_text, handle_model_command,
-        format_private_toggle, format_bg_enqueue,
+        format_private_toggle, format_bg_enqueue, handle_reload_command,
     )
 
     async def _on_interim(text: str) -> None:
@@ -175,6 +175,12 @@ async def start_cli(app: "App") -> None:
                 if result.invalidate_agent:
                     agent = app.make_agent("cli_user", on_interim=_on_interim)
                 print(f"✓ Modell auf '{result.model}' gesetzt.\n")
+            continue
+
+        if user_input.strip().lower() == "/reload":
+            result = handle_reload_command(app)
+            agent = app.make_agent("cli_user", on_interim=_on_interim)
+            print(f"{md_to_text(result.message)}\n")
             continue
 
         active_fut = asyncio.current_task()

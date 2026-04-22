@@ -8,7 +8,7 @@ All interfaces share the same agent, memory, and skills. In server mode they all
 python -m pawlia
 ```
 
-Interactive terminal session. One session per run, identified as `cli_user`. Supports the full command set (`/thread`, `/model`, `/private`) and receives proactive notifications from the scheduler inline.
+Interactive terminal session. One session per run, identified as `cli_user`. Supports the full command set (`/thread`, `/model`, `/private`, `/reload`) and receives proactive notifications from the scheduler inline.
 
 Interrupt a running response with `Ctrl+C` — the current generation is cancelled and the prompt returns immediately.
 
@@ -43,6 +43,7 @@ See [commands.md](commands.md) for the full reference. Quick overview:
 | `/thread <msg>` | Run message in a new isolated thread context, reply in-thread |
 | `/model [name]` | Show or switch the active model for this context |
 | `/private` | Toggle private mode (threads only) |
+| `/reload` | Reload config, models, bundled skills, and scheduler settings |
 | `/background <msg>` | Queue a message for deferred background processing |
 
 ### Skill status messages
@@ -94,6 +95,7 @@ Commands use `//` as prefix instead of `/`:
 | `//thread <msg>` | Respond as a Matrix thread reply (proper `m.thread` relation) |
 | `//model [name]` | Show or switch the active model |
 | `//private` | Toggle private mode (thread replies only) |
+| `//reload` | Reload config, models, bundled skills, and scheduler settings |
 | `//background <msg>` | Queue a message for deferred background processing |
 
 ### VoIP (optional)
@@ -162,6 +164,7 @@ Commands use `/` as prefix (same as CLI/Telegram):
 | `/status` | Show session status |
 | `/model [name]` | Show or switch the active model |
 | `/private` | Toggle private mode |
+| `/reload` | Reload config, models, bundled skills, and scheduler settings |
 | `/thread <msg>` | Start a new isolated thread context |
 | `/background <msg>` | Queue a message for deferred background processing |
 

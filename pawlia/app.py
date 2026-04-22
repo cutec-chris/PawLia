@@ -7,7 +7,7 @@ Provides a factory for creating ChatAgents per user session.
 import logging
 import os
 import threading
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pawlia.config import load_config
 from pawlia.llm import LLMFactory
@@ -37,21 +37,29 @@ class App:
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.session_dir = config.get("session_dir", os.path.join(pkg_dir, "session"))
         self.memory = MemoryManager(self.session_dir, logger=self.logger.getChild("memory"))
+        self._pkg_dir = pkg_dir
+        self._skills_lock = threading.Lock()
+        self._initialize_runtime()
 
+        # Scheduler for proactive reminders / event notifications
+        self.scheduler = Scheduler(self.session_dir, config=self.config)
+        self.scheduler.set_app(self)
+
+    def _initialize_runtime(self) -> None:
+        """Initialize config-driven runtime components."""
         # LLM factory — instances are created lazily and cached
-        self.llm = LLMFactory(config)
+        self.llm = LLMFactory(self.config)
 
         # Tools
         self.tools = ToolRegistry()
         self.tools.register(BashTool())
 
         # Skills — bundled (shared across all users, read-only)
-        skills_dir = os.path.join(pkg_dir, "skills")
-        require_workflow = config.get("workflow", {}).get("require_compiled", False)
-        self._bundled_skills: Dict[str, AgentSkill] = SkillLoader.discover(
-            skills_dir, config, require_workflow=require_workflow,
+        skills_dir = os.path.join(self._pkg_dir, "skills")
+        require_workflow = self.config.get("workflow", {}).get("require_compiled", False)
+        self._bundled_skills = SkillLoader.discover(
+            skills_dir, self.config, require_workflow=require_workflow,
         )
-        self._skills_lock = threading.Lock()
 
         if self._bundled_skills:
             self.logger.info("Loaded bundled skills: %s", ", ".join(self._bundled_skills.keys()))
@@ -61,9 +69,41 @@ class App:
         # Backwards-compatible accessor (used by test scripts)
         self.skills = self._bundled_skills
 
-        # Scheduler for proactive reminders / event notifications
-        self.scheduler = Scheduler(self.session_dir, config=self.config)
+    def reload(self) -> Dict[str, Any]:
+        """Reload config-driven app state without restarting the process.
+
+        Refreshes config, LLM factory, tools, bundled skills, and scheduler
+        settings. Long-lived interface listener settings such as ports, tokens,
+        and session_dir still require a full process restart.
+        """
+        new_config = load_config(self.config_path)
+        old_session_dir = self.session_dir
+        self.config = new_config
+        warnings: List[str] = []
+
+        new_session_dir = new_config.get("session_dir", old_session_dir)
+        if new_session_dir != old_session_dir:
+            warnings.append(
+                "session_dir changed in config but stays unchanged until process restart"
+            )
+
+        self._initialize_runtime()
+        self.scheduler.reload_config(self.config)
         self.scheduler.set_app(self)
+
+        self.logger.info(
+            "Reloaded config from %s (%d bundled skills, %d model definitions)",
+            self.config_path or "(auto-discovered)",
+            len(self._bundled_skills),
+            len(self.config.get("models") or {}),
+        )
+
+        return {
+            "config_path": self.config_path,
+            "warnings": warnings,
+            "bundled_skills": sorted(self._bundled_skills.keys()),
+            "model_count": len(self.config.get("models") or {}),
+        }
 
     def _discover_user_workspace_skills(self, user_id: str) -> Dict[str, AgentSkill]:
         """Discover workspace skills for a single user.

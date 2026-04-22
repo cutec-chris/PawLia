@@ -226,6 +226,7 @@ class Scheduler:
         self._git_push = git_cfg.get("push", False)
         self._git_daily_done: Dict[str, str] = {}   # user_id → date of last daily squash
         self._git_weekly_done: Dict[str, str] = {}   # user_id → week of last weekly squash
+        self._apply_git_config()
 
     @property
     def memory_indexer(self):
@@ -238,6 +239,24 @@ class Scheduler:
 
     def set_app(self, app: Any) -> None:
         self._app = app
+
+    def reload_config(self, config: Optional[Dict] = None) -> None:
+        """Refresh scheduler config without dropping callbacks or the running task."""
+        self._config = config or {}
+        self._checklist = None
+        self._jobs = None
+        self._task_reminders = None
+        self._memory_indexer = None
+        self._apply_git_config()
+
+    def _apply_git_config(self) -> None:
+        """Load git-related settings from the current config."""
+        git_cfg = self._config.get("workspace", {}).get("git", {})
+        self._git_enabled = git_cfg.get("enabled", False)
+        self._git_daily_squash_time = git_cfg.get("daily_squash_time", "23:00")
+        self._git_weekly_squash_day = int(git_cfg.get("weekly_squash_day", 6))  # 0=Mon, 6=Sun
+        self._git_weekly_squash_time = git_cfg.get("weekly_squash_time", "23:30")
+        self._git_push = git_cfg.get("push", False)
 
     def register(self, callback: NotifyCallback) -> None:
         self._callbacks.append(callback)
