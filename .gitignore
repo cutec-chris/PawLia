@@ -1,5 +1,6 @@
 config.yaml
 config.yml
+.env
 *.pyc
 session/*
 pytest.ini
@@ -13,3 +14,4 @@ log/*
 .venv/*
 logs.sh
 .codex
+containers/thalia/*.log
