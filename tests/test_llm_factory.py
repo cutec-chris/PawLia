@@ -106,3 +106,74 @@ def test_agent_model_list_raises_last_error_if_all_fail(monkeypatch: pytest.Monk
 
     with pytest.raises(RuntimeError, match="boom-m2"):
         llm.invoke([])
+
+
+def test_agent_model_blacklists_after_three_failed_requests(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["agents"]["chat"] = "m1,m2"
+
+    built: Dict[str, _DummyLLM] = {}
+    now = 1000.0
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        model_name = str(model_cfg["model"])
+        llm = _DummyLLM(model_name=model_name, fail=(model_name == "m1"))
+        built[model_name] = llm
+        return llm
+
+    monkeypatch.setattr("pawlia.llm.time.monotonic", lambda: now)
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat")
+
+    for _ in range(4):
+        assert llm.invoke([]) == "ok-m2"
+
+    assert built["m1"].calls == 3
+    assert built["m2"].calls == 4
+
+
+def test_agent_model_blacklist_expires_after_cooldown(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["agents"]["chat"] = "m1,m2"
+
+    built: Dict[str, _DummyLLM] = {}
+    clock = {"now": 1000.0}
+
+    class _FlakyLLM(_DummyLLM):
+        def __init__(self, model_name: str):
+            super().__init__(model_name=model_name, fail=False)
+            self.remaining_failures = 3
+
+        def invoke(self, messages: List[Any], **kwargs: Any) -> str:
+            self.calls += 1
+            if self.remaining_failures > 0:
+                self.remaining_failures -= 1
+                raise RuntimeError(f"boom-{self.model_name}")
+            return f"ok-{self.model_name}"
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        model_name = str(model_cfg["model"])
+        if model_name == "m1":
+            llm = _FlakyLLM(model_name=model_name)
+        else:
+            llm = _DummyLLM(model_name=model_name)
+        built[model_name] = llm
+        return llm
+
+    monkeypatch.setattr("pawlia.llm.time.monotonic", lambda: clock["now"])
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat")
+
+    for _ in range(4):
+        assert llm.invoke([]) == "ok-m2"
+
+    assert built["m1"].calls == 3
+
+    clock["now"] += 30 * 60 + 1
+
+    assert llm.invoke([]) == "ok-m1"
+    assert built["m1"].calls == 4

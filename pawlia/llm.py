@@ -47,6 +47,7 @@ provider is used.
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from langchain_core.messages import BaseMessage, SystemMessage
@@ -91,38 +92,89 @@ class _NoThinkWrapper:
 
 
 class _FallbackLLMWrapper:
-    """Wrap multiple LLMs and fail over to the next one on runtime errors."""
+    """Wrap multiple LLMs and fail over on runtime errors.
+
+    Tracks failures across requests per model. After three failed requests,
+    a model is skipped for 30 minutes before it is considered again.
+    """
+
+    _BLACKLIST_THRESHOLD = 3
+    _BLACKLIST_COOLDOWN_SECONDS = 30 * 60
 
     def __init__(self, llms: List[Any], labels: List[str]):
         if not llms:
             raise ValueError("Fallback wrapper requires at least one LLM")
         self._llms = llms
         self._labels = labels
+        self._now = time.monotonic
+        self._failures = [0 for _ in llms]
+        self._blacklisted_until = [0.0 for _ in llms]
+        self._last_errors: List[Optional[Exception]] = [None for _ in llms]
 
-    def _is_retryable_error(self, exc: Exception) -> bool:
-        """Check if the error should be retried instead of falling back."""
-        error_str = str(exc)
-        return "400" in error_str or "tool_use_failed" in error_str
+    def _is_blacklisted(self, idx: int, now: float) -> bool:
+        return self._blacklisted_until[idx] > now
+
+    def _note_success(self, idx: int) -> None:
+        self._failures[idx] = 0
+        self._blacklisted_until[idx] = 0.0
+        self._last_errors[idx] = None
+
+    def _note_failure(self, idx: int, exc: Exception) -> None:
+        now = self._now()
+        self._last_errors[idx] = exc
+        self._failures[idx] += 1
+        if self._failures[idx] >= self._BLACKLIST_THRESHOLD:
+            self._blacklisted_until[idx] = now + self._BLACKLIST_COOLDOWN_SECONDS
+            self._failures[idx] = 0
+            logger.warning(
+                "LLM blacklist: model '%s' failed %d times across requests, skipping it for %d minutes",
+                self._labels[idx],
+                self._BLACKLIST_THRESHOLD,
+                self._BLACKLIST_COOLDOWN_SECONDS // 60,
+            )
+
+    def _raise_if_all_blacklisted(self) -> None:
+        now = self._now()
+        active = [
+            idx for idx in range(len(self._llms))
+            if not self._is_blacklisted(idx, now)
+        ]
+        if active:
+            return
+
+        earliest_idx = min(
+            range(len(self._llms)),
+            key=lambda idx: self._blacklisted_until[idx],
+        )
+        remaining = max(0, int(self._blacklisted_until[earliest_idx] - now))
+        last_exc = self._last_errors[earliest_idx]
+        msg = (
+            "All fallback models are temporarily blacklisted; "
+            f"next retry for '{self._labels[earliest_idx]}' in about {remaining}s"
+        )
+        if last_exc is not None:
+            raise RuntimeError(msg) from last_exc
+        raise RuntimeError(msg)
 
     def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
-            retries = 0
-            while retries <= 3:  # max 3 retries
-                try:
-                    return llm.invoke(messages, **kwargs)
-                except Exception as exc:
-                    last_exc = exc
-                    if self._is_retryable_error(exc) and retries < 3:
-                        logger.warning(
-                            "LLM retry: model '%s' failed with retryable error (%s), retrying (%d/3)",
-                            self._labels[idx],
-                            exc,
-                            retries + 1,
-                        )
-                        retries += 1
-                        continue
-                    break
+            now = self._now()
+            if self._is_blacklisted(idx, now):
+                logger.info(
+                    "LLM skip: model '%s' is temporarily blacklisted for %ds more",
+                    self._labels[idx],
+                    int(self._blacklisted_until[idx] - now),
+                )
+                continue
+            try:
+                result = llm.invoke(messages, **kwargs)
+                self._note_success(idx)
+                return result
+            except Exception as exc:
+                last_exc = exc
+                self._note_failure(idx, exc)
             if idx < len(self._llms) - 1:
                 logger.warning(
                     "LLM fallback: model '%s' failed (%s), trying '%s'",
@@ -135,23 +187,23 @@ class _FallbackLLMWrapper:
 
     async def ainvoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
-            retries = 0
-            while retries <= 3:  # max 3 retries
-                try:
-                    return await llm.ainvoke(messages, **kwargs)
-                except Exception as exc:
-                    last_exc = exc
-                    if self._is_retryable_error(exc) and retries < 3:
-                        logger.warning(
-                            "LLM retry: model '%s' failed with retryable error (%s), retrying (%d/3)",
-                            self._labels[idx],
-                            exc,
-                            retries + 1,
-                        )
-                        retries += 1
-                        continue
-                    break
+            now = self._now()
+            if self._is_blacklisted(idx, now):
+                logger.info(
+                    "LLM skip: model '%s' is temporarily blacklisted for %ds more",
+                    self._labels[idx],
+                    int(self._blacklisted_until[idx] - now),
+                )
+                continue
+            try:
+                result = await llm.ainvoke(messages, **kwargs)
+                self._note_success(idx)
+                return result
+            except Exception as exc:
+                last_exc = exc
+                self._note_failure(idx, exc)
             if idx < len(self._llms) - 1:
                 logger.warning(
                     "LLM fallback: model '%s' failed (%s), trying '%s'",
@@ -170,14 +222,25 @@ class _FallbackLLMWrapper:
 
     async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
+            now = self._now()
+            if self._is_blacklisted(idx, now):
+                logger.info(
+                    "LLM skip(stream): model '%s' is temporarily blacklisted for %ds more",
+                    self._labels[idx],
+                    int(self._blacklisted_until[idx] - now),
+                )
+                continue
             yielded_any = False
             try:
                 async for chunk in llm.astream(messages, **kwargs):
                     yielded_any = True
                     yield chunk
+                self._note_success(idx)
                 return
             except Exception as exc:
+                self._note_failure(idx, exc)
                 if yielded_any:
                     raise
                 last_exc = exc
