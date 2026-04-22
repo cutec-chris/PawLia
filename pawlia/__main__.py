@@ -44,7 +44,8 @@ def _configure_logging(debug: bool) -> None:
     root.addHandler(handler)
 
     for lib in ("langchain", "langchain_core", "langchain_openai",
-                "httpcore", "httpx", "openai", "nio"):
+                "httpcore", "httpx", "openai", "nio",
+                "peewee", "nio.store", "sqlite3"):
         logging.getLogger(lib).setLevel(logging.WARNING)
     # nio logs WARNINGs for schema validation of Matrix events (e.g. empty ICE
     # end-of-candidates, missing user_id in presence); suppress all sub-loggers
