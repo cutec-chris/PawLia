@@ -56,6 +56,8 @@ _DEFAULT_PREPROCESS: Dict[str, float] = {
     "lowpass_hz": 7000.0,
     "denoise_strength": 1.25,
     "denoise_floor": 0.2,
+    "adaptive_gate_percentile": 0.2,
+    "adaptive_gate_multiplier": 2.2,
     "gate_threshold": 0.015,
     "gate_ratio": 0.2,
 }
@@ -176,6 +178,55 @@ def _noise_gate_pcm(
     return (pcm * gate.astype(np.float32)).astype(np.float32)
 
 
+def _adaptive_gate_pcm(
+    pcm: "np.ndarray",
+    sample_rate: int,
+    base_threshold: float = 0.015,
+    attenuation_ratio: float = 0.2,
+    noise_percentile: float = 0.2,
+    noise_multiplier: float = 2.2,
+) -> "np.ndarray":
+    """Apply a frame-wise soft gate based on the measured noise floor."""
+    import numpy as np
+
+    if len(pcm) < max(sample_rate // 20, 64):
+        return _noise_gate_pcm(pcm, threshold=base_threshold, attenuation_ratio=attenuation_ratio)
+
+    frame_size = max(sample_rate // 50, 64)  # ~20 ms
+    hop_size = max(frame_size // 2, 1)
+    window = np.hanning(frame_size).astype(np.float32)
+    padded_len = frame_size + hop_size * int(np.ceil(max(len(pcm) - frame_size, 0) / hop_size))
+    padded = np.pad(pcm.astype(np.float32), (0, max(0, padded_len - len(pcm))))
+
+    frame_rms = []
+    for start in range(0, len(padded) - frame_size + 1, hop_size):
+        frame = padded[start : start + frame_size] * window
+        frame_rms.append(float(np.sqrt(np.mean(frame ** 2))))
+
+    if not frame_rms:
+        return pcm.astype(np.float32, copy=False)
+
+    noise_floor = float(np.quantile(np.asarray(frame_rms, dtype=np.float32), min(max(noise_percentile, 0.0), 1.0)))
+    threshold = max(base_threshold, noise_floor * max(noise_multiplier, 1.0))
+
+    gains = []
+    for rms in frame_rms:
+        if rms >= threshold:
+            gains.append(1.0)
+            continue
+        rel = rms / max(threshold, 1e-6)
+        gains.append(attenuation_ratio + (1.0 - attenuation_ratio) * np.sqrt(rel))
+
+    gain_envelope = np.zeros(len(padded), dtype=np.float32)
+    norm = np.zeros(len(padded), dtype=np.float32)
+    for idx, start in enumerate(range(0, len(padded) - frame_size + 1, hop_size)):
+        gain_envelope[start : start + frame_size] += gains[idx]
+        norm[start : start + frame_size] += 1.0
+
+    gain_envelope = gain_envelope / np.maximum(norm, 1e-6)
+    return (padded[: len(pcm)] * gain_envelope[: len(pcm)]).astype(np.float32)
+
+
 def _preprocess_pcm_for_stt(
     pcm: "np.ndarray",
     sample_rate: int,
@@ -208,6 +259,14 @@ def _preprocess_pcm_for_stt(
         sample_rate,
         strength=preprocess_cfg["denoise_strength"],
         floor_ratio=preprocess_cfg["denoise_floor"],
+    )
+    pcm = _adaptive_gate_pcm(
+        pcm,
+        sample_rate,
+        base_threshold=preprocess_cfg["gate_threshold"],
+        attenuation_ratio=preprocess_cfg["gate_ratio"],
+        noise_percentile=preprocess_cfg["adaptive_gate_percentile"],
+        noise_multiplier=preprocess_cfg["adaptive_gate_multiplier"],
     )
     pcm = _noise_gate_pcm(
         pcm,

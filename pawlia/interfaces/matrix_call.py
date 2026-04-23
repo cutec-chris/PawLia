@@ -47,6 +47,13 @@ except Exception as _e:
     _logging.getLogger("pawlia.interfaces.matrix_call").warning("aiortc import failed: %s", _e)
     _AIORTC_AVAILABLE = False
 
+try:
+    import webrtcvad  # type: ignore
+    _WEBRTCVAD_IMPORT_ERROR = None
+except Exception as _e:
+    webrtcvad = None  # type: ignore[assignment]
+    _WEBRTCVAD_IMPORT_ERROR = _e
+
 if TYPE_CHECKING:
     from nio import AsyncClient, MatrixRoom
     from pawlia.app import App
@@ -57,6 +64,17 @@ _INTERRUPT_KEYWORD_RE = re.compile(
     r"\b(?:halt|stop|stopp|wait|warte|warten|moment|sekunde|pause)\b",
     re.IGNORECASE,
 )
+
+
+def _build_webrtc_vad(mode: int):
+    """Create a WebRTC VAD instance when the optional dependency is available."""
+    if webrtcvad is None:
+        return None
+    try:
+        return webrtcvad.Vad(mode)
+    except Exception as e:
+        logger.warning("matrix-call: could not initialize webrtcvad(mode=%s): %s", mode, e)
+        return None
 
 # ---------------------------------------------------------------------------
 # Outgoing audio track (TTS playback)
@@ -262,6 +280,14 @@ class CallSession:
     # Chunk-level guard: require enough active speech frames before STT
     MIN_ACTIVE_SPEECH_RATIO = 0.12
     MIN_CONSECUTIVE_SPEECH_FRAMES = 8
+    MIN_SPEECH_BAND_RATIO = 0.35
+    MAX_SPECTRAL_FLATNESS = 0.72
+    MIN_SPEECH_LIKE_RATIO = 0.08
+    MIN_CONSECUTIVE_SPEECHLIKE_FRAMES = 4
+    WEBRTC_VAD_ENABLED = True
+    WEBRTC_VAD_MODE = 2
+    WEBRTC_VAD_MIN_VOICED_RATIO = 0.12
+    WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES = 4
     # End calls when no speech chunk has been sent to STT for too long.
     CALL_INACTIVITY_SECONDS = 180
     WATCHDOG_POLL_SECONDS = 5.0
@@ -311,6 +337,7 @@ class CallSession:
         self._agc_gain: float = 1.0    # current smoothed gain factor
         self._active_response_task: Optional[asyncio.Task] = None
         self._load_voip_audio_config()
+        self._webrtc_vad = self._init_webrtc_vad()
 
     def _mark_activity(self) -> None:
         """Record user or bot activity to keep the call alive."""
@@ -397,6 +424,58 @@ class CallSession:
             self.MIN_CONSECUTIVE_SPEECH_FRAMES,
             minimum=1,
         )
+        self.MIN_SPEECH_BAND_RATIO = self._get_float_config(
+            voip_cfg,
+            "min_speech_band_ratio",
+            self.MIN_SPEECH_BAND_RATIO,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.MAX_SPECTRAL_FLATNESS = self._get_float_config(
+            voip_cfg,
+            "max_spectral_flatness",
+            self.MAX_SPECTRAL_FLATNESS,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.MIN_SPEECH_LIKE_RATIO = self._get_float_config(
+            voip_cfg,
+            "min_speech_like_ratio",
+            self.MIN_SPEECH_LIKE_RATIO,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES = self._get_int_config(
+            voip_cfg,
+            "min_consecutive_speechlike_frames",
+            self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES,
+            minimum=1,
+        )
+        self.WEBRTC_VAD_ENABLED = self._get_bool_config(
+            voip_cfg,
+            "webrtcvad_enabled",
+            self.WEBRTC_VAD_ENABLED,
+        )
+        self.WEBRTC_VAD_MODE = self._get_int_config(
+            voip_cfg,
+            "webrtcvad_mode",
+            self.WEBRTC_VAD_MODE,
+            minimum=0,
+            maximum=3,
+        )
+        self.WEBRTC_VAD_MIN_VOICED_RATIO = self._get_float_config(
+            voip_cfg,
+            "webrtcvad_min_voiced_ratio",
+            self.WEBRTC_VAD_MIN_VOICED_RATIO,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES = self._get_int_config(
+            voip_cfg,
+            "webrtcvad_min_consecutive_frames",
+            self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES,
+            minimum=1,
+        )
         self.CALL_INACTIVITY_SECONDS = self._get_int_config(
             voip_cfg,
             "call_inactivity_seconds",
@@ -434,6 +513,19 @@ class CallSession:
             self.BARGEIN_RMS_THRESHOLD,
             minimum=0.0,
         )
+
+    def _init_webrtc_vad(self):
+        """Initialize the optional WebRTC VAD instance from config."""
+        if not self.WEBRTC_VAD_ENABLED:
+            return None
+        vad = _build_webrtc_vad(self.WEBRTC_VAD_MODE)
+        if vad is None and _WEBRTCVAD_IMPORT_ERROR is not None:
+            logger.info(
+                "call %s: webrtcvad unavailable, continuing without it: %s",
+                self.call_id[:8],
+                _WEBRTCVAD_IMPORT_ERROR,
+            )
+        return vad
 
     def _get_float_config(
         self,
@@ -478,12 +570,37 @@ class CallSession:
             return default
         return value
 
+    def _get_bool_config(
+        self,
+        cfg: Dict[str, Any],
+        key: str,
+        default: bool,
+    ) -> bool:
+        value = cfg.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        logger.warning(
+            "call %s: invalid boolean voip.%s=%r — using default %r",
+            self.call_id[:8],
+            key,
+            value,
+            default,
+        )
+        return default
+
     def _get_int_config(
         self,
         cfg: Dict[str, Any],
         key: str,
         default: int,
         minimum: Optional[int] = None,
+        maximum: Optional[int] = None,
     ) -> int:
         value = cfg.get(key, default)
         try:
@@ -505,6 +622,16 @@ class CallSession:
                 key,
                 value,
                 minimum,
+                default,
+            )
+            return default
+        if maximum is not None and value > maximum:
+            logger.warning(
+                "call %s: voip.%s=%s above maximum %s, using default %s",
+                self.call_id[:8],
+                key,
+                value,
+                maximum,
                 default,
             )
             return default
@@ -758,6 +885,14 @@ class CallSession:
                 "active_frames": 0.0,
                 "active_ratio": 0.0,
                 "longest_run": 0.0,
+                "voiced_frames": 0.0,
+                "voiced_ratio": 0.0,
+                "voiced_run": 0.0,
+                "speech_like_frames": 0.0,
+                "speech_like_ratio": 0.0,
+                "speech_like_run": 0.0,
+                "median_band_ratio": 0.0,
+                "median_flatness": 1.0,
                 "p90_rms": 0.0,
             }
 
@@ -774,11 +909,52 @@ class CallSession:
             current_run = current_run + 1 if is_active else 0
             longest_run = max(longest_run, current_run)
 
+        voiced_mask = np.zeros(len(frame_rms), dtype=bool)
+        if self._webrtc_vad is not None:
+            for idx, frame in enumerate(framed):
+                frame_int16 = (np.clip(frame, -1.0, 1.0) * 32767.0).astype(np.int16)
+                try:
+                    voiced_mask[idx] = bool(self._webrtc_vad.is_speech(frame_int16.tobytes(), sample_rate))
+                except Exception as e:
+                    logger.debug("call %s: webrtcvad frame analysis failed: %s", self.call_id[:8], e)
+                    voiced_mask = np.zeros(len(frame_rms), dtype=bool)
+                    break
+
+        voiced_run = 0
+        current_voiced_run = 0
+        for is_voiced in voiced_mask:
+            current_voiced_run = current_voiced_run + 1 if is_voiced else 0
+            voiced_run = max(voiced_run, current_voiced_run)
+
+        window = np.hanning(frame_size).astype(np.float32)
+        spectra = np.fft.rfft(framed * window[None, :], axis=1)
+        power = np.abs(spectra) ** 2
+        freqs = np.fft.rfftfreq(frame_size, d=1.0 / sample_rate)
+        speech_band = (freqs >= 180.0) & (freqs <= 4000.0)
+        total_power = np.maximum(np.sum(power, axis=1), 1e-9)
+        band_ratio = np.sum(power[:, speech_band], axis=1) / total_power
+        flatness = np.exp(np.mean(np.log(power + 1e-9), axis=1)) / np.maximum(np.mean(power + 1e-9, axis=1), 1e-9)
+        speech_like_mask = active_mask & (band_ratio >= self.MIN_SPEECH_BAND_RATIO) & (flatness <= self.MAX_SPECTRAL_FLATNESS)
+
+        speech_like_run = 0
+        current_speech_like_run = 0
+        for is_speech_like in speech_like_mask:
+            current_speech_like_run = current_speech_like_run + 1 if is_speech_like else 0
+            speech_like_run = max(speech_like_run, current_speech_like_run)
+
         return {
             "frame_count": float(len(frame_rms)),
             "active_frames": float(np.count_nonzero(active_mask)),
             "active_ratio": float(np.mean(active_mask)),
             "longest_run": float(longest_run),
+            "voiced_frames": float(np.count_nonzero(voiced_mask)),
+            "voiced_ratio": float(np.mean(voiced_mask)),
+            "voiced_run": float(voiced_run),
+            "speech_like_frames": float(np.count_nonzero(speech_like_mask)),
+            "speech_like_ratio": float(np.mean(speech_like_mask)),
+            "speech_like_run": float(speech_like_run),
+            "median_band_ratio": float(np.median(band_ratio)),
+            "median_flatness": float(np.median(flatness)),
             "p90_rms": float(np.percentile(frame_rms, 90)),
         }
 
@@ -790,9 +966,19 @@ class CallSession:
     ) -> bool:
         """Return True only when a chunk contains sustained speech-like activity."""
         stats = self._analyze_speech_chunk(pcm, sample_rate, fps)
-        return (
+        basic_match = (
             stats["active_ratio"] >= self.MIN_ACTIVE_SPEECH_RATIO
             and stats["longest_run"] >= self.MIN_CONSECUTIVE_SPEECH_FRAMES
+            and stats["speech_like_ratio"] >= self.MIN_SPEECH_LIKE_RATIO
+            and stats["speech_like_run"] >= self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
+        )
+        if not basic_match:
+            return False
+        if self._webrtc_vad is None:
+            return True
+        return (
+            stats["voiced_ratio"] >= self.WEBRTC_VAD_MIN_VOICED_RATIO
+            and stats["voiced_run"] >= self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
         )
 
     def _is_meaningful_interrupt(self, text: str) -> bool:
@@ -1039,10 +1225,12 @@ class CallSession:
                                 if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
                                     logger.info(
                                         "call %s: transcribing barge-in candidate "
-                                        "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                        "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
                                         self.call_id[:8],
                                         chunk_stats["active_ratio"],
                                         int(chunk_stats["longest_run"]),
+                                        chunk_stats["speech_like_ratio"],
+                                        chunk_stats["voiced_ratio"],
                                         chunk_stats["p90_rms"],
                                     )
                                     self._mark_activity()
@@ -1057,10 +1245,12 @@ class CallSession:
                                 else:
                                     logger.info(
                                         "call %s: barge-in candidate looked like noise "
-                                        "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                        "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
                                         self.call_id[:8],
                                         chunk_stats["active_ratio"],
                                         int(chunk_stats["longest_run"]),
+                                        chunk_stats["speech_like_ratio"],
+                                        chunk_stats["voiced_ratio"],
                                         chunk_stats["p90_rms"],
                                     )
                     continue
@@ -1087,10 +1277,12 @@ class CallSession:
                             if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
                                 logger.info(
                                     "call %s: sending chunk for transcription "
-                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                    "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
                                     self.call_id[:8],
                                     chunk_stats["active_ratio"],
                                     int(chunk_stats["longest_run"]),
+                                    chunk_stats["speech_like_ratio"],
+                                    chunk_stats["voiced_ratio"],
                                     chunk_stats["p90_rms"],
                                 )
                                 self._mark_activity()
@@ -1101,10 +1293,12 @@ class CallSession:
                             else:
                                 logger.info(
                                     "call %s: skipping chunk as background noise "
-                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                    "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
                                     self.call_id[:8],
                                     chunk_stats["active_ratio"],
                                     int(chunk_stats["longest_run"]),
+                                    chunk_stats["speech_like_ratio"],
+                                    chunk_stats["voiced_ratio"],
                                     chunk_stats["p90_rms"],
                                 )
                         else:

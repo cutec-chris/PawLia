@@ -1,6 +1,6 @@
 import numpy as np
 
-from pawlia.transcription import _noise_gate_pcm, _preprocess_pcm_for_stt
+from pawlia.transcription import _adaptive_gate_pcm, _noise_gate_pcm, _preprocess_pcm_for_stt
 
 
 def _tone(freq_hz: float, sample_rate: int, duration_s: float, amp: float) -> np.ndarray:
@@ -37,3 +37,36 @@ def test_noise_gate_attenuates_low_level_residual_noise():
 
     assert np.max(np.abs(gated)) < np.max(np.abs(pcm))
     assert np.all(np.signbit(gated) == np.signbit(pcm))
+
+
+def test_adaptive_gate_reduces_stationary_noise_more_than_speech():
+    sample_rate = 16000
+    noise = _tone(900.0, sample_rate, 1.0, 0.01)
+    speech = _tone(240.0, sample_rate, 1.0, 0.12)
+    pcm = noise + speech
+
+    gated = _adaptive_gate_pcm(
+        pcm,
+        sample_rate,
+        base_threshold=0.015,
+        attenuation_ratio=0.2,
+        noise_percentile=0.2,
+        noise_multiplier=2.2,
+    )
+
+    speech_only_gated = _adaptive_gate_pcm(
+        speech,
+        sample_rate,
+        base_threshold=0.015,
+        attenuation_ratio=0.2,
+        noise_percentile=0.2,
+        noise_multiplier=2.2,
+    )
+
+    residual_noise_before = np.sqrt(np.mean((pcm - speech) ** 2))
+    residual_noise_after = np.sqrt(np.mean((gated - speech_only_gated) ** 2))
+    speech_rms_before = np.sqrt(np.mean(speech ** 2))
+    speech_rms_after = np.sqrt(np.mean(speech_only_gated ** 2))
+
+    assert residual_noise_after < residual_noise_before * 0.8
+    assert speech_rms_after > speech_rms_before * 0.7

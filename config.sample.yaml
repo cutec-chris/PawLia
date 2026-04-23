@@ -77,6 +77,14 @@ interfaces:
 #   min_speech_seconds: 0.4           # shorter chunks are discarded early
 #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
 #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
+#   min_speech_band_ratio: 0.35       # energy share in the speech band
+#   max_spectral_flatness: 0.72       # reject very noise-like chunks
+#   min_speech_like_ratio: 0.08       # active + speech-like frame ratio required
+#   min_consecutive_speechlike_frames: 4
+#   webrtcvad_enabled: true           # extra lightweight speech detector
+#   webrtcvad_mode: 2                 # 0..3, higher = stricter
+#   webrtcvad_min_voiced_ratio: 0.12  # voiced-frame ratio required if enabled
+#   webrtcvad_min_consecutive_frames: 4
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
 #   agc_window_seconds: 15.0          # keep AGC active this long after bot/user activity
 #   agc_target_rms: 0.10              # target loudness used for VAD normalization

@@ -118,6 +118,14 @@ voip:
   min_speech_seconds: 0.4
   min_active_speech_ratio: 0.12
   min_consecutive_speech_frames: 8
+  min_speech_band_ratio: 0.35
+  max_spectral_flatness: 0.72
+  min_speech_like_ratio: 0.08
+  min_consecutive_speechlike_frames: 4
+  webrtcvad_enabled: true
+  webrtcvad_mode: 2
+  webrtcvad_min_voiced_ratio: 0.12
+  webrtcvad_min_consecutive_frames: 4
   call_inactivity_seconds: 180
   agc_window_seconds: 15.0
   agc_target_rms: 0.10
@@ -132,6 +140,14 @@ voip:
 | `voip.min_speech_seconds` | Minimum chunk duration before deeper speech/noise analysis runs |
 | `voip.min_active_speech_ratio` | Minimum share of active 20 ms frames required before a chunk is sent to STT |
 | `voip.min_consecutive_speech_frames` | Minimum sustained run of active 20 ms frames required before a chunk is sent to STT |
+| `voip.min_speech_band_ratio` | Minimum share of frame energy that must lie in the speech band (roughly 180 Hz to 4 kHz) |
+| `voip.max_spectral_flatness` | Upper limit for how noise-like active frames may be before they are rejected as non-speech |
+| `voip.min_speech_like_ratio` | Minimum share of frames that must simultaneously be active and speech-like before a chunk is sent to STT |
+| `voip.min_consecutive_speechlike_frames` | Minimum sustained run of speech-like frames required before a chunk is sent to STT |
+| `voip.webrtcvad_enabled` | Enable an additional lightweight WebRTC speech detector before sending audio to STT |
+| `voip.webrtcvad_mode` | WebRTC VAD aggressiveness from `0` (lenient) to `3` (strict) |
+| `voip.webrtcvad_min_voiced_ratio` | Minimum share of frames WebRTC VAD must classify as voiced before a chunk is sent to STT |
+| `voip.webrtcvad_min_consecutive_frames` | Minimum sustained run of WebRTC-voiced frames required before a chunk is sent to STT |
 | `voip.call_inactivity_seconds` | Hang up the VoIP call when no speech chunk has been sent to STT for this many seconds |
 | `voip.agc_window_seconds` | How long PawLia keeps automatic gain control active after recent speech / call activity |
 | `voip.agc_target_rms` | Target loudness AGC tries to normalize incoming audio toward for VAD decisions |
@@ -156,6 +172,16 @@ transcription:
     model: whisper-large-v3-turbo
     # language: de
 
+  preprocess:
+    highpass_hz: 140
+    lowpass_hz: 7000
+    denoise_strength: 1.25
+    denoise_floor: 0.2
+    adaptive_gate_percentile: 0.2
+    adaptive_gate_multiplier: 2.2
+    gate_threshold: 0.015
+    gate_ratio: 0.2
+
   # openai:
   #   api_key: YOUR_API_KEY
   #   base_url: https://api.openai.com/v1
@@ -166,6 +192,17 @@ transcription:
   #   device: cpu                       # cpu | cuda
   #   compute_type: int8
 ```
+
+| Key | Description |
+|-----|-------------|
+| `transcription.preprocess.highpass_hz` | Removes low-frequency rumble such as wind, handling noise or desk vibrations |
+| `transcription.preprocess.lowpass_hz` | Cuts very high frequencies that mostly contain hiss and sharp background noise |
+| `transcription.preprocess.denoise_strength` | Strength of spectral background-noise subtraction |
+| `transcription.preprocess.denoise_floor` | Residual floor kept during denoising to avoid metallic artifacts |
+| `transcription.preprocess.adaptive_gate_percentile` | Percentile used to estimate the chunk's noise floor for adaptive gating |
+| `transcription.preprocess.adaptive_gate_multiplier` | How far above the estimated noise floor audio must rise before it is treated as likely speech |
+| `transcription.preprocess.gate_threshold` | Minimum absolute level for the final soft gate |
+| `transcription.preprocess.gate_ratio` | How much low-level residual audio is retained below the gate threshold |
 
 ## Text-to-Speech (VoIP)
 

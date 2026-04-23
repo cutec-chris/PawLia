@@ -18,6 +18,32 @@ def _make_pcm_from_frame_levels(levels, frame_size=960):
     ])
 
 
+def _make_tonal_pcm_from_frame_levels(levels, freq_hz=220.0, sample_rate=48000, frame_size=960):
+    frames = []
+    phase = 0.0
+    phase_step = 2 * np.pi * freq_hz / sample_rate
+    for level in levels:
+        idx = np.arange(frame_size, dtype=np.float32)
+        frame = (level * np.sin(phase + idx * phase_step)).astype(np.float32)
+        phase = float((phase + frame_size * phase_step) % (2 * np.pi))
+        frames.append(frame)
+    return np.concatenate(frames)
+
+
+class _FakeVad:
+    def __init__(self, voiced_pattern):
+        self._voiced_pattern = list(voiced_pattern)
+        self._index = 0
+
+    def is_speech(self, frame_bytes, sample_rate):
+        if self._index < len(self._voiced_pattern):
+            result = self._voiced_pattern[self._index]
+        else:
+            result = False
+        self._index += 1
+        return result
+
+
 @pytest.mark.asyncio
 async def test_process_speech_uses_call_system_prompt():
     pcm = MagicMock()
@@ -168,28 +194,69 @@ def test_should_transcribe_chunk_rejects_background_noise():
     levels = [0.0] * 80
     for idx in (5, 22, 39, 57):
         levels[idx] = 0.05
-    pcm = _make_pcm_from_frame_levels(levels)
+    pcm = _make_tonal_pcm_from_frame_levels(levels)
 
     assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
 
 
 def test_should_transcribe_chunk_accepts_sustained_speech():
-    session = CallSession(
-        call_id="call-speech",
-        room_id="!room:test",
-        caller_id="@user:test",
-        thread_id="thread-speech",
-        client=SimpleNamespace(),
-        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
-        cfg={},
-        agent=MagicMock(),
-        send_cb=AsyncMock(),
-    )
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 10 + [True] * 30 + [False] * 40)):
+        session = CallSession(
+            call_id="call-speech",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-speech",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
 
-    levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
-    pcm = _make_pcm_from_frame_levels(levels)
+        levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
+        pcm = _make_tonal_pcm_from_frame_levels(levels)
 
-    assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
+        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
+
+
+def test_should_transcribe_chunk_rejects_broadband_noise():
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 100)):
+        session = CallSession(
+            call_id="call-noise-broadband",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-noise-broadband",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+
+        rng = np.random.default_rng(7)
+        pcm = rng.normal(0.0, 0.05, 48000 * 2).astype(np.float32)
+
+        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+
+
+def test_should_transcribe_chunk_rejects_when_webrtcvad_disagrees():
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 100)):
+        session = CallSession(
+            call_id="call-vad-reject",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-vad-reject",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+
+        levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
+        pcm = _make_tonal_pcm_from_frame_levels(levels)
+
+        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
 
 def test_meaningful_interrupt_accepts_keywords_and_full_sentences():
     session = CallSession(
@@ -287,33 +354,50 @@ async def test_process_speech_interrupts_for_meaningful_barge_in():
     session._cancel_active_response.assert_awaited_once()
     session._respond_to_transcript.assert_awaited_once_with("warte kurz")
 def test_call_session_loads_voip_audio_thresholds_from_config():
-    session = CallSession(
-        call_id="call-config",
-        room_id="!room:test",
-        caller_id="@user:test",
-        thread_id="thread-config",
-        client=SimpleNamespace(),
-        app=SimpleNamespace(config={
-            "voip": {
-                "silence_threshold": 0.03,
-                "silence_seconds": 2.2,
-                "min_speech_seconds": 0.7,
-                "min_active_speech_ratio": 0.25,
-                "min_consecutive_speech_frames": 11,
-                "call_inactivity_seconds": 240,
-            }
-        }),
-        cfg={},
-        agent=MagicMock(),
-        send_cb=AsyncMock(),
-    )
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([])):
+        session = CallSession(
+            call_id="call-config",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-config",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={
+                "voip": {
+                    "silence_threshold": 0.03,
+                    "silence_seconds": 2.2,
+                    "min_speech_seconds": 0.7,
+                    "min_active_speech_ratio": 0.25,
+                    "min_consecutive_speech_frames": 11,
+                    "min_speech_band_ratio": 0.42,
+                    "max_spectral_flatness": 0.61,
+                    "min_speech_like_ratio": 0.14,
+                    "min_consecutive_speechlike_frames": 6,
+                    "webrtcvad_enabled": True,
+                    "webrtcvad_mode": 3,
+                    "webrtcvad_min_voiced_ratio": 0.22,
+                    "webrtcvad_min_consecutive_frames": 5,
+                    "call_inactivity_seconds": 240,
+                }
+            }),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
 
-    assert session.SILENCE_THRESHOLD == pytest.approx(0.03)
-    assert session.SILENCE_SECONDS == pytest.approx(2.2)
-    assert session.MIN_SPEECH_SECONDS == pytest.approx(0.7)
-    assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(0.25)
-    assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == 11
-    assert session.CALL_INACTIVITY_SECONDS == 240
+        assert session.SILENCE_THRESHOLD == pytest.approx(0.03)
+        assert session.SILENCE_SECONDS == pytest.approx(2.2)
+        assert session.MIN_SPEECH_SECONDS == pytest.approx(0.7)
+        assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(0.25)
+        assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == 11
+        assert session.MIN_SPEECH_BAND_RATIO == pytest.approx(0.42)
+        assert session.MAX_SPECTRAL_FLATNESS == pytest.approx(0.61)
+        assert session.MIN_SPEECH_LIKE_RATIO == pytest.approx(0.14)
+        assert session.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == 6
+        assert session.WEBRTC_VAD_ENABLED is True
+        assert session.WEBRTC_VAD_MODE == 3
+        assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(0.22)
+        assert session.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == 5
+        assert session.CALL_INACTIVITY_SECONDS == 240
 
 
 def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
@@ -330,6 +414,14 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
                 "min_speech_seconds": 0,
                 "min_active_speech_ratio": 1.5,
                 "min_consecutive_speech_frames": 0,
+                "min_speech_band_ratio": 1.3,
+                "max_spectral_flatness": -0.1,
+                "min_speech_like_ratio": -1,
+                "min_consecutive_speechlike_frames": 0,
+                "webrtcvad_enabled": "maybe",
+                "webrtcvad_mode": 99,
+                "webrtcvad_min_voiced_ratio": 2,
+                "webrtcvad_min_consecutive_frames": 0,
                 "call_inactivity_seconds": 0,
             }
         }),
@@ -343,6 +435,14 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
     assert session.MIN_SPEECH_SECONDS == pytest.approx(CallSession.MIN_SPEECH_SECONDS)
     assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(CallSession.MIN_ACTIVE_SPEECH_RATIO)
     assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECH_FRAMES
+    assert session.MIN_SPEECH_BAND_RATIO == pytest.approx(CallSession.MIN_SPEECH_BAND_RATIO)
+    assert session.MAX_SPECTRAL_FLATNESS == pytest.approx(CallSession.MAX_SPECTRAL_FLATNESS)
+    assert session.MIN_SPEECH_LIKE_RATIO == pytest.approx(CallSession.MIN_SPEECH_LIKE_RATIO)
+    assert session.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
+    assert session.WEBRTC_VAD_ENABLED == CallSession.WEBRTC_VAD_ENABLED
+    assert session.WEBRTC_VAD_MODE == CallSession.WEBRTC_VAD_MODE
+    assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(CallSession.WEBRTC_VAD_MIN_VOICED_RATIO)
+    assert session.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == CallSession.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
     assert session.CALL_INACTIVITY_SECONDS == CallSession.CALL_INACTIVITY_SECONDS
 
 
