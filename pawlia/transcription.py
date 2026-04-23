@@ -51,6 +51,15 @@ _NATIVE_AUDIO_PROMPT = (
     "Antworte NUR mit dem gesprochenen Text, ohne Erklärungen oder Formatierung."
 )
 
+_DEFAULT_PREPROCESS: Dict[str, float] = {
+    "highpass_hz": 140.0,
+    "lowpass_hz": 7000.0,
+    "denoise_strength": 1.25,
+    "denoise_floor": 0.2,
+    "gate_threshold": 0.015,
+    "gate_ratio": 0.2,
+}
+
 
 async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "audio/ogg") -> Optional[str]:
     """Transcribe *audio_bytes* to text.
@@ -93,6 +102,125 @@ def _bandpass_pcm(pcm: "np.ndarray", sample_rate: int, low_hz: float = 80.0, hig
     return filtered.astype(np.float32)
 
 
+def _spectral_denoise_pcm(
+    pcm: "np.ndarray",
+    sample_rate: int,
+    strength: float = 1.25,
+    floor_ratio: float = 0.2,
+) -> "np.ndarray":
+    """Reduce stationary background noise via simple spectral subtraction.
+
+    This is intentionally lightweight and dependency-free. It works well for
+    constant hiss, fan noise and parts of broadband wind noise, though it is
+    not a full speech enhancement model.
+    """
+    import numpy as np
+
+    if len(pcm) < max(512, sample_rate // 20):
+        return pcm.astype(np.float32, copy=False)
+
+    frame_size = 1024
+    hop_size = frame_size // 2
+    if len(pcm) < frame_size:
+        frame_size = 1 << max(5, int(np.floor(np.log2(len(pcm)))))
+        hop_size = max(frame_size // 2, 1)
+    window = np.hanning(frame_size).astype(np.float32)
+    padded_len = frame_size + hop_size * int(np.ceil(max(len(pcm) - frame_size, 0) / hop_size))
+    padded = np.pad(pcm.astype(np.float32), (0, max(0, padded_len - len(pcm))))
+
+    frames = []
+    energies = []
+    for start in range(0, len(padded) - frame_size + 1, hop_size):
+        frame = padded[start : start + frame_size]
+        windowed = frame * window
+        frames.append(windowed)
+        energies.append(float(np.mean(windowed ** 2)))
+
+    if not frames:
+        return pcm.astype(np.float32, copy=False)
+
+    spectra = np.fft.rfft(np.stack(frames, axis=0), axis=1)
+    magnitudes = np.abs(spectra)
+    phases = np.angle(spectra)
+
+    noise_frame_count = max(1, min(len(energies) // 5, 12))
+    quiet_idx = np.argsort(np.asarray(energies))[:noise_frame_count]
+    noise_profile = np.median(magnitudes[quiet_idx], axis=0)
+
+    cleaned_mag = magnitudes - (strength * noise_profile[None, :])
+    cleaned_mag = np.maximum(cleaned_mag, noise_profile[None, :] * floor_ratio)
+    cleaned = cleaned_mag * np.exp(1j * phases)
+    restored_frames = np.fft.irfft(cleaned, n=frame_size, axis=1).astype(np.float32)
+
+    out = np.zeros(len(padded), dtype=np.float32)
+    norm = np.zeros(len(padded), dtype=np.float32)
+    for idx, start in enumerate(range(0, len(padded) - frame_size + 1, hop_size)):
+        out[start : start + frame_size] += restored_frames[idx] * window
+        norm[start : start + frame_size] += window ** 2
+
+    norm = np.maximum(norm, 1e-6)
+    out = out / norm
+    return out[: len(pcm)].astype(np.float32)
+
+
+def _noise_gate_pcm(
+    pcm: "np.ndarray",
+    threshold: float = 0.015,
+    attenuation_ratio: float = 0.2,
+) -> "np.ndarray":
+    """Apply a soft gate to reduce residual low-level noise between syllables."""
+    import numpy as np
+
+    abs_pcm = np.abs(pcm)
+    gate = np.where(abs_pcm >= threshold, 1.0, attenuation_ratio + (1.0 - attenuation_ratio) * (abs_pcm / max(threshold, 1e-6)))
+    return (pcm * gate.astype(np.float32)).astype(np.float32)
+
+
+def _preprocess_pcm_for_stt(
+    pcm: "np.ndarray",
+    sample_rate: int,
+    config: Optional[Dict[str, Any]] = None,
+) -> "np.ndarray":
+    """Preprocess PCM for more robust speech transcription in noisy environments."""
+    import numpy as np
+
+    preprocess_cfg = dict(_DEFAULT_PREPROCESS)
+    if isinstance(config, dict):
+        transcription_cfg = config.get("transcription", {})
+        if isinstance(transcription_cfg, dict):
+            user_cfg = transcription_cfg.get("preprocess", {})
+            if isinstance(user_cfg, dict):
+                for key, default in _DEFAULT_PREPROCESS.items():
+                    value = user_cfg.get(key, default)
+                    try:
+                        preprocess_cfg[key] = float(value)
+                    except (TypeError, ValueError):
+                        logger.warning("transcription: ignoring invalid preprocess.%s=%r", key, value)
+
+    pcm = _bandpass_pcm(
+        pcm,
+        sample_rate,
+        low_hz=preprocess_cfg["highpass_hz"],
+        high_hz=preprocess_cfg["lowpass_hz"],
+    )
+    pcm = _spectral_denoise_pcm(
+        pcm,
+        sample_rate,
+        strength=preprocess_cfg["denoise_strength"],
+        floor_ratio=preprocess_cfg["denoise_floor"],
+    )
+    pcm = _noise_gate_pcm(
+        pcm,
+        threshold=preprocess_cfg["gate_threshold"],
+        attenuation_ratio=preprocess_cfg["gate_ratio"],
+    )
+
+    peak = float(np.max(np.abs(pcm)))
+    if peak > 1e-6:
+        pcm = pcm * (0.9 / peak)
+    return np.clip(pcm, -1.0, 1.0).astype(np.float32)
+
+
 async def transcribe_pcm(
     pcm_float32: "np.ndarray",
     sample_rate: int,
@@ -107,11 +235,7 @@ async def transcribe_pcm(
 
     import numpy as np
 
-    pcm_float32 = _bandpass_pcm(pcm_float32, sample_rate)
-    # Peak-normalize so Whisper gets a consistent signal level
-    peak = float(np.max(np.abs(pcm_float32)))
-    if peak > 1e-6:
-        pcm_float32 = pcm_float32 * (0.9 / peak)
+    pcm_float32 = _preprocess_pcm_for_stt(pcm_float32, sample_rate, config)
     pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)
 
     buf = io.BytesIO()
@@ -269,7 +393,7 @@ async def transcribe_pcm_via_model(
 
     import numpy as np
 
-    pcm_float32 = _bandpass_pcm(pcm_float32, sample_rate)
+    pcm_float32 = _preprocess_pcm_for_stt(pcm_float32, sample_rate)
 
     # Resample to 16 kHz if needed — Ollama audio models require it
     if sample_rate != _MODEL_AUDIO_RATE:
