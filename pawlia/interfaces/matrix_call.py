@@ -808,6 +808,8 @@ class CallSession:
             greeting_input = (
                 "[SYSTEM: A voice call was just accepted. "
                 "Greet the caller with a short, friendly greeting. "
+                "Keep the established persona and preferred form of address from the profile/history. "
+                "If speaking German and there is no explicit preference, use informal 'du', not formal 'Sie'. "
                 "Keep it to one or two sentences.]"
             )
 
