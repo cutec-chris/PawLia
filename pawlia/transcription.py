@@ -509,11 +509,13 @@ async def _transcribe_api(audio_bytes: bytes, provider: str, cfg: Dict, mime: st
         data["language"] = language
 
     url = f"{base_url}/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
                 url,
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
                 files={"file": (f"audio.{ext}", audio_bytes, mime)},
                 data=data,
                 timeout=60,

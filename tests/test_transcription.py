@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import httpx
 
 from pawlia.transcription import _adaptive_gate_pcm, _noise_gate_pcm, _preprocess_pcm_for_stt, transcribe
 
@@ -125,3 +126,41 @@ async def test_local_without_base_url_uses_faster_whisper(monkeypatch):
 
     assert await transcribe(b"audio", cfg, mime="audio/wav") == "Hallo lokal"
     assert called["args"] == (b"audio", cfg["transcription"]["local"], "audio/wav")
+
+
+@pytest.mark.asyncio
+async def test_api_omits_authorization_header_without_api_key(monkeypatch):
+    from pawlia import transcription
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"text": "Hallo ohne key"}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, files, data, timeout):
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    text = await transcription._transcribe_api(
+        b"audio",
+        "local",
+        {"base_url": "http://127.0.0.1:8005", "model": "whisper-large-v3-turbo"},
+        "audio/wav",
+    )
+
+    assert text == "Hallo ohne key"
+    assert captured["headers"] == {}
