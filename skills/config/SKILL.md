@@ -1,6 +1,6 @@
 ---
 name: config
-description: Read and write pawlia configuration settings (interfaces, TTS, transcription, agents, skill-config), switch the active model at runtime, and toggle private mode. Use this to enable/disable features, change providers, adjust interface settings, configure skill parameters, change the model, or enable/disable private mode.
+description: Read and write pawlia configuration settings (interfaces, TTS, transcription, agents, skill-config), override session-local agent selection at runtime, and toggle private mode. Use this to enable/disable features, change providers, adjust interface settings, configure skill parameters, change active agent models, or enable/disable private mode.
 license: MIT
 metadata:
   author: Christian Ulrich
@@ -69,7 +69,7 @@ python <scripts_dir>/config.py set --path skill-config.memory.idle_minutes --val
 
 **TTS validation:** writes to `tts.provider`, `tts.piper.model`, and `tts.edge.voice` are validated — an unknown value is rejected with a list of valid options instead of being written. A wrong voice silently breaks TTS in the VoIP call, so always pick from the returned `available_voices`. To force a value not in the list (e.g. an English Edge voice), append `--force`.
 
-## Switch the active model (runtime)
+## Switch the active chat model (runtime shorthand)
 
 Show the current model:
 
@@ -83,7 +83,51 @@ Switch to a different model (takes effect immediately, no restart needed):
 python <scripts_dir>/config.py model --name qwen3.5:latest
 ```
 
+This is shorthand for overriding `agents.chat`.
 The model name must match a key in the `models` section of config.yaml.
+
+## Override runtime `agents:` selection
+
+Show all session overrides:
+
+```
+python <scripts_dir>/config.py agent
+```
+
+Show one override path:
+
+```
+python <scripts_dir>/config.py agent --path chat
+python <scripts_dir>/config.py agent --path skills.browser
+```
+
+Set an override path:
+
+```
+python <scripts_dir>/config.py agent --path chat --value smart,fast
+python <scripts_dir>/config.py agent --path default --value smart,fast
+python <scripts_dir>/config.py agent --path skills.browser --value fast
+```
+
+Thread-local override:
+
+```
+python <scripts_dir>/config.py agent --thread abc123 --path chat --value hermes
+```
+
+Clear one override path:
+
+```
+python <scripts_dir>/config.py agent --path skills.browser --off
+```
+
+Supported runtime paths:
+- `default`
+- `chat`
+- `skill_runner`
+- `vision`
+- `compiler`
+- `skills.<name>`
 
 ## Switch the TTS voice (per-user)
 
@@ -146,4 +190,4 @@ All commands return JSON. On success: `{"success": true, ...}`. On error: `{"suc
 
 After `set`, the response includes `"value_read_back"` — the value actually written to disk. Always compare it against what you intended to set and report any discrepancy to the user.
 
-**Note:** Changes to config.yaml (via `set`) take effect after the next restart. The `model` command changes the active model immediately without restart.
+**Note:** Changes to config.yaml (via `set`) take effect after the next restart. The `model` and `agent` commands change the active runtime selection immediately without restart.

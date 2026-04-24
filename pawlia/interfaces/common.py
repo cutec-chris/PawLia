@@ -74,7 +74,32 @@ class ReloadCommandResult:
         self.warnings = warnings or []
 
 
+class AgentCommandResult:
+    """Result of a /agent command."""
+
+    __slots__ = ("action", "ctx_label", "path", "value", "available", "overrides", "invalidate_agent")
+
+    def __init__(
+        self,
+        action: str,
+        ctx_label: str,
+        path: Optional[str] = None,
+        value: Optional[str] = None,
+        available: Optional[List[str]] = None,
+        overrides: Optional[Dict[str, Any]] = None,
+        invalidate_agent: bool = False,
+    ):
+        self.action = action
+        self.ctx_label = ctx_label
+        self.path = path
+        self.value = value
+        self.available = available or []
+        self.overrides = overrides or {}
+        self.invalidate_agent = invalidate_agent
+
+
 _CLEAR_TOKENS = {"off", "none", "-", "default", "clear"}
+_VALID_AGENT_PATHS = {"default", "defaults", "chat", "skill_runner", "vision", "compiler"}
 
 
 def list_available_models(app: "App") -> List[str]:
@@ -104,10 +129,7 @@ def handle_model_command(
     available = list_available_models(app)
 
     if not args.strip():
-        if thread_id:
-            current = app.memory.get_thread_model_override(session, thread_id) or "(default)"
-        else:
-            current = session.model_override or "(default)"
+        current = app.memory.get_agent_override_value(session, "chat", thread_id=thread_id) or "(default)"
         return ModelCommandResult("show", current, ctx_label, available=available)
 
     new_model = args.strip()
@@ -129,6 +151,103 @@ def handle_model_command(
         "set", new_model, ctx_label,
         available=available, invalidate_agent=not thread_id,
     )
+
+
+def _flatten_agent_overrides(overrides: Dict[str, Any], prefix: str = "") -> Dict[str, str]:
+    flat: Dict[str, str] = {}
+    for key, value in overrides.items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(_flatten_agent_overrides(value, path))
+        elif isinstance(value, str) and value.strip():
+            flat[path] = value.strip()
+    return flat
+
+
+def _is_valid_agent_path(path: str) -> bool:
+    if path in _VALID_AGENT_PATHS:
+        return True
+    if path.startswith("skills.") and len(path.split(".")) == 2:
+        return True
+    return False
+
+
+def handle_agent_command(
+    app: "App",
+    user_id: str,
+    args: str,
+    thread_id: Optional[str] = None,
+    ctx_label: Optional[str] = None,
+) -> AgentCommandResult:
+    """Shared logic for /agent commands using the `agents:` config shape."""
+    session = app.memory.load_session(user_id)
+    if ctx_label is None:
+        ctx_label = f"Thread {thread_id}" if thread_id else "Main"
+    available = list_available_models(app)
+
+    stripped = args.strip()
+    current = app.memory.get_thread_agent_overrides(session, thread_id) if thread_id else app.memory.get_agent_overrides(session)
+
+    if not stripped:
+        return AgentCommandResult(
+            "show_all",
+            ctx_label,
+            available=available,
+            overrides=current,
+            invalidate_agent=False,
+        )
+
+    path, sep, value = stripped.partition(" ")
+    path = path.strip()
+    value = value.strip()
+    if not _is_valid_agent_path(path):
+        return AgentCommandResult(
+            "invalid_path",
+            ctx_label,
+            path=path,
+            available=available,
+            overrides=current,
+        )
+
+    if not sep:
+        return AgentCommandResult(
+            "show_path",
+            ctx_label,
+            path=path,
+            value=app.memory.get_agent_override_value(session, path, thread_id=thread_id) or "(default)",
+            available=available,
+            overrides=current,
+        )
+
+    if value.lower() in _CLEAR_TOKENS:
+        app.memory.set_agent_override_value(session, path, None, thread_id=thread_id)
+        return AgentCommandResult(
+            "cleared",
+            ctx_label,
+            path=path,
+            value="(default)",
+            available=available,
+            overrides=app.memory.get_thread_agent_overrides(session, thread_id) if thread_id else app.memory.get_agent_overrides(session),
+            invalidate_agent=not thread_id,
+        )
+
+    app.memory.set_agent_override_value(session, path, value, thread_id=thread_id)
+    return AgentCommandResult(
+        "set",
+        ctx_label,
+        path=path,
+        value=value,
+        available=available,
+        overrides=app.memory.get_thread_agent_overrides(session, thread_id) if thread_id else app.memory.get_agent_overrides(session),
+        invalidate_agent=not thread_id,
+    )
+
+
+def format_agent_overrides(overrides: Dict[str, Any]) -> str:
+    flat = _flatten_agent_overrides(overrides)
+    if not flat:
+        return "_(keine Overrides)_"
+    return "\n".join(f"- `{path}` = `{value}`" for path, value in sorted(flat.items()))
 
 
 def handle_reload_command(app: "App") -> ReloadCommandResult:
@@ -166,23 +285,20 @@ def build_status(
     """
     session = app.memory.load_session(user_id)
 
-    model_override = session.model_override
-    model_name = model_override or getattr(agent.llm, "model_name", None) or getattr(agent.llm, "model", "?")
+    effective_overrides = app.memory.effective_agent_overrides(session, thread_id)
+    model_override = bool(effective_overrides)
+    model_name = getattr(agent.llm, "model_name", None) or getattr(agent.llm, "model", "?")
     temperature = getattr(agent.llm, "temperature", None)
     backend = getattr(agent.llm, "backend", "pawlia")
     provider_name = getattr(agent.llm, "provider_name", None)
     # Context for thread or main
     if thread_id:
         exchanges = app.memory.get_thread_context(session, thread_id)
-        thread_model = app.memory.get_thread_model_override(session, thread_id)
-        if thread_model:
-            model_name = thread_model
-            model_override = thread_model
     else:
         exchanges = session.exchanges
 
     if hasattr(agent, "describe_backend"):
-        meta = agent.describe_backend(thread_id)
+        meta = agent.describe_backend(thread_id, agent_type="chat")
         model_name = meta["selection"]
         backend = meta["backend"]
         provider_name = meta["provider_name"]
@@ -205,7 +321,8 @@ def build_status(
     return {
         "user_id": user_id,
         "model": model_name,
-        "model_override": model_override is not None,
+        "model_override": model_override,
+        "agent_overrides": _flatten_agent_overrides(effective_overrides),
         "backend": backend,
         "provider": provider_name,
         "temperature": temperature,
@@ -231,6 +348,11 @@ def format_status(status: Dict[str, Any]) -> str:
         lines.append(f"**Provider:** `{status['provider']}`")
     if status["temperature"] is not None:
         lines.append(f"**Temp:** {status['temperature']}")
+    if status.get("agent_overrides"):
+        compact = ", ".join(
+            f"`{path}={value}`" for path, value in sorted(status["agent_overrides"].items())
+        )
+        lines.append(f"**Agent Overrides:** {compact}")
     ctx = "Thread" if status["thread_id"] else "Session"
     lines.append(f"**Context:** {status['exchanges']} exchanges, ~{status['estimated_tokens']} tokens ({ctx})")
     if status["has_summary"]:

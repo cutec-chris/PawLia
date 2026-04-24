@@ -96,23 +96,53 @@ class RouterAgent:
         self._local_agent.on_model_change = self.on_model_change
         return self._local_agent
 
-    def _model_override(self, thread_id: Optional[str]) -> Optional[str]:
-        if thread_id and self.memory and self.session:
-            model = self.memory.get_thread_model_override(self.session, thread_id)
-            if model:
-                return model
-        if self.session and self.session.model_override:
-            return self.session.model_override
+    def _agent_overrides(self, thread_id: Optional[str]) -> Dict[str, Any]:
+        if self.memory and self.session:
+            return self.memory.effective_agent_overrides(self.session, thread_id)
+        return {}
+
+    def _active_override_model(
+        self,
+        thread_id: Optional[str],
+        *,
+        agent_type: str = "chat",
+    ) -> Optional[str]:
+        overrides = self._agent_overrides(thread_id)
+        if agent_type.startswith("skill."):
+            skills = overrides.get("skills", {})
+            if isinstance(skills, dict):
+                value = skills.get(agent_type[len("skill."):])
+                if isinstance(value, str) and value.strip():
+                    return value.strip().split(",")[0].strip()
+        value = overrides.get(agent_type)
+        if isinstance(value, str) and value.strip():
+            return value.strip().split(",")[0].strip()
+        if agent_type != "default":
+            default_value = overrides.get("default")
+            if isinstance(default_value, str) and default_value.strip():
+                return default_value.strip().split(",")[0].strip()
         return None
 
-    def active_model_name(self, thread_id: Optional[str] = None) -> str:
-        return self._model_override(thread_id) or self._llm_factory.default_model_name("chat")
+    def active_model_name(self, thread_id: Optional[str] = None, *, agent_type: str = "chat") -> str:
+        overrides = self._agent_overrides(thread_id)
+        try:
+            return self._llm_factory.default_model_name(
+                agent_type,
+                agent_overrides=overrides,
+            )
+        except TypeError:
+            override = self._active_override_model(thread_id, agent_type=agent_type)
+            if override:
+                return override
+            return self._llm_factory.default_model_name(agent_type)
 
-    def _active_override_model(self, thread_id: Optional[str]) -> Optional[str]:
-        return self._model_override(thread_id)
-
-    def describe_backend(self, thread_id: Optional[str] = None) -> Dict[str, Any]:
-        selection = self.active_model_name(thread_id)
+    def describe_backend(
+        self,
+        thread_id: Optional[str] = None,
+        *,
+        agent_type: str = "chat",
+    ) -> Dict[str, Any]:
+        selection = self.active_model_name(thread_id, agent_type=agent_type)
         model_cfg = self._llm_factory.get_model_config(selection)
         provider_name = self._llm_factory.get_provider_name_for_model(selection)
         provider_cfg = self._llm_factory.get_provider_config(provider_name)
@@ -128,7 +158,7 @@ class RouterAgent:
         }
 
     def list_skills(self, thread_id: Optional[str] = None) -> List[str]:
-        if self.describe_backend(thread_id)["backend"] == "pawlia":
+        if self.describe_backend(thread_id, agent_type="chat")["backend"] == "pawlia":
             return sorted(self._skills.keys())
         return []
 
@@ -142,7 +172,7 @@ class RouterAgent:
         if system_prompt:
             return system_prompt
         if self.memory and self.session:
-            skills = self._skills if self.describe_backend(thread_id)["backend"] == "pawlia" else {}
+            skills = self._skills if self.describe_backend(thread_id, agent_type="chat")["backend"] == "pawlia" else {}
             return self.memory.build_system_prompt(
                 self.session,
                 skills=skills,
@@ -150,8 +180,8 @@ class RouterAgent:
             )
         return DEFAULT_SYSTEM_PROMPT
 
-    def _hermes_client(self, thread_id: Optional[str] = None) -> HermesBackend:
-        meta = self.describe_backend(thread_id)
+    def _hermes_client(self, thread_id: Optional[str] = None, *, agent_type: str = "chat") -> HermesBackend:
+        meta = self.describe_backend(thread_id, agent_type=agent_type)
         provider_name = meta["provider_name"]
         if provider_name not in self._hermes_clients:
             self._hermes_clients[provider_name] = HermesBackend(
@@ -174,7 +204,8 @@ class RouterAgent:
         on_skill_step: Optional[Callable[[str], Awaitable[None]]] = None,
         on_skill_done: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> str:
-        meta = self.describe_backend(thread_id)
+        agent_type = "vision" if images else "chat"
+        meta = self.describe_backend(thread_id, agent_type=agent_type)
         if meta["backend"] == "pawlia":
             agent = self._ensure_local_agent()
             return await agent.run(
@@ -192,7 +223,10 @@ class RouterAgent:
             system_prompt=system_prompt,
             thread_id=thread_id,
         )
-        client = self._hermes_client(thread_id)
+        try:
+            client = self._hermes_client(thread_id, agent_type=agent_type)
+        except TypeError:
+            client = self._hermes_client(thread_id)
         result = await client.run(
             user_input=user_input,
             system_prompt=prompt,
@@ -215,7 +249,8 @@ class RouterAgent:
         on_skill_step: Optional[Callable[[str], Awaitable[None]]] = None,
         on_skill_done: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> str:
-        meta = self.describe_backend(thread_id)
+        agent_type = "vision" if images else "chat"
+        meta = self.describe_backend(thread_id, agent_type=agent_type)
         if meta["backend"] == "pawlia":
             agent = self._ensure_local_agent()
             return await agent.run_streamed(

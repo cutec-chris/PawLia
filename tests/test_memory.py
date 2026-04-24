@@ -143,6 +143,41 @@ class TestMemoryManager:
             assert session.exchange_count == 1
             assert len(session.recent_bot_responses) == 0
 
+    def test_agent_overrides_persist_and_merge(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.set_agent_override_value(session, "default", "smart,fast")
+            mm.set_agent_override_value(session, "skills.browser", "groq-fast,fast")
+            mm.set_agent_override_value(session, "chat", "smart")
+            mm.set_agent_override_value(session, "chat", "vision-fast", thread_id="t1")
+
+            assert mm.get_agent_override_value(session, "default") == "smart,fast"
+            assert mm.get_agent_override_value(session, "skills.browser") == "groq-fast,fast"
+            assert mm.get_agent_override_value(session, "chat", thread_id="t1") == "vision-fast"
+            assert mm.effective_agent_overrides(session, "t1")["default"] == "smart,fast"
+            assert mm.effective_agent_overrides(session, "t1")["chat"] == "vision-fast"
+
+            mm2 = self._make_mm(tmpdir)
+            session2 = mm2.load_session("u1")
+            assert mm2.get_agent_override_value(session2, "default") == "smart,fast"
+            assert mm2.get_agent_override_value(session2, "skills.browser") == "groq-fast,fast"
+            assert mm2.get_agent_override_value(session2, "chat", thread_id="t1") == "vision-fast"
+
+    def test_set_model_override_updates_chat_agent_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.set_model_override(session, "fast")
+            assert session.model_override == "fast"
+            assert mm.get_agent_override_value(session, "chat") == "fast"
+
+            mm.set_model_override(session, None)
+            assert session.model_override is None
+            assert mm.get_agent_override_value(session, "chat") is None
+
     def test_append_persists_to_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = self._make_mm(tmpdir)

@@ -22,6 +22,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 SETTABLE_SECTIONS = {"interfaces", "tts", "transcription", "skill-config", "agents"}
+VALID_AGENT_PATHS = {"default", "defaults", "chat", "skill_runner", "vision", "compiler"}
 
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -81,6 +82,21 @@ def _coerce(value_str: str) -> Any:
         return value_str
 
 
+def _flatten_overrides(data: dict, prefix: str = "") -> dict:
+    flat = {}
+    for key, value in (data or {}).items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(_flatten_overrides(value, path))
+        elif isinstance(value, str) and value.strip():
+            flat[path] = value.strip()
+    return flat
+
+
+def _valid_agent_path(path: str) -> bool:
+    return path in VALID_AGENT_PATHS or (path.startswith("skills.") and len(path.split(".")) == 2)
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -124,11 +140,16 @@ def cmd_model(args) -> None:
         if not user_id or not session_dir:
             _out({"success": False, "error": "user-id and session-dir required"})
             return
-        override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
         current = ""
-        if os.path.isfile(override_path):
-            with open(override_path, encoding="utf-8") as f:
-                current = f.read().strip()
+        agents_path = os.path.join(session_dir, user_id, "workspace", "memory", "agent_overrides.yaml")
+        if os.path.isfile(agents_path):
+            overrides = _read(agents_path)
+            current = str((overrides or {}).get("chat", "") or "").strip()
+        if not current:
+            override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
+            if os.path.isfile(override_path):
+                with open(override_path, encoding="utf-8") as f:
+                    current = f.read().strip()
         available = {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)}
         _out({"success": True, "model": current or "(default)", "available_models": available})
         return
@@ -139,16 +160,67 @@ def cmd_model(args) -> None:
         _out({"success": False, "error": f"Unknown model '{args.name}'", "available_models": available})
         return
 
-    # set model — write config key (not resolved name) so provider info is preserved
+    _out({"__directive__": "set_agent_override", "path": "chat", "value": args.name})
+    _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
+
+
+def cmd_agent(args) -> None:
+    config_path = _find_config()
+    models: dict = {}
+    if config_path:
+        data = _read(config_path)
+        models = data.get("models", {})
+
     user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
     session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
-    if user_id and session_dir:
-        override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
-        os.makedirs(os.path.dirname(override_path), exist_ok=True)
-        with open(override_path, "w", encoding="utf-8") as f:
-            f.write(args.name)
-    _out({"__directive__": "set_model", "model": args.name})
-    _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+
+    memory_dir = os.path.join(session_dir, user_id, "workspace", "memory")
+    os.makedirs(memory_dir, exist_ok=True)
+    override_path = os.path.join(
+        memory_dir,
+        f"thread_{args.thread}_agents.yaml" if args.thread else "agent_overrides.yaml",
+    )
+    overrides = _read(override_path) if os.path.isfile(override_path) else {}
+    flat = _flatten_overrides(overrides)
+
+    if not args.path:
+        _out({
+            "success": True,
+            "scope": f"thread:{args.thread}" if args.thread else "session",
+            "overrides": overrides,
+            "flat_overrides": flat,
+            "available_models": {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)},
+        })
+        return
+
+    if not _valid_agent_path(args.path):
+        _out({
+            "success": False,
+            "error": "Invalid agent path",
+            "valid_examples": ["default", "chat", "skill_runner", "vision", "skills.browser"],
+        })
+        return
+
+    if args.off:
+        _out({"__directive__": "set_agent_override", "path": args.path, "value": None, "thread": args.thread})
+        _out({"success": True, "path": args.path, "value": "(default)", "scope": f"thread:{args.thread}" if args.thread else "session"})
+        return
+
+    if not args.value:
+        _out({
+            "success": True,
+            "path": args.path,
+            "value": flat.get(args.path, "(default)"),
+            "scope": f"thread:{args.thread}" if args.thread else "session",
+            "available_models": {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)},
+        })
+        return
+
+    _out({"__directive__": "set_agent_override", "path": args.path, "value": args.value, "thread": args.thread})
+    _out({"success": True, "path": args.path, "value": args.value, "scope": f"thread:{args.thread}" if args.thread else "session"})
 
 
 _PIPER_DIR = "/app/piper"
@@ -343,6 +415,14 @@ def main():
     p.add_argument("--user-id", default=None)
     p.add_argument("--session-dir", default=None)
 
+    p = sub.add_parser("agent")
+    p.add_argument("--path", default=None, help="Relative agents path, e.g. chat or skills.browser")
+    p.add_argument("--value", default=None, help="Selector value, e.g. smart,fast")
+    p.add_argument("--off", action="store_true", help="Clear the override at --path")
+    p.add_argument("--thread", default=None, help="Thread ID (omit for session-level)")
+    p.add_argument("--user-id", default=None)
+    p.add_argument("--session-dir", default=None)
+
     p = sub.add_parser("voice")
     p.add_argument("--name", default=None,
                    help="Voice name — Piper (e.g. de_DE-thorsten-low) or Edge (e.g. de-DE-KatjaNeural)")
@@ -363,7 +443,7 @@ def main():
 
     dispatch = {
         "show": cmd_show, "get": cmd_get, "set": cmd_set,
-        "model": cmd_model, "voice": cmd_voice, "private": cmd_private,
+        "model": cmd_model, "agent": cmd_agent, "voice": cmd_voice, "private": cmd_private,
     }
     try:
         dispatch[args.cmd](args)

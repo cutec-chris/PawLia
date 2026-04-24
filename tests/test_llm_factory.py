@@ -277,3 +277,33 @@ def test_default_model_name_keeps_user_facing_selector():
 
     assert factory.default_model_name("chat") == "hermes"
     assert factory.get_backend_for_model("hermes") == "hermes"
+
+
+def test_agent_overrides_are_used_for_default_model_name():
+    config = _base_config()
+    config["models"]["fallback"] = {"model": "m-fallback", "provider": "test"}
+    factory = LLMFactory(config)
+
+    assert factory.default_model_name(
+        "skill.browser",
+        agent_overrides={"default": "fallback", "skills": {"browser": "m2,m1"}},
+    ) == "m2"
+
+
+def test_get_uses_agent_overrides_for_resolution(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+
+    built: Dict[str, _DummyLLM] = {}
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        model_name = str(model_cfg["model"])
+        llm = _DummyLLM(model_name=model_name)
+        built[model_name] = llm
+        return llm
+
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat", agent_overrides={"chat": "m2,m1"})
+
+    assert llm.invoke([]) == "ok-m2"

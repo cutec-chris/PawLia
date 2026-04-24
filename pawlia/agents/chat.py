@@ -98,7 +98,7 @@ class ChatAgent(BaseAgent):
         self,
         llm: ChatOpenAI,
         skills: Dict[str, AgentSkill],
-        skill_runner_factory: Callable[[AgentSkill], Any],
+        skill_runner_factory: Callable[[AgentSkill, Optional[str]], Any],
         logger: Optional[logging.Logger] = None,
         memory: Optional["MemoryManager"] = None,
         session: Optional["Session"] = None,
@@ -125,9 +125,9 @@ class ChatAgent(BaseAgent):
             self.bound_llm = llm
             self.vision_bound_llm = vision_llm or llm
 
-        # Resolver for per-thread model overrides: model_name -> ChatOpenAI
+        # Resolver for session/thread-specific agent selection at run() time.
         # Set by App.make_agent after construction.
-        self._llm_resolver: Optional[Callable[[str], Any]] = None
+        self._agent_llm_resolver: Optional[Callable[[str, Optional[str]], Any]] = None
         # Resolves config keys (e.g. "fast") to actual model names (e.g. "qwen3.5:4b").
         self._model_name_resolver: Optional[Callable[[str], str]] = None
 
@@ -415,7 +415,7 @@ class ChatAgent(BaseAgent):
                             await _on_skill_start(skill_name, query)
                         except Exception as exc:
                             self.logger.debug("on_skill_start error: %s", exc)
-                    runner = self.skill_runner_factory(skill)
+                    runner = self.skill_runner_factory(skill, thread_id)
                     runner.on_step = _on_skill_step
                     result = await runner.run(query=query)
                     result = self._process_directives(result, thread_id)
@@ -559,7 +559,7 @@ class ChatAgent(BaseAgent):
                         await _on_skill_start(skill_name, query)
                     except Exception:
                         pass
-                runner = self.skill_runner_factory(skill)
+                runner = self.skill_runner_factory(skill, thread_id)
                 runner.on_step = _on_skill_step
                 skill_result = await runner.run(query=query)
                 skill_result = self._process_directives(skill_result, thread_id)
@@ -621,7 +621,7 @@ class ChatAgent(BaseAgent):
                             await _on_skill_start(skill_name, query)
                         except Exception:
                             pass
-                    runner = self.skill_runner_factory(skill)
+                    runner = self.skill_runner_factory(skill, thread_id)
                     runner.on_step = _on_skill_step
                     skill_result = await runner.run(query=query)
                     skill_result = self._process_directives(skill_result, thread_id)
@@ -752,6 +752,25 @@ class ChatAgent(BaseAgent):
                         self.logger.info("Directive: model override set to '%s'", model)
                     if self.on_model_change:
                         self.on_model_change(model)
+            elif directive == "set_agent_override":
+                path = str(obj.get("path", "") or "").strip()
+                value = obj.get("value")
+                if path and self.memory and self.session:
+                    target_thread = obj.get("thread") or thread_id
+                    self.memory.set_agent_override_value(
+                        self.session,
+                        path,
+                        str(value).strip() if isinstance(value, str) and str(value).strip() else None,
+                        thread_id=target_thread,
+                    )
+                    self.logger.info(
+                        "Directive: %s agent override '%s' -> %r",
+                        f"thread '{target_thread}'" if target_thread else "session",
+                        path,
+                        value,
+                    )
+                    if self.on_model_change:
+                        self.on_model_change(str(value or ""))
             elif directive == "set_voice":
                 if self.memory and self.session:
                     voice = obj.get("voice")
@@ -780,30 +799,21 @@ class ChatAgent(BaseAgent):
     ) -> Tuple[Any, Any]:
         """Return (bound_llm, unbound_llm) for this call.
 
-        Checks for a thread-specific model override first, then a session-level
-        override, and finally falls back to the agent's default LLMs.
-        Both overrides are resolved dynamically so directive-based changes
-        (set_model) take effect without requiring an agent restart.
+        Resolves the active `agents` selection dynamically so session/thread
+        overrides take effect without rebuilding the whole agent.
         """
-        if self._llm_resolver and self.memory and self.session:
-            model: Optional[str] = None
-            if thread_id:
-                model = self.memory.get_thread_model_override(self.session, thread_id)
-            if not model:
-                model = self.session.model_override
-            if model:
-                llm = self._llm_resolver(model)
-                bound = llm.bind_tools(self._skill_specs, tool_choice="auto") if self._skill_specs else llm
-                return bound, llm
+        if self._agent_llm_resolver:
+            agent_type = "vision" if images else "chat"
+            llm = self._agent_llm_resolver(agent_type, thread_id)
+            bound = llm.bind_tools(self._skill_specs, tool_choice="auto") if self._skill_specs else llm
+            return bound, llm
 
         return (self.vision_bound_llm if images else self.bound_llm), self.llm
 
     def _active_override_model(self, thread_id: Optional[str]) -> Optional[str]:
         """Return the name of the active model override, or ``None``."""
-        if thread_id and self.memory and self.session:
-            model = self.memory.get_thread_model_override(self.session, thread_id)
-            if model:
-                return model
+        if self.memory and self.session:
+            return self.memory.get_agent_override_value(self.session, "chat", thread_id=thread_id)
         if self.session and self.session.model_override:
             return self.session.model_override
         return None

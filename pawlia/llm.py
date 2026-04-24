@@ -272,9 +272,13 @@ class LLMFactory:
     # Public API
     # ------------------------------------------------------------------
 
-    def get(self, agent_type: str = "chat") -> Any:
+    def get(self, agent_type: str = "chat", agent_overrides: Optional[Dict[str, Any]] = None) -> Any:
         """Return a (cached) LLM for the given agent type."""
-        model_cfgs = self._resolve_agent_candidates(agent_type, backend="pawlia")
+        model_cfgs = self._resolve_agent_candidates(
+            agent_type,
+            backend="pawlia",
+            agent_overrides=agent_overrides,
+        )
         if len(model_cfgs) == 1:
             return self._get_or_build_model(model_cfgs[0])
 
@@ -319,15 +323,19 @@ class LLMFactory:
         model_cfg = self.get_model_config(model_name)
         return self._provider_backend_from_cfg(model_cfg)
 
-    def default_model_name(self, agent_type: str = "chat") -> str:
+    def default_model_name(
+        self,
+        agent_type: str = "chat",
+        agent_overrides: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Return the first configured model selector for *agent_type*."""
-        raw = self._resolve_agent_value_name(self._agent_value(agent_type))
+        raw = self._resolve_agent_value_name(self._agent_value(agent_type, agent_overrides=agent_overrides))
         if raw:
             return raw
 
         fallback = self._fallback_agent(agent_type)
         if fallback:
-            return self.default_model_name(fallback)
+            return self.default_model_name(fallback, agent_overrides=agent_overrides)
 
         if self.models:
             return next(iter(self.models))
@@ -359,7 +367,11 @@ class LLMFactory:
     # Config resolution
     # ------------------------------------------------------------------
 
-    def _resolve_agent(self, agent_type: str) -> Dict[str, Any]:
+    def _resolve_agent(
+        self,
+        agent_type: str,
+        agent_overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Resolve the model config for an agent type following fallback chains.
 
         Supports two config styles:
@@ -381,7 +393,7 @@ class LLMFactory:
               chat:
                 model: qwen3.5:latest
         """
-        candidates = self._resolve_agent_candidates(agent_type)
+        candidates = self._resolve_agent_candidates(agent_type, agent_overrides=agent_overrides)
         return candidates[0]
 
     def _resolve_agent_candidates(
@@ -389,6 +401,7 @@ class LLMFactory:
         agent_type: str,
         _visited: Optional[Set[str]] = None,
         backend: Optional[str] = None,
+        agent_overrides: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Resolve one or more model configs for an agent type.
 
@@ -401,7 +414,7 @@ class LLMFactory:
         visited = set(visited)
         visited.add(agent_type)
 
-        value = self._agent_value(agent_type)
+        value = self._agent_value(agent_type, agent_overrides=agent_overrides)
         resolved = self._resolve_agent_value(value)
         if backend is not None:
             resolved = [
@@ -414,7 +427,12 @@ class LLMFactory:
         # Not found or unresolvable — walk up the fallback chain
         fallback = self._fallback_agent(agent_type)
         if fallback:
-            fallback_resolved = self._resolve_agent_candidates(fallback, visited, backend=backend)
+            fallback_resolved = self._resolve_agent_candidates(
+                fallback,
+                visited,
+                backend=backend,
+                agent_overrides=agent_overrides,
+            )
             if fallback_resolved:
                 return fallback_resolved
 
@@ -457,10 +475,16 @@ class LLMFactory:
 
         return configs
 
-    def _agent_value(self, agent_type: str) -> Any:
+    def _agent_value(self, agent_type: str, agent_overrides: Optional[Dict[str, Any]] = None) -> Any:
         """Return the raw value assigned to an agent type (string key or inline dict)."""
+        overrides = agent_overrides or {}
+
         # "default" accepts both "default" (new) and "defaults" (legacy plural)
         if agent_type == "default":
+            if "default" in overrides:
+                return overrides.get("default")
+            if "defaults" in overrides:
+                return overrides.get("defaults")
             return (
                 self.agents_cfg.get("default")
                 or self.agents_cfg.get("defaults")
@@ -468,8 +492,13 @@ class LLMFactory:
 
         if agent_type.startswith("skill."):
             skill_name = agent_type[len("skill."):]
+            override_skills = overrides.get("skills", {})
+            if isinstance(override_skills, dict) and skill_name in override_skills:
+                return override_skills.get(skill_name)
             return self.agents_cfg.get("skills", {}).get(skill_name)
 
+        if agent_type in overrides:
+            return overrides.get(agent_type)
         return self.agents_cfg.get(agent_type)
 
     def _resolve_agent_value_name(self, value: Any) -> Optional[str]:

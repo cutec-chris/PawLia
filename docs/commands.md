@@ -44,15 +44,16 @@ Subsequent messages to that thread work exactly like any other thread: reply ins
 
 ---
 
-## `/model` — Show or switch the active model
+## `/model` — Show or switch the active chat model
 
 ```
 /model                  # show current model
-/model <name>           # switch to a different model
+/model <name>           # set agents.chat for this context
 ```
 
 Matrix prefix: `//model` / `//model <name>`
 
+`/model` is shorthand for overriding `agents.chat` in the current session/thread.
 `<name>` accepts either a **model key** defined in `config.yaml` (e.g. `fast`, `smart`) or a **raw model name** (e.g. `qwen3.5:4b`).
 
 ### Scope
@@ -78,6 +79,34 @@ To reset to the default model, restart the session or (CLI) set the override to 
 
 ---
 
+## `/agent` — Override session-local `agents:` config
+
+Lets you override the active `agents:` mapping for the current session/thread using the same structure as `config.yaml`, including fallback chains and per-skill selectors.
+
+```
+/agent                           # show all overrides for this context
+/agent chat                      # show one override path
+/agent chat smart,fast           # set agents.chat
+/agent default smart,fast        # set agents.default
+/agent skills.browser fast       # set agents.skills.browser
+/agent skills.browser off        # clear one override path
+```
+
+Matrix prefix: `//agent`
+
+Supported paths:
+
+- `default`
+- `chat`
+- `skill_runner`
+- `vision`
+- `compiler`
+- `skills.<name>`
+
+Overrides are stored per session, or per thread when the command is sent inside a thread. Thread overrides layer on top of session overrides.
+
+---
+
 ## `/status` — Show session status
 
 Displays information about the current session or thread: active model, context size, private mode, loaded skills, and more.
@@ -87,13 +116,14 @@ Displays information about the current session or thread: active model, context 
 //status          # Matrix
 ```
 
-When sent inside a thread, the output reflects the thread's context (exchanges, model override). Otherwise it shows the main session.
+When sent inside a thread, the output reflects the thread's context (exchanges, agent overrides). Otherwise it shows the main session.
 
 ### Output fields
 
 | Field | Description |
 |-------|-------------|
-| **Model** | Active model name (marked with "override" if set via `/model`) |
+| **Model** | Active chat-model selector (marked with "override" if session/thread agent overrides are active) |
+| **Agent Overrides** | Active flattened override paths such as `default=smart,fast` or `skills.browser=fast` |
 | **Temp** | Sampling temperature |
 | **Provider** | API base URL of the LLM provider |
 | **Context** | Number of exchanges and estimated token count |

@@ -308,6 +308,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
+        handle_agent_command, format_agent_overrides,
         list_available_models, preview_text, format_private_toggle,
         format_bg_enqueue, bytes_to_data_uri, handle_reload_command,
     )
@@ -420,6 +421,36 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         else:
             await _reply(f"✓ Modell für **{result.ctx_label}** auf `{result.model}` gesetzt.")
 
+    async def _handle_agent_cmd(
+        room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
+    ) -> None:
+        ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
+        result = handle_agent_command(app, session_id, args, thread_id=thread_id, ctx_label=ctx_label)
+
+        if result.invalidate_agent:
+            agent_cache.invalidate(session_id)
+
+        async def _reply(text: str) -> None:
+            if thread_id:
+                await _send_thread_reply(room.room_id, thread_id, text)
+            else:
+                await _send_text(room.room_id, text)
+
+        if result.action == "show_all":
+            await _reply(
+                f"**Agent Overrides** [{result.ctx_label}]\n"
+                f"{format_agent_overrides(result.overrides)}\n"
+                "_Setzen: `//agent <path> <wert>` — Löschen: `//agent <path> off`_"
+            )
+        elif result.action == "show_path":
+            await _reply(f"**Agent Override** `{result.path}` [{result.ctx_label}]: `{result.value}`")
+        elif result.action == "invalid_path":
+            await _reply("Ungültiger Agent-Pfad. Erlaubt: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`.")
+        elif result.action == "cleared":
+            await _reply(f"✓ Agent-Override `{result.path}` für **{result.ctx_label}** entfernt.")
+        else:
+            await _reply(f"✓ Agent-Override `{result.path}` für **{result.ctx_label}** auf `{result.value}` gesetzt.")
+
     async def _handle(
         room: MatrixRoom,
         text: str,
@@ -465,6 +496,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         model_args = _cmd(text, "model")
         if model_args is not None:
             await _handle_model_cmd(room, session_id, model_args, thread_id)
+            return
+
+        agent_args = _cmd(text, "agent")
+        if agent_args is not None:
+            await _handle_agent_cmd(room, session_id, agent_args, thread_id)
             return
 
         if _cmd(text, "clear") is not None:
@@ -602,10 +638,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             except Exception:
                 pass
             session = app.memory.load_session(session_id)
-            override = (
-                app.memory.get_thread_model_override(session, thread_id)
-                if thread_id else session.model_override
-            )
+            override = app.memory.get_agent_override_value(session, "chat", thread_id=thread_id)
             hint = ""
             if override:
                 avail = ", ".join(f"`{m}`" for m in list_available_models(app))
@@ -726,9 +759,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         session_id = f"mx_{room.room_id}"
         session = app.memory.load_session(session_id)
         thread_id_pre = _resolve_thread_root(getattr(event, "source", None), thread_events)
-        active_model = (
-            (app.memory.get_thread_model_override(session, thread_id_pre) if thread_id_pre else None)
-            or session.model_override
+        active_model = app.llm.default_model_name(
+            "chat",
+            agent_overrides=app.memory.effective_agent_overrides(session, thread_id_pre),
         )
         audio_info = app.llm.audio_model_info(active_model or "chat")
         if audio_info:

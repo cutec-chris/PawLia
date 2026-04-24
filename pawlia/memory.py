@@ -18,6 +18,7 @@ import shutil
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
+import yaml
 
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import ensure_dir
@@ -53,6 +54,8 @@ class Session:
 
         # Optional model override (e.g. set via /model command)
         self.model_override: Optional[str] = None
+        # Partial override of config.yaml -> agents:
+        self.agent_overrides: Dict[str, Any] = {}
 
         # Optional TTS voice override (piper voice name without .onnx)
         self.voice_override: Optional[str] = None
@@ -62,6 +65,7 @@ class Session:
 
         # Per-thread model overrides (loaded lazily by get_thread_model_override)
         self.thread_model_overrides: Dict[str, Optional[str]] = {}
+        self.thread_agent_overrides: Dict[str, Dict[str, Any]] = {}
 
         # Private mode: exchanges are kept in RAM but not written to disk.
         # Resets on restart (intentional).
@@ -164,6 +168,9 @@ class MemoryManager:
     def _model_override_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "model_override.txt")
 
+    def _agent_overrides_path(self, user_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), "agent_overrides.yaml")
+
     def _voice_override_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "voice_override.txt")
 
@@ -178,6 +185,93 @@ class MemoryManager:
 
     def _thread_model_path(self, user_id: str, thread_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_model.txt")
+
+    def _thread_agent_overrides_path(self, user_id: str, thread_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_agents.yaml")
+
+    @staticmethod
+    def _read_yaml(path: str) -> Dict[str, Any]:
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _write_yaml(path: str, data: Dict[str, Any]) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+
+    @staticmethod
+    def _clean_agent_overrides(data: Any) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+
+        cleaned: Dict[str, Any] = {}
+        for key in ("default", "defaults", "chat", "skill_runner", "vision", "compiler"):
+            value = data.get(key)
+            if isinstance(value, (str, dict)) and value:
+                cleaned[key] = value
+
+        skills = data.get("skills")
+        if isinstance(skills, dict):
+            cleaned_skills = {
+                str(name): value
+                for name, value in skills.items()
+                if isinstance(value, (str, dict)) and value
+            }
+            if cleaned_skills:
+                cleaned["skills"] = cleaned_skills
+
+        return cleaned
+
+    @staticmethod
+    def _deep_merge_agent_overrides(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(base)
+        for key, value in extra.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = MemoryManager._deep_merge_agent_overrides(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    @staticmethod
+    def _delete_nested_path(data: Dict[str, Any], parts: List[str]) -> None:
+        current = data
+        parents: List[Tuple[Dict[str, Any], str]] = []
+        for part in parts[:-1]:
+            child = current.get(part)
+            if not isinstance(child, dict):
+                return
+            parents.append((current, part))
+            current = child
+        current.pop(parts[-1], None)
+        if not current:
+            for parent, key in reversed(parents):
+                child = parent.get(key)
+                if isinstance(child, dict) and not child:
+                    parent.pop(key, None)
+                else:
+                    break
+
+    def _sync_legacy_model_fields(self, session: Session) -> None:
+        session.model_override = self.get_agent_override_value(session, "chat")
+        session.thread_model_overrides = {
+            thread_id: self._get_nested_override(overrides, "chat")
+            for thread_id, overrides in session.thread_agent_overrides.items()
+        }
+
+    @staticmethod
+    def _get_nested_override(data: Dict[str, Any], path: str) -> Optional[str]:
+        current: Any = data
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current if isinstance(current, str) and current else None
 
     @staticmethod
     def _parse_exchanges(history: str) -> List[Tuple[str, str, Optional[List[Dict[str, Any]]]]]:
@@ -241,8 +335,14 @@ class MemoryManager:
         session.summary = self._read(self._summary_path(user_id))
         session.exchanges = self._parse_exchanges(session.daily_history)
         session.exchange_count = len(session.exchanges)
-        override = self._read(self._model_override_path(user_id)).strip()
-        session.model_override = override or None
+        session.agent_overrides = self._clean_agent_overrides(
+            self._read_yaml(self._agent_overrides_path(user_id))
+        )
+        if not session.agent_overrides:
+            override = self._read(self._model_override_path(user_id)).strip()
+            if override:
+                session.agent_overrides = {"chat": override}
+        self._sync_legacy_model_fields(session)
         voice = self._read(self._voice_override_path(user_id)).strip()
         session.voice_override = voice or None
         session.private = os.path.isfile(self._private_session_path(user_id))
@@ -250,15 +350,104 @@ class MemoryManager:
         self._sessions[user_id] = session
         return session
 
-    def set_model_override(self, session: Session, model: Optional[str]) -> None:
-        """Persist a model override for this session.  Pass None to clear."""
-        session.model_override = model
-        path = self._model_override_path(session.user_id)
-        if model:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(model)
+    def get_agent_overrides(self, session: Session) -> Dict[str, Any]:
+        return dict(session.agent_overrides)
+
+    def get_thread_agent_overrides(self, session: Session, thread_id: str) -> Dict[str, Any]:
+        if thread_id not in session.thread_agent_overrides:
+            session.thread_agent_overrides[thread_id] = self._clean_agent_overrides(
+                self._read_yaml(self._thread_agent_overrides_path(session.user_id, thread_id))
+            )
+            self._sync_legacy_model_fields(session)
+        return dict(session.thread_agent_overrides[thread_id])
+
+    def effective_agent_overrides(
+        self,
+        session: Session,
+        thread_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        merged = dict(session.agent_overrides)
+        if not merged and session.model_override:
+            merged["chat"] = session.model_override
+        if thread_id:
+            legacy_thread = session.thread_model_overrides.get(thread_id)
+            if legacy_thread:
+                merged = self._deep_merge_agent_overrides(merged, {"chat": legacy_thread})
+            merged = self._deep_merge_agent_overrides(
+                merged,
+                self.get_thread_agent_overrides(session, thread_id),
+            )
+        return self._clean_agent_overrides(merged)
+
+    def get_agent_override_value(
+        self,
+        session: Session,
+        path: str,
+        thread_id: Optional[str] = None,
+    ) -> Optional[str]:
+        overrides = self.effective_agent_overrides(session, thread_id) if thread_id else session.agent_overrides
+        return self._get_nested_override(overrides, path)
+
+    def set_agent_overrides(
+        self,
+        session: Session,
+        overrides: Optional[Dict[str, Any]],
+        *,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        cleaned = self._clean_agent_overrides(overrides or {})
+        if thread_id:
+            session.thread_agent_overrides[thread_id] = cleaned
+            path = self._thread_agent_overrides_path(session.user_id, thread_id)
+        else:
+            session.agent_overrides = cleaned
+            path = self._agent_overrides_path(session.user_id)
+
+        if cleaned:
+            self._write_yaml(path, cleaned)
         elif os.path.exists(path):
             os.remove(path)
+        self._sync_legacy_model_fields(session)
+
+    def set_agent_override_value(
+        self,
+        session: Session,
+        path: str,
+        value: Optional[str],
+        *,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        target = (
+            self.get_thread_agent_overrides(session, thread_id)
+            if thread_id else self.get_agent_overrides(session)
+        )
+        parts = [part for part in path.split(".") if part]
+        if not parts:
+            return
+
+        if value:
+            current = target
+            for part in parts[:-1]:
+                child = current.get(part)
+                if not isinstance(child, dict):
+                    child = {}
+                    current[part] = child
+                current = child
+            current[parts[-1]] = value
+        else:
+            self._delete_nested_path(target, parts)
+
+        self.set_agent_overrides(session, target, thread_id=thread_id)
+
+    def set_model_override(self, session: Session, model: Optional[str]) -> None:
+        """Persist a model override for this session.  Pass None to clear."""
+        self.set_agent_override_value(session, "chat", model)
+        legacy_path = self._model_override_path(session.user_id)
+        if model:
+            with open(legacy_path, "w", encoding="utf-8") as f:
+                f.write(model)
+        elif os.path.exists(legacy_path):
+            os.remove(legacy_path)
 
     def set_voice_override(self, session: Session, voice: Optional[str]) -> None:
         """Persist a TTS voice override for this session.  Pass None to clear."""
@@ -288,22 +477,29 @@ class MemoryManager:
 
     def get_thread_model_override(self, session: Session, thread_id: str) -> Optional[str]:
         """Return the model override for a thread, loading from disk on first access."""
-        if thread_id not in session.thread_model_overrides:
-            val = self._read(self._thread_model_path(session.user_id, thread_id)).strip()
-            session.thread_model_overrides[thread_id] = val or None
-        return session.thread_model_overrides[thread_id]
+        if thread_id not in session.thread_agent_overrides:
+            overrides = self._clean_agent_overrides(
+                self._read_yaml(self._thread_agent_overrides_path(session.user_id, thread_id))
+            )
+            if not overrides:
+                val = self._read(self._thread_model_path(session.user_id, thread_id)).strip()
+                if val:
+                    overrides = {"chat": val}
+            session.thread_agent_overrides[thread_id] = overrides
+            self._sync_legacy_model_fields(session)
+        return session.thread_model_overrides.get(thread_id)
 
     def set_thread_model_override(
         self, session: Session, thread_id: str, model: Optional[str]
     ) -> None:
         """Persist a model override for a specific thread.  Pass None to clear."""
-        session.thread_model_overrides[thread_id] = model
-        path = self._thread_model_path(session.user_id, thread_id)
+        self.set_agent_override_value(session, "chat", model, thread_id=thread_id)
+        legacy_path = self._thread_model_path(session.user_id, thread_id)
         if model:
-            with open(path, "w", encoding="utf-8") as f:
+            with open(legacy_path, "w", encoding="utf-8") as f:
                 f.write(model)
-        elif os.path.exists(path):
-            os.remove(path)
+        elif os.path.exists(legacy_path):
+            os.remove(legacy_path)
 
     def toggle_private_thread(self, session: Session, thread_id: str) -> bool:
         """Toggle private mode for a thread. Returns the new state."""

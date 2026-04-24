@@ -129,7 +129,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, preview_text, build_status, format_status,
-        handle_model_command, format_private_toggle, format_bg_enqueue,
+        handle_model_command, handle_agent_command, format_agent_overrides,
+        format_private_toggle, format_bg_enqueue,
         handle_reload_command,
     )
 
@@ -197,7 +198,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
         if not message and not images:
             return web.json_response({"error": "empty message"}, status=400)
 
-        # ── Commands (/status, /model, /private, /reload, /thread) ──
+        # ── Commands (/status, /model, /agent, /private, /reload, /thread) ──
         lower = message.lower().strip()
 
         if lower == "/status":
@@ -213,6 +214,21 @@ async def start_web(app: "App", cfg: Dict) -> None:
             if result.action == "show":
                 return web.json_response({"response": f"**Model ({result.ctx_label}):** `{result.model}`"})
             return web.json_response({"response": f"Model auf `{result.model}` gesetzt ({result.ctx_label})."})
+
+        if lower.startswith("/agent"):
+            args_str = message.strip()[len("/agent"):].strip()
+            result = handle_agent_command(app, user_id, args_str, thread_id=thread_id)
+            if result.invalidate_agent:
+                agent_cache.invalidate(user_id)
+            if result.action == "show_all":
+                return web.json_response({"response": f"**Agent Overrides ({result.ctx_label}):**\n{format_agent_overrides(result.overrides)}"})
+            if result.action == "show_path":
+                return web.json_response({"response": f"**Agent Override `{result.path}` ({result.ctx_label}):** `{result.value}`"})
+            if result.action == "invalid_path":
+                return web.json_response({"response": "Ungültiger Agent-Pfad. Erlaubt: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`."})
+            if result.action == "cleared":
+                return web.json_response({"response": f"Agent-Override `{result.path}` entfernt ({result.ctx_label})."})
+            return web.json_response({"response": f"Agent-Override `{result.path}` auf `{result.value}` gesetzt ({result.ctx_label})."})
 
         if lower == "/reload":
             result = handle_reload_command(app)

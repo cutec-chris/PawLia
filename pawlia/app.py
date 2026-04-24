@@ -179,11 +179,12 @@ class App:
         # Build per-user skill set (bundled + user's own workspace skills)
         user_skills = self._build_user_skills(user_id)
 
-        def make_runner(skill: AgentSkill) -> SkillRunnerAgent:
+        def make_runner(skill: AgentSkill, thread_id: Optional[str] = None) -> SkillRunnerAgent:
             skill_config_root = self.config.get("skill-config") or {}
             skill_cfg = skill_config_root.get(skill.name, {})
+            agent_overrides = self.memory.effective_agent_overrides(session, thread_id)
             return SkillRunnerAgent(
-                llm=self.llm.get(f"skill.{skill.name}"),
+                llm=self.llm.get(f"skill.{skill.name}", agent_overrides=agent_overrides),
                 skill=skill,
                 tool_registry=self.tools,
                 context={
@@ -214,8 +215,14 @@ class App:
                 vision_llm=vision_llm,
                 **kwargs,
             )
-            # Let the agent resolve per-thread model overrides at run() time
-            agent._llm_resolver = self.llm.get_with_model
+            # Resolve session/thread-specific agent selectors at run() time.
+            agent._agent_llm_resolver = (
+                lambda agent_type, thread_id=None:
+                self.llm.get(
+                    agent_type,
+                    agent_overrides=self.memory.effective_agent_overrides(session, thread_id),
+                )
+            )
             # Resolve config keys (e.g. "fast") to actual model names
             agent._model_name_resolver = self.llm.resolve_model_name
             # Let the ChatAgent re-discover this user's workspace skills after each skill call
