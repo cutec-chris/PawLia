@@ -122,9 +122,13 @@ interfaces:
 #   #   model: whisper-1
 #   #   # language: de
 
-#   # Local (no API key; requires FFmpeg + faster-whisper):
+#   # Local: either self-hosted OpenAI-compatible endpoint or in-process faster-whisper.
 #   # provider: local
 #   # local:
+#   #   # base_url: http://127.0.0.1:8000/v1
+#   #   # model: whisper-large-v3-turbo
+#   #
+#   #   # No base_url: use local faster-whisper (requires FFmpeg + faster-whisper)
 #   #   model: base        # tiny | base | small | medium | large-v3
 #   #   device: cpu        # cpu | cuda
 #   #   compute_type: int8

@@ -231,7 +231,12 @@ transcription:
   #   base_url: https://api.openai.com/v1
   #   model: whisper-1
 
-  # local:                              # no API key; requires FFmpeg + faster-whisper
+  # local:
+  #   # Self-hosted OpenAI-compatible Whisper endpoint:
+  #   # base_url: http://127.0.0.1:8000/v1
+  #   # model: whisper-large-v3-turbo
+  #
+  #   # Or in-process faster-whisper (no base_url; requires FFmpeg + faster-whisper):
   #   model: base                       # tiny | base | small | medium | large-v3
   #   device: cpu                       # cpu | cuda
   #   compute_type: int8

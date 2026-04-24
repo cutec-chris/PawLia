@@ -20,11 +20,12 @@ Config layout (YAML)::
     #     model: whisper-1
     #     # language: de
 
-    # Local (faster-whisper, requires FFmpeg):
+    # Local (faster-whisper, requires FFmpeg) or self-hosted OpenAI-compatible:
     # transcription:
     #   provider: local
     #   local:
     #     model: base
+    #     # base_url: http://127.0.0.1:8000/v1
     #     device: cpu
     #     compute_type: int8
     #     # language: de
@@ -79,6 +80,16 @@ async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "au
 
     try:
         if provider == "local":
+            if provider_cfg.get("base_url"):
+                base_url = provider_cfg.get("base_url", "").rstrip("/")
+                model = provider_cfg.get("model", _DEFAULT_MODEL)
+                logger.info(
+                    "transcription: sending to %s/audio/transcriptions (provider=%s model=%s)",
+                    base_url,
+                    provider,
+                    model,
+                )
+                return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
             logger.debug("transcription: using local faster-whisper (model=%s)", provider_cfg.get("model", "base"))
             return await _transcribe_local(audio_bytes, provider_cfg, mime)
         base_url = provider_cfg.get("base_url", _PROVIDER_BASE_URLS.get(provider, "<no base_url>")).rstrip("/")

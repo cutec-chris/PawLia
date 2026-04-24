@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from pawlia.transcription import _adaptive_gate_pcm, _noise_gate_pcm, _preprocess_pcm_for_stt
+from pawlia.transcription import _adaptive_gate_pcm, _noise_gate_pcm, _preprocess_pcm_for_stt, transcribe
 
 
 def _tone(freq_hz: float, sample_rate: int, duration_s: float, amp: float) -> np.ndarray:
@@ -70,3 +71,57 @@ def test_adaptive_gate_reduces_stationary_noise_more_than_speech():
 
     assert residual_noise_after < residual_noise_before * 0.8
     assert speech_rms_after > speech_rms_before * 0.7
+
+
+@pytest.mark.asyncio
+async def test_local_with_base_url_uses_openai_compatible_api(monkeypatch):
+    called = {}
+
+    async def fake_api(audio_bytes, provider, cfg, mime):
+        called["args"] = (audio_bytes, provider, cfg, mime)
+        return "Hallo"
+
+    async def fake_local(audio_bytes, cfg, mime):
+        raise AssertionError("local faster-whisper should not be used when base_url is set")
+
+    monkeypatch.setattr("pawlia.transcription._transcribe_api", fake_api)
+    monkeypatch.setattr("pawlia.transcription._transcribe_local", fake_local)
+
+    cfg = {
+        "transcription": {
+            "provider": "local",
+            "local": {
+                "base_url": "http://192.168.177.120:8005",
+                "model": "whisper-large-v3-turbo",
+                "language": "de",
+            },
+        }
+    }
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Hallo"
+    assert called["args"][1:] == ("local", cfg["transcription"]["local"], "audio/wav")
+
+
+@pytest.mark.asyncio
+async def test_local_without_base_url_uses_faster_whisper(monkeypatch):
+    called = {}
+
+    async def fake_api(audio_bytes, provider, cfg, mime):
+        raise AssertionError("API should not be used when local base_url is missing")
+
+    async def fake_local(audio_bytes, cfg, mime):
+        called["args"] = (audio_bytes, cfg, mime)
+        return "Hallo lokal"
+
+    monkeypatch.setattr("pawlia.transcription._transcribe_api", fake_api)
+    monkeypatch.setattr("pawlia.transcription._transcribe_local", fake_local)
+
+    cfg = {
+        "transcription": {
+            "provider": "local",
+            "local": {"model": "base", "language": "de"},
+        }
+    }
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Hallo lokal"
+    assert called["args"] == (b"audio", cfg["transcription"]["local"], "audio/wav")
