@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import markdown
@@ -43,6 +44,7 @@ from nio import (
     MegolmEvent,
     MatrixRoom,
     RoomMessageAudio,
+    RoomMessageFile,
     RoomMessageImage,
     RoomMessageText,
     SyncResponse,
@@ -55,6 +57,34 @@ logger = logging.getLogger("pawlia.interfaces.matrix")
 
 
 _md = markdown.Markdown(extensions=["fenced_code", "nl2br", "tables"])
+_MAX_MATRIX_FILE_TEXT_BYTES = 128 * 1024
+_TEXT_FILE_EXTENSIONS = {
+    ".ics", ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".xml", ".html", ".htm", ".log",
+}
+_MARKITDOWN_FILE_EXTENSIONS = {
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".rtf", ".odt", ".ods", ".odp",
+}
+_MARKITDOWN_MIMETYPES = {
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/rtf",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.oasis.opendocument.presentation",
+}
+_TEXT_MIMETYPE_PREFIXES = ("text/",)
+_TEXT_MIMETYPES = {
+    "application/ics",
+    "application/json",
+    "application/xml",
+    "application/yaml",
+    "application/x-yaml",
+}
 
 
 def _make_content(text: str) -> dict:
@@ -66,6 +96,78 @@ def _make_content(text: str) -> dict:
         "format": "org.matrix.custom.html",
         "formatted_body": _md.convert(text),
     }
+
+
+def _matrix_file_info(event: RoomMessageFile) -> tuple[str, str]:
+    """Return filename and mimetype from a Matrix file message."""
+    content = (getattr(event, "source", None) or {}).get("content", {}) or {}
+    info = content.get("info") or {}
+    filename = content.get("filename") or getattr(event, "body", "") or "attachment"
+    mimetype = info.get("mimetype") or "application/octet-stream"
+    return filename, mimetype
+
+
+def _is_text_matrix_file(filename: str, mimetype: str) -> bool:
+    lower_name = filename.lower()
+    lower_mime = mimetype.lower().split(";", 1)[0].strip()
+    if lower_mime.startswith(_TEXT_MIMETYPE_PREFIXES) or lower_mime in _TEXT_MIMETYPES:
+        return True
+    return any(lower_name.endswith(ext) for ext in _TEXT_FILE_EXTENSIONS)
+
+
+def _is_markitdown_matrix_file(filename: str, mimetype: str) -> bool:
+    lower_name = filename.lower()
+    lower_mime = mimetype.lower().split(";", 1)[0].strip()
+    if lower_mime in _MARKITDOWN_MIMETYPES:
+        return True
+    return any(lower_name.endswith(ext) for ext in _MARKITDOWN_FILE_EXTENSIONS)
+
+
+def _decode_matrix_file_text(data: bytes) -> tuple[str, bool]:
+    """Decode downloaded Matrix file bytes for prompt use.
+
+    Returns ``(text, truncated)``.
+    """
+    truncated = len(data) > _MAX_MATRIX_FILE_TEXT_BYTES
+    limited = data[:_MAX_MATRIX_FILE_TEXT_BYTES]
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        try:
+            return limited.decode(encoding), truncated
+        except UnicodeDecodeError:
+            continue
+    return limited.decode("utf-8", errors="replace"), truncated
+
+
+def _convert_matrix_file_markdown(data: bytes, filename: str) -> tuple[Optional[str], Optional[str]]:
+    """Convert a binary attachment to Markdown via optional MarkItDown.
+
+    Returns ``(markdown, error)``. ``error`` is user-facing and short.
+    """
+    try:
+        from markitdown import MarkItDown  # type: ignore
+    except Exception:
+        return None, "MarkItDown ist nicht installiert."
+
+    suffix = os.path.splitext(filename)[1]
+    temp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            f.write(data)
+            temp_path = f.name
+        converter = MarkItDown()
+        convert_local = getattr(converter, "convert_local", None)
+        result = convert_local(temp_path) if convert_local else converter.convert(temp_path)
+        text = getattr(result, "text_content", None) or str(result)
+        return text.strip(), None
+    except Exception as exc:
+        logger.warning("Matrix: MarkItDown conversion failed for %s: %s", filename, exc)
+        return None, f"MarkItDown konnte die Datei nicht konvertieren: {exc}"
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 _GREY = "#888888"
@@ -793,6 +895,88 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
         _spawn(_on_audio_task(room, event))
 
+    async def _on_file_task(room: MatrixRoom, event: RoomMessageFile) -> None:
+        """Handle Matrix file messages by downloading text-like files for the agent."""
+        mxc_url = event.url
+        if not mxc_url:
+            return
+
+        filename, mimetype = _matrix_file_info(event)
+        logger.info(
+            "Matrix: file message in %s from %s: %s (%s)",
+            room.room_id,
+            event.sender,
+            filename,
+            mimetype,
+        )
+
+        thread_id = _resolve_thread_root(getattr(event, "source", None), thread_events)
+        thread_id = _auto_thread(event.event_id, thread_id)
+        _remember_thread_event(event.event_id, thread_id)
+
+        can_decode_text = _is_text_matrix_file(filename, mimetype)
+        can_convert_markdown = _is_markitdown_matrix_file(filename, mimetype)
+        if not can_decode_text and not can_convert_markdown:
+            await _handle(
+                room,
+                (
+                    "[Datei empfangen]\n"
+                    f"Name: {filename}\n"
+                    f"MIME-Type: {mimetype}\n"
+                    "Die Datei ist kein erkennbares Textformat und wurde nicht inhaltlich gelesen."
+                ),
+                thread_id=thread_id,
+            )
+            return
+
+        resp = await client.download(mxc_url)
+        if not isinstance(resp, DownloadResponse):
+            logger.warning("Matrix: failed to download file %s: %s", filename, resp)
+            return
+
+        actual_mimetype = resp.content_type or mimetype
+        if can_decode_text:
+            text, truncated = _decode_matrix_file_text(resp.body)
+            format_label = "Text"
+            suffix = "\n\n[Hinweis: Dateiinhalt wurde wegen Groesse gekuerzt.]" if truncated else ""
+        else:
+            text, error = _convert_matrix_file_markdown(resp.body, filename)
+            if error:
+                await _handle(
+                    room,
+                    (
+                        "[Datei empfangen]\n"
+                        f"Name: {filename}\n"
+                        f"MIME-Type: {actual_mimetype}\n"
+                        f"{error}"
+                    ),
+                    thread_id=thread_id,
+                )
+                return
+            format_label = "Markdown"
+            suffix = ""
+
+        await _handle(
+            room,
+            (
+                "[Datei empfangen]\n"
+                f"Name: {filename}\n"
+                f"MIME-Type: {actual_mimetype}\n"
+                f"Konvertiert als: {format_label}\n\n"
+                "Inhalt:\n"
+                f"```markdown\n{text}\n```"
+                f"{suffix}"
+            ),
+            thread_id=thread_id,
+        )
+
+    async def on_file(room: MatrixRoom, event: RoomMessageFile) -> None:
+        if event.sender == client.user_id:
+            return
+        if not event.url:
+            return
+        _spawn(_on_file_task(room, event))
+
     async def on_call_invite(room: MatrixRoom, event: CallInviteEvent) -> None:
         if event.sender == client.user_id:
             return
@@ -920,6 +1104,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         client.add_event_callback(on_message, RoomMessageText)
         client.add_event_callback(on_image, RoomMessageImage)
         client.add_event_callback(on_audio, RoomMessageAudio)
+        client.add_event_callback(on_file, RoomMessageFile)
         client.add_event_callback(on_call_invite, CallInviteEvent)
         client.add_event_callback(on_call_candidates, CallCandidatesEvent)
         client.add_event_callback(on_call_hangup, CallHangupEvent)
