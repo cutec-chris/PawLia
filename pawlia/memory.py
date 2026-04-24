@@ -165,9 +165,6 @@ class MemoryManager:
     def _summary_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "context_summary.md")
 
-    def _model_override_path(self, user_id: str) -> str:
-        return os.path.join(self._memory_dir(user_id), "model_override.txt")
-
     def _agent_overrides_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "agent_overrides.yaml")
 
@@ -182,9 +179,6 @@ class MemoryManager:
 
     def _thread_daily_path(self, user_id: str, thread_id: str, date_str: str) -> str:
         return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_{date_str}.md")
-
-    def _thread_model_path(self, user_id: str, thread_id: str) -> str:
-        return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_model.txt")
 
     def _thread_agent_overrides_path(self, user_id: str, thread_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_agents.yaml")
@@ -338,10 +332,6 @@ class MemoryManager:
         session.agent_overrides = self._clean_agent_overrides(
             self._read_yaml(self._agent_overrides_path(user_id))
         )
-        if not session.agent_overrides:
-            override = self._read(self._model_override_path(user_id)).strip()
-            if override:
-                session.agent_overrides = {"chat": override}
         self._sync_legacy_model_fields(session)
         voice = self._read(self._voice_override_path(user_id)).strip()
         session.voice_override = voice or None
@@ -354,30 +344,14 @@ class MemoryManager:
         return dict(session.agent_overrides)
 
     def get_thread_agent_overrides(self, session: Session, thread_id: str) -> Dict[str, Any]:
-        if thread_id not in session.thread_agent_overrides:
-            session.thread_agent_overrides[thread_id] = self._clean_agent_overrides(
-                self._read_yaml(self._thread_agent_overrides_path(session.user_id, thread_id))
-            )
-            self._sync_legacy_model_fields(session)
-        return dict(session.thread_agent_overrides[thread_id])
+        return self.get_agent_overrides(session)
 
     def effective_agent_overrides(
         self,
         session: Session,
         thread_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        merged = dict(session.agent_overrides)
-        if not merged and session.model_override:
-            merged["chat"] = session.model_override
-        if thread_id:
-            legacy_thread = session.thread_model_overrides.get(thread_id)
-            if legacy_thread:
-                merged = self._deep_merge_agent_overrides(merged, {"chat": legacy_thread})
-            merged = self._deep_merge_agent_overrides(
-                merged,
-                self.get_thread_agent_overrides(session, thread_id),
-            )
-        return self._clean_agent_overrides(merged)
+        return self._clean_agent_overrides(dict(session.agent_overrides))
 
     def get_agent_override_value(
         self,
@@ -396,12 +370,8 @@ class MemoryManager:
         thread_id: Optional[str] = None,
     ) -> None:
         cleaned = self._clean_agent_overrides(overrides or {})
-        if thread_id:
-            session.thread_agent_overrides[thread_id] = cleaned
-            path = self._thread_agent_overrides_path(session.user_id, thread_id)
-        else:
-            session.agent_overrides = cleaned
-            path = self._agent_overrides_path(session.user_id)
+        session.agent_overrides = cleaned
+        path = self._agent_overrides_path(session.user_id)
 
         if cleaned:
             self._write_yaml(path, cleaned)
@@ -417,10 +387,7 @@ class MemoryManager:
         *,
         thread_id: Optional[str] = None,
     ) -> None:
-        target = (
-            self.get_thread_agent_overrides(session, thread_id)
-            if thread_id else self.get_agent_overrides(session)
-        )
+        target = self.get_agent_overrides(session)
         parts = [part for part in path.split(".") if part]
         if not parts:
             return
@@ -442,12 +409,6 @@ class MemoryManager:
     def set_model_override(self, session: Session, model: Optional[str]) -> None:
         """Persist a model override for this session.  Pass None to clear."""
         self.set_agent_override_value(session, "chat", model)
-        legacy_path = self._model_override_path(session.user_id)
-        if model:
-            with open(legacy_path, "w", encoding="utf-8") as f:
-                f.write(model)
-        elif os.path.exists(legacy_path):
-            os.remove(legacy_path)
 
     def set_voice_override(self, session: Session, voice: Optional[str]) -> None:
         """Persist a TTS voice override for this session.  Pass None to clear."""
@@ -477,29 +438,13 @@ class MemoryManager:
 
     def get_thread_model_override(self, session: Session, thread_id: str) -> Optional[str]:
         """Return the model override for a thread, loading from disk on first access."""
-        if thread_id not in session.thread_agent_overrides:
-            overrides = self._clean_agent_overrides(
-                self._read_yaml(self._thread_agent_overrides_path(session.user_id, thread_id))
-            )
-            if not overrides:
-                val = self._read(self._thread_model_path(session.user_id, thread_id)).strip()
-                if val:
-                    overrides = {"chat": val}
-            session.thread_agent_overrides[thread_id] = overrides
-            self._sync_legacy_model_fields(session)
-        return session.thread_model_overrides.get(thread_id)
+        return session.model_override
 
     def set_thread_model_override(
         self, session: Session, thread_id: str, model: Optional[str]
     ) -> None:
         """Persist a model override for a specific thread.  Pass None to clear."""
-        self.set_agent_override_value(session, "chat", model, thread_id=thread_id)
-        legacy_path = self._thread_model_path(session.user_id, thread_id)
-        if model:
-            with open(legacy_path, "w", encoding="utf-8") as f:
-                f.write(model)
-        elif os.path.exists(legacy_path):
-            os.remove(legacy_path)
+        self.set_model_override(session, model)
 
     def toggle_private_thread(self, session: Session, thread_id: str) -> bool:
         """Toggle private mode for a thread. Returns the new state."""

@@ -141,7 +141,7 @@ session/{user_id}/
 │   │   ├── memory.md                # persistent user facts
 │   │   ├── context_summary.md       # LLM-generated conversation summary
 │   │   ├── thread_XXX_2026-03-15.md  # per-thread logs
-│   │   └── model_override.txt       # session-level model override
+│   │   └── agent_overrides.yaml     # session-level agent/model overrides
 │   ├── calendar/                   # Full Calendar plugin events
 │   │   └── 2026-04-10 Meeting.md   # one .md per event (frontmatter)
 │   ├── tasks.md                    # Obsidian Tasks plugin format

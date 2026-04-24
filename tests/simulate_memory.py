@@ -420,10 +420,10 @@ def test_model_override(tmp: str):
     mm.set_model_override(s, "qwen3:4b")
     check("Override in session", s.model_override == "qwen3:4b")
 
-    path = mm._model_override_path("model_user")
+    path = mm._agent_overrides_path("model_user")
     check("Override file exists", os.path.isfile(path))
-    with open(path, encoding="utf-8") as f:
-        check("Override file content", f.read().strip() == "qwen3:4b")
+    overrides = mm._read_yaml(path)
+    check("Override file content", overrides.get("chat") == "qwen3:4b")
 
     mm2 = MemoryManager(tmp)
     s2 = mm2.load_session("model_user")
@@ -437,18 +437,16 @@ def test_model_override(tmp: str):
     mm.set_thread_model_override(s, "t1", "llama3:8b")
     check("Thread override set", mm.get_thread_model_override(s, "t1") == "llama3:8b")
 
-    tpath = mm._thread_model_path("model_user", "t1")
-    check("Thread override file exists", os.path.isfile(tpath))
+    tpath = mm._thread_agent_overrides_path("model_user", "t1")
+    check("No thread override file", not os.path.isfile(tpath))
+    check("Session override updated by thread call", mm.get_agent_override_value(s, "chat") == "llama3:8b")
 
     mm.set_thread_model_override(s, "t1", None)
     check("Thread override cleared", mm.get_thread_model_override(s, "t1") is None)
 
-    # Multiple thread overrides
     mm.set_thread_model_override(s, "t2", "modelA")
-    mm.set_thread_model_override(s, "t3", "modelB")
-    check("Thread t2 override", mm.get_thread_model_override(s, "t2") == "modelA")
-    check("Thread t3 override", mm.get_thread_model_override(s, "t3") == "modelB")
-    check("Unset thread returns None", mm.get_thread_model_override(s, "t4") is None)
+    check("Thread call updates session model", s.model_override == "modelA")
+    check("Other thread sees same session model", mm.get_thread_model_override(s, "t3") == "modelA")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1078,7 +1076,7 @@ def test_memory_indexer_find_logs(tmp: str):
 
     for name in ["2026-03-18.md", "2026-03-19.md", "2026-03-20.md",
                   "memory.md", "context_summary.md", "thread_abc_2026-03-20.md",
-                  "notes.txt", "model_override.txt"]:
+                  "notes.txt", "agent_overrides.yaml"]:
         with open(os.path.join(mem_dir, name), "w") as f:
             f.write("test content")
 

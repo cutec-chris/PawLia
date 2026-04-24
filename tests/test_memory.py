@@ -173,10 +173,38 @@ class TestMemoryManager:
             mm.set_model_override(session, "fast")
             assert session.model_override == "fast"
             assert mm.get_agent_override_value(session, "chat") == "fast"
+            assert os.path.isfile(mm._agent_overrides_path("u1"))
 
             mm.set_model_override(session, None)
             assert session.model_override is None
             assert mm.get_agent_override_value(session, "chat") is None
+
+    def test_clearing_chat_override_removes_yaml_without_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.set_agent_override_value(session, "chat", "fast")
+            assert os.path.isfile(mm._agent_overrides_path("u1"))
+
+            mm.set_agent_override_value(session, "chat", None)
+            assert not os.path.exists(mm._agent_overrides_path("u1"))
+
+            mm2 = self._make_mm(tmpdir)
+            session2 = mm2.load_session("u1")
+            assert session2.model_override is None
+            assert mm2.get_agent_override_value(session2, "chat") is None
+
+    def test_thread_model_override_reuses_session_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.set_thread_model_override(session, "t1", "fast")
+            assert session.model_override == "fast"
+            assert mm.get_thread_model_override(session, "t1") == "fast"
+            assert os.path.isfile(mm._agent_overrides_path("u1"))
+            assert not os.path.exists(mm._thread_agent_overrides_path("u1", "t1"))
 
     def test_append_persists_to_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -140,7 +140,7 @@ def handle_model_command(
             app.memory.set_model_override(session, None)
         return ModelCommandResult(
             "cleared", "(default)", ctx_label,
-            available=available, invalidate_agent=not thread_id,
+            available=available, invalidate_agent=True,
         )
 
     if thread_id:
@@ -149,7 +149,7 @@ def handle_model_command(
         app.memory.set_model_override(session, new_model)
     return ModelCommandResult(
         "set", new_model, ctx_label,
-        available=available, invalidate_agent=not thread_id,
+        available=available, invalidate_agent=True,
     )
 
 
@@ -227,8 +227,8 @@ def handle_agent_command(
             path=path,
             value="(default)",
             available=available,
-            overrides=app.memory.get_thread_agent_overrides(session, thread_id) if thread_id else app.memory.get_agent_overrides(session),
-            invalidate_agent=not thread_id,
+            overrides=app.memory.get_agent_overrides(session),
+            invalidate_agent=True,
         )
 
     app.memory.set_agent_override_value(session, path, value, thread_id=thread_id)
@@ -238,8 +238,8 @@ def handle_agent_command(
         path=path,
         value=value,
         available=available,
-        overrides=app.memory.get_thread_agent_overrides(session, thread_id) if thread_id else app.memory.get_agent_overrides(session),
-        invalidate_agent=not thread_id,
+        overrides=app.memory.get_agent_overrides(session),
+        invalidate_agent=True,
     )
 
 
