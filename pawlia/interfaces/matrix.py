@@ -410,7 +410,6 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, handle_model_command,
-        handle_agent_command, format_agent_overrides,
         list_available_models, preview_text, format_private_toggle,
         format_bg_enqueue, bytes_to_data_uri, handle_reload_command,
     )
@@ -495,7 +494,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     async def _handle_model_cmd(
         room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
     ) -> None:
-        """Handle '//model [name]' — show or change the model for this context."""
+        """Handle '//model [model]' or '//model [path] [model]'."""
         ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
         result = handle_model_command(app, session_id, args, thread_id=thread_id, ctx_label=ctx_label)
 
@@ -514,44 +513,16 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         avail = ", ".join(f"`{m}`" for m in result.available) or "_(keine konfiguriert)_"
         if result.action == "show":
             await _reply(
-                f"**Aktives Modell** [{result.ctx_label}]: `{result.model}`\n"
+                f"**Default-Modell** [{result.ctx_label}]: `{result.model}`\n"
                 f"**Verfügbar:** {avail}\n"
-                f"_Wechseln: `//model <name>` — Override löschen: `//model off`_"
+                f"_Default setzen: `//model <modell>` — Agent setzen: `//model <pfad> <modell>` — Löschen: `//model <pfad> off`_"
             )
-        elif result.action == "cleared":
-            await _reply(f"✓ Model-Override für **{result.ctx_label}** entfernt — fällt auf Default zurück.")
-        else:
-            await _reply(f"✓ Modell für **{result.ctx_label}** auf `{result.model}` gesetzt.")
-
-    async def _handle_agent_cmd(
-        room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
-    ) -> None:
-        ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
-        result = handle_agent_command(app, session_id, args, thread_id=thread_id, ctx_label=ctx_label)
-
-        if result.invalidate_agent:
-            agent_cache.invalidate(session_id)
-
-        async def _reply(text: str) -> None:
-            if thread_id:
-                await _send_thread_reply(room.room_id, thread_id, text)
-            else:
-                await _send_text(room.room_id, text)
-
-        if result.action == "show_all":
-            await _reply(
-                f"**Agent Overrides** [{result.ctx_label}]\n"
-                f"{format_agent_overrides(result.overrides)}\n"
-                "_Setzen: `//agent <path> <wert>` — Löschen: `//agent <path> off`_"
-            )
-        elif result.action == "show_path":
-            await _reply(f"**Agent Override** `{result.path}` [{result.ctx_label}]: `{result.value}`")
         elif result.action == "invalid_path":
-            await _reply("Ungültiger Agent-Pfad. Erlaubt: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`.")
+            await _reply("Ungültiger Model-Pfad. Erlaubt: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`.")
         elif result.action == "cleared":
-            await _reply(f"✓ Agent-Override `{result.path}` für **{result.ctx_label}** entfernt.")
+            await _reply(f"✓ Model-Override `{result.path}` für **{result.ctx_label}** entfernt.")
         else:
-            await _reply(f"✓ Agent-Override `{result.path}` für **{result.ctx_label}** auf `{result.value}` gesetzt.")
+            await _reply(f"✓ Model-Override `{result.path}` für **{result.ctx_label}** auf `{result.model}` gesetzt.")
 
     async def _handle(
         room: MatrixRoom,
@@ -598,11 +569,6 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         model_args = _cmd(text, "model")
         if model_args is not None:
             await _handle_model_cmd(room, session_id, model_args, thread_id)
-            return
-
-        agent_args = _cmd(text, "agent")
-        if agent_args is not None:
-            await _handle_agent_cmd(room, session_id, agent_args, thread_id)
             return
 
         if _cmd(text, "clear") is not None:
@@ -746,7 +712,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 avail = ", ".join(f"`{m}`" for m in list_available_models(app))
                 hint = (
                     f"\n\n_Aktiver Model-Override: `{override}`. "
-                    f"Wechseln mit `//model <name>` oder löschen mit `//model off`._"
+                    f"Wechseln mit `//model chat <modell>` oder löschen mit `//model chat off`._"
                     + (f"\n_Verfügbar: {avail}_" if avail else "")
                 )
             await _send(f"Fehler: {e}{hint}")
