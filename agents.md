@@ -135,12 +135,12 @@ Tools extend `Tool(ABC)` and register in `ToolRegistry`. Each tool provides `as_
 
 ```
 session/{user_id}/
+├── session_version.txt             # on-disk log/session format version
 ├── workspace/                      # Obsidian vault
 │   ├── memory/
-│   │   ├── 2026-03-15.md           # daily chat log (append-only)
+│   │   ├── 2026-03-15.md           # daily chat log (main + embedded thread sections)
 │   │   ├── memory.md                # persistent user facts
 │   │   ├── context_summary.md       # LLM-generated conversation summary
-│   │   ├── thread_XXX_2026-03-15.md  # per-thread logs
 │   │   └── agent_overrides.yaml     # session-level agent/model overrides
 │   ├── calendar/                   # Full Calendar plugin events
 │   │   └── 2026-04-10 Meeting.md   # one .md per event (frontmatter)

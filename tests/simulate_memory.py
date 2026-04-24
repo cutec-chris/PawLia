@@ -307,12 +307,13 @@ def test_threads(tmp: str):
     check("Thread exchange content", thread_ctx[0] == ("Thread Frage", "Thread Antwort", None))
     check("Main session still 3 exchanges", s.exchange_count == 3)
 
-    thread_path = mm._thread_daily_path("thread_user", "thread_abc", s.current_date_str)
-    check("Thread log file exists", os.path.isfile(thread_path))
-    with open(thread_path, encoding="utf-8") as f:
-        thread_disk = f.read()
-    check("Thread log contains thread text", "Thread Frage" in thread_disk)
-    check("Main exchanges not in thread log", "Main 1" not in thread_disk)
+    daily_path = mm._daily_path("thread_user", s.current_date_str)
+    check("Daily log file exists", os.path.isfile(daily_path))
+    with open(daily_path, encoding="utf-8") as f:
+        daily_disk = f.read()
+    check("Thread section contains thread text", "Thread Frage" in daily_disk)
+    check("Main exchanges preserved in daily log", "Main 1" in daily_disk)
+    check("Thread section marker written", "PAWLIA_THREAD_SECTION" in daily_disk)
 
     thread_ctx2 = mm.get_thread_context(s, "thread_xyz")
     check("Second thread also starts empty", len(thread_ctx2) == 0)
@@ -335,7 +336,7 @@ def test_private_threads(tmp: str):
     mm.get_thread_context(s, "secret_thread")
     mm.append_thread_exchange(s, "secret_thread", "Secret Q", "Secret A")
 
-    thread_path = mm._thread_daily_path("pth_user", "secret_thread", s.current_date_str)
+    thread_path = mm._daily_path("pth_user", s.current_date_str)
     disk = ""
     if os.path.isfile(thread_path):
         with open(thread_path, encoding="utf-8") as f:
@@ -402,6 +403,31 @@ def test_thread_reload_from_disk(tmp: str):
     check("Thread exchanges reloaded", len(ctx) == 2)
     check("Thread Q1 reloaded", ctx[0] == ("Thread Q1", "Thread A1", None))
     check("Thread Q2 reloaded", ctx[1] == ("Thread Q2", "Thread A2", None))
+
+
+def test_thread_migration_to_daily(tmp: str):
+    section("Thread migration to daily")
+    from pawlia.memory import MemoryManager
+
+    mm = MemoryManager(tmp)
+    s = mm.load_session("migrate_user")
+    legacy_path = mm._thread_daily_path("migrate_user", "topic_old", s.current_date_str)
+    with open(legacy_path, "w", encoding="utf-8") as f:
+        f.write("[09:00:00] User: Alt\nAssistant: Historie\n")
+
+    version_path = mm._session_version_path("migrate_user")
+    if os.path.isfile(version_path):
+        os.remove(version_path)
+
+    mm2 = MemoryManager(tmp)
+    s2 = mm2.load_session("migrate_user")
+    daily_path = mm2._daily_path("migrate_user", s2.current_date_str)
+    with open(daily_path, encoding="utf-8") as f:
+        daily_disk = f.read()
+    check("Migrated thread section exists", "## Thread topic_old" in daily_disk)
+    check("Legacy thread removed", not os.path.isfile(legacy_path))
+    ctx = mm2.get_thread_context(s2, "topic_old")
+    check("Migrated thread exchange restored", ctx[0] == ("Alt", "Historie", None))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2454,6 +2480,7 @@ def main():
         test_thread_seed_limit(os.path.join(tmp, "t_seedlimit"))
         test_empty_thread_no_seed(os.path.join(tmp, "t_emptyseed"))
         test_thread_reload_from_disk(os.path.join(tmp, "t_threadreload"))
+        test_thread_migration_to_daily(os.path.join(tmp, "t_threadmigrate"))
         test_model_override(os.path.join(tmp, "t_model"))
         test_summarization_trigger(os.path.join(tmp, "t_sumtrig"))
         test_summarization_boundary(os.path.join(tmp, "t_sumbound"))
