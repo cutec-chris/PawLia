@@ -9,6 +9,7 @@ incorporates the result into its final response.
 import json
 import logging
 import re
+import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Callback types
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 
 _SENTENCE_RE = re.compile(r'[.!?…]\s')
 _RE_CODE_BLOCK = re.compile(r'```[^\n]*\n(.*?)(?:```|$)', re.DOTALL)
+_RE_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
 
 _FAKE_TOOL_CALL_NUDGE = (
     "You wrote a tool call as plain text or a code block instead of using the "
@@ -814,23 +816,105 @@ class ChatAgent(BaseAgent):
         """Return the name of the active model override, or ``None``."""
         if self.memory and self.session:
             return self.memory.get_agent_override_value(self.session, "chat", thread_id=thread_id)
-        if self.session and self.session.model_override:
-            return self.session.model_override
         return None
 
-    def _is_fake_tool_call(self, response: AIMessage) -> bool:
-        """Return True if the LLM wrote a tool call as text instead of calling it.
+    def _extract_fake_skill_calls(self, response: AIMessage) -> List[Dict[str, Any]]:
+        """Recover text-form skill calls from models that miss function calling.
 
-        Detects fenced code blocks whose first token matches a known skill name.
-        Only relevant when tools are bound and no real tool_calls are present.
+        Some OpenAI-compatible providers accept a tools schema but still let
+        smaller models emit the tool call as plain text, usually as
+        ``<tool_call>{...}</tool_call>`` or a fenced JSON block.  Treat those as
+        real skill calls instead of spending another turn asking the model to
+        retry the exact same shape.
         """
+        if not self._skill_specs or response.tool_calls:
+            return []
+        content = response.content if isinstance(response.content, str) else ""
+
+        calls: List[Dict[str, Any]] = []
+
+        def _append_from_obj(obj: Any) -> None:
+            if isinstance(obj, list):
+                for item in obj:
+                    _append_from_obj(item)
+                return
+            if not isinstance(obj, dict):
+                return
+
+            name = str(obj.get("name") or obj.get("tool") or obj.get("function") or "").strip()
+            if not name:
+                return
+            skill_name = self._resolve_skill_name(name)
+            if skill_name not in self.skills:
+                return
+
+            raw_args = obj.get("args")
+            if raw_args is None:
+                raw_args = obj.get("arguments")
+            if raw_args is None:
+                raw_args = obj.get("parameters")
+            args = self._normalize_skill_args(raw_args)
+            if "query" not in args:
+                # Common shorthand: {"name": "searxng", "query": "..."}
+                args = self._normalize_skill_args(obj)
+            if "query" not in args:
+                return
+
+            calls.append({
+                "id": obj.get("id") or f"fake_{uuid.uuid4().hex[:8]}",
+                "name": skill_name,
+                "args": args,
+            })
+
+        snippets: List[str] = [m.group(1).strip() for m in _RE_TOOL_CALL_TAG.finditer(content)]
+        snippets.extend(m.group(1).strip() for m in _RE_CODE_BLOCK.finditer(content))
+
+        stripped = content.strip()
+        if stripped.startswith(("{", "[")):
+            snippets.append(stripped)
+
+        for snippet in snippets:
+            if not snippet:
+                continue
+            try:
+                _append_from_obj(json.loads(snippet))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                # Fall through to command-like fenced blocks below.
+                pass
+
+        if calls:
+            return calls
+
+        skill_names = set(self.skills.keys())
+        for match in _RE_CODE_BLOCK.finditer(content):
+            block = match.group(1).strip()
+            first_token = block.split()[0] if block else ""
+            skill_name = self._resolve_skill_name(first_token)
+            if skill_name in skill_names:
+                query = block[len(first_token):].strip()
+                if query:
+                    calls.append({
+                        "id": f"fake_{uuid.uuid4().hex[:8]}",
+                        "name": skill_name,
+                        "args": {"query": query},
+                    })
+
+        return calls
+
+    def _is_fake_tool_call(self, response: AIMessage) -> bool:
+        """Return True if the LLM wrote a skill call as text."""
+        if self._extract_fake_skill_calls(response):
+            return True
         if not self._skill_specs or response.tool_calls:
             return False
         content = response.content if isinstance(response.content, str) else ""
+        if "<tool_call>" in content:
+            return True
         skill_names = set(self.skills.keys())
         for match in _RE_CODE_BLOCK.finditer(content):
-            first_token = match.group(1).strip().split()[0] if match.group(1).strip() else ""
-            if first_token in skill_names:
+            block = match.group(1).strip()
+            first_token = block.split()[0] if block else ""
+            if self._resolve_skill_name(first_token) in skill_names:
                 return True
         return False
 
@@ -857,6 +941,14 @@ class ChatAgent(BaseAgent):
         retry_messages = list(messages)
         for attempt in range(_MAX_FAKE_TOOL_RETRIES):
             response = await self._invoke(retry_messages, llm=llm)
+            fake_calls = self._extract_fake_skill_calls(response)
+            if fake_calls:
+                self.logger.warning(
+                    "Recovered %d text-form skill call(s) from model output",
+                    len(fake_calls),
+                )
+                response.tool_calls = fake_calls
+                return response, retry_messages
             if not self._is_fake_tool_call(response):
                 return response, retry_messages
             self.logger.warning(
