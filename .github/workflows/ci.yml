@@ -18,6 +18,10 @@ jobs:
       with:
         python-version: '3.12'
         cache: 'pip'
+        cache-dependency-path: |
+          requirements.txt
+          requirements-test.txt
+          constraints.txt
 
     - name: Create minimal config for CI
       run: |
@@ -35,8 +39,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install -r requirements.txt
-        python -m pip install pytest pytest-asyncio numpy
+        python -m pip install -r requirements-test.txt
 
     - name: Run tests
       run: python -m pytest tests/ -v

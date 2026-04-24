@@ -26,7 +26,7 @@ jobs:
       id: pip-cache
       with:
         path: ${{ steps.python-path.outputs.site }}
-        key: site-packages-${{ hashFiles('requirements.txt') }}
+        key: site-packages-${{ hashFiles('requirements.txt', 'requirements-test.txt', 'constraints.txt') }}
 
     - name: Create minimal config for CI
       run: |
@@ -45,8 +45,7 @@ jobs:
       if: steps.pip-cache.outputs.cache-hit != 'true'
       run: |
         python3 -m pip install --upgrade pip --break-system-packages
-        python3 -m pip install -r requirements.txt --break-system-packages
-        python3 -m pip install pytest pytest-asyncio numpy --break-system-packages
+        python3 -m pip install -r requirements-test.txt --break-system-packages
 
     - name: Run tests
       run: |
