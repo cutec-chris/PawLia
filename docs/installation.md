@@ -79,17 +79,35 @@ python -m pawlia --debug          # verbose logging
 
 See `config.sample.yaml` for all available options with inline comments.
 
-### LLM providers
+### Providers and backends
 
-Any OpenAI-compatible API works. Define one or more providers and reference them from model definitions:
+Providers define both the transport details and the backend type.
+
+- `backend: pawlia` or omitted: normal PawLia stack with `llm.py`, skills, local routing
+- `backend: hermes`: PawLia forwards turns to a Hermes API server and keeps local logs in sync
+
+For normal PawLia providers, any OpenAI-compatible API works:
 
 ```yaml
 providers:
   ollama:
+    backend: pawlia   # optional; default if omitted
     apiBase: http://localhost:11434/v1
   groq:
+    backend: pawlia
     apiBase: https://api.groq.com/openai/v1
     apiKey: gsk_...
+```
+
+Hermes example:
+
+```yaml
+providers:
+  hermes_local:
+    backend: hermes
+    apiBase: http://127.0.0.1:8642/v1
+    apiKey: change-me
+    conversation_namespace: pawlia
 ```
 
 ### Models and agents
@@ -113,6 +131,8 @@ agents:
 ```
 
 Agent model values can be comma-separated. PawLia tries them in order and falls back automatically on invocation errors.
+
+When a selected model points at a Hermes provider, PawLia switches from its own skill stack to Hermes for that conversation turn. Daily logs and thread logs are still written by PawLia so Dream Wiki and local follow-up sessions continue to work on the same visible chat history.
 
 ### Enabling interfaces
 

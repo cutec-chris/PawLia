@@ -16,6 +16,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_openai import ChatOpenAI
+from pawlia.utils import run_sync_in_thread
 
 
 _RE_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
@@ -86,13 +87,13 @@ class BaseAgent(ABC):
                 return target.invoke(messages)
             except StopIteration as exc:
                 # Python 3.14+: StopIteration cannot propagate out of a thread
-                # into a Future; wrap it so asyncio.to_thread works.
+                # into a Future; wrap it so the async bridge can report it.
                 raise RuntimeError("LLM invoke exhausted iterator") from exc
 
         retries = 0
         while True:
             try:
-                return await asyncio.to_thread(_call)
+                return await run_sync_in_thread(_call)
             except Exception as exc:
                 error_str = str(exc)
                 # Detect "tool use failed" errors from OpenAI-compatible APIs.

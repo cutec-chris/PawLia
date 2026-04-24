@@ -1,10 +1,19 @@
 providers:
   ollama:
+    backend: pawlia
     apiBase: http://localhost:11434/v1
     apiKey: ollama
     timeout: 240
     keepAlive: -1
+  # hermes_local:
+  #   backend: hermes
+  #   apiBase: http://127.0.0.1:8642/v1
+  #   apiKey: change-me
+  #   timeout: 600
+  #   conversation_namespace: pawlia
+  #   store: true
   # groq:
+  #   backend: pawlia
   #   apiBase: https://api.groq.com/openai/v1
   #   apiKey: gsk_...
 
@@ -32,6 +41,9 @@ models:
   #   provider: ollama
   #   temperature: 0.3
   #   audio_input: true    # native audio — skips STT, sends audio directly to the model
+  # hermes:
+  #   model: hermes-agent
+  #   provider: hermes_local
 
 # Assign a model (by key) to each agent type.
 # You can provide multiple models comma-separated to enable runtime failover,

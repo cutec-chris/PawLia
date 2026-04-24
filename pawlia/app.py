@@ -16,6 +16,7 @@ from pawlia.tools.base import ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.skills.loader import AgentSkill, SkillLoader
 from pawlia.agents.chat import ChatAgent
+from pawlia.agents.router import RouterAgent
 from pawlia.agents.skill_runner import SkillRunnerAgent
 from pawlia.scheduler import Scheduler
 
@@ -166,25 +167,17 @@ class App:
             },
         )
 
-    def make_agent(self, user_id: str = "default", **kwargs) -> ChatAgent:
-        """Create a new ChatAgent for a user session.
+    def make_agent(self, user_id: str = "default", **kwargs) -> RouterAgent:
+        """Create a backend-dispatching agent for a user session.
 
-        Each agent gets its own SkillRunner factory bound to the user context.
-        Skills are scoped per user: bundled skills + this user's workspace skills.
-        Extra kwargs are forwarded to ChatAgent (e.g. on_interim).
+        The returned agent keeps PawLia's logging/memory layer stable while
+        routing each request to either the local ChatAgent stack or Hermes,
+        depending on the selected model's provider backend.
         """
         session = self.memory.load_session(user_id)
 
         # Build per-user skill set (bundled + user's own workspace skills)
         user_skills = self._build_user_skills(user_id)
-
-        # Resolve LLMs – honour per-session model override
-        if session.model_override:
-            chat_llm = self.llm.get_with_model(session.model_override)
-            vision_llm = chat_llm
-        else:
-            chat_llm = self.llm.get("chat")
-            vision_llm = self.llm.get("vision")
 
         def make_runner(skill: AgentSkill) -> SkillRunnerAgent:
             skill_config_root = self.config.get("skill-config") or {}
@@ -208,23 +201,37 @@ class App:
             user_skills.clear()
             user_skills.update(fresh)
 
-        agent = ChatAgent(
-            llm=chat_llm,
-            skills=user_skills,
-            skill_runner_factory=make_runner,
-            logger=self.logger.getChild(f"chat.{user_id}"),
+        def make_local_agent() -> ChatAgent:
+            chat_llm = self.llm.get("chat")
+            vision_llm = self.llm.get("vision")
+            agent = ChatAgent(
+                llm=chat_llm,
+                skills=user_skills,
+                skill_runner_factory=make_runner,
+                logger=self.logger.getChild(f"chat.{user_id}"),
+                memory=self.memory,
+                session=session,
+                vision_llm=vision_llm,
+                **kwargs,
+            )
+            # Let the agent resolve per-thread model overrides at run() time
+            agent._llm_resolver = self.llm.get_with_model
+            # Resolve config keys (e.g. "fast") to actual model names
+            agent._model_name_resolver = self.llm.resolve_model_name
+            # Let the ChatAgent re-discover this user's workspace skills after each skill call
+            agent._skills_refresher = refresh_user_skills
+            return agent
+
+        return RouterAgent(
+            user_id=user_id,
+            llm_factory=self.llm,
             memory=self.memory,
             session=session,
-            vision_llm=vision_llm,
-            **kwargs,
+            skills=user_skills,
+            local_agent_factory=make_local_agent,
+            logger=self.logger.getChild(f"router.{user_id}"),
+            on_interim=kwargs.get("on_interim"),
         )
-        # Let the agent resolve per-thread model overrides at run() time
-        agent._llm_resolver = self.llm.get_with_model
-        # Resolve config keys (e.g. "fast") to actual model names
-        agent._model_name_resolver = self.llm.resolve_model_name
-        # Let the ChatAgent re-discover this user's workspace skills after each skill call
-        agent._skills_refresher = refresh_user_skills
-        return agent
 
 
 def create_app(config_path: Optional[str] = None,

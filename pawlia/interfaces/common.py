@@ -166,18 +166,27 @@ def build_status(
     """
     session = app.memory.load_session(user_id)
 
-    # Model info
     model_override = session.model_override
     model_name = model_override or getattr(agent.llm, "model_name", None) or getattr(agent.llm, "model", "?")
     temperature = getattr(agent.llm, "temperature", None)
+    backend = getattr(agent.llm, "backend", "pawlia")
+    provider_name = getattr(agent.llm, "provider_name", None)
     # Context for thread or main
     if thread_id:
         exchanges = app.memory.get_thread_context(session, thread_id)
         thread_model = app.memory.get_thread_model_override(session, thread_id)
         if thread_model:
             model_name = thread_model
+            model_override = thread_model
     else:
         exchanges = session.exchanges
+
+    if hasattr(agent, "describe_backend"):
+        meta = agent.describe_backend(thread_id)
+        model_name = meta["selection"]
+        backend = meta["backend"]
+        provider_name = meta["provider_name"]
+        temperature = meta.get("temperature")
 
     # Estimate context size (chars → rough token estimate at ~4 chars/token)
     context_chars = sum(len(e[0]) + len(e[1]) for e in exchanges)
@@ -185,7 +194,10 @@ def build_status(
     estimated_tokens = (context_chars + summary_chars) // 4
 
     # Skills
-    skills = sorted(agent.skills.keys()) if agent.skills else []
+    if hasattr(agent, "list_skills"):
+        skills = agent.list_skills(thread_id)
+    else:
+        skills = sorted(agent.skills.keys()) if agent.skills else []
 
     # Idle time
     idle_seconds = (datetime.now() - session.last_activity).total_seconds()
@@ -194,6 +206,8 @@ def build_status(
         "user_id": user_id,
         "model": model_name,
         "model_override": model_override is not None,
+        "backend": backend,
+        "provider": provider_name,
         "temperature": temperature,
         "exchanges": len(exchanges),
         "context_chars": context_chars,
@@ -212,6 +226,9 @@ def format_status(status: Dict[str, Any]) -> str:
     """Format status dict as markdown (single source of truth)."""
     lines: List[str] = []
     lines.append(f"**Model:** `{status['model']}`" + (" _(override)_" if status["model_override"] else ""))
+    lines.append(f"**Backend:** `{status['backend']}`")
+    if status.get("provider"):
+        lines.append(f"**Provider:** `{status['provider']}`")
     if status["temperature"] is not None:
         lines.append(f"**Temp:** {status['temperature']}")
     ctx = "Thread" if status["thread_id"] else "Session"

@@ -545,7 +545,8 @@ async def _transcribe_local(audio_bytes: bytes, cfg: Dict, mime: str) -> Optiona
         finally:
             os.unlink(tmp_path)
 
-    return await asyncio.to_thread(_run)
+    from pawlia.utils import run_sync_in_thread
+    return await run_sync_in_thread(_run)
 
 
 # ---------------------------------------------------------------------------

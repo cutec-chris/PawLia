@@ -367,7 +367,8 @@ class Mem0Backend(RagBackend):
             raise RuntimeError("LLM busy — deferring memory embedding")
         memory = self._get_memory()
         # mem0.add() is synchronous and blocking — run in thread pool
-        await asyncio.to_thread(memory.add, text, user_id=doc_id)
+        from pawlia.utils import run_sync_in_thread
+        await run_sync_in_thread(memory.add, text, user_id=doc_id)
         self._indexed.add(doc_id)
 
     async def wait_for_indexed(
@@ -379,7 +380,8 @@ class Mem0Backend(RagBackend):
 
     async def query(self, question: str) -> str:
         memory = self._get_memory()
-        results = await asyncio.to_thread(memory.search, query=question, limit=10)
+        from pawlia.utils import run_sync_in_thread
+        results = await run_sync_in_thread(memory.search, query=question, limit=10)
 
         # mem0 returns {"results": [...]} where each item has a "memory" key
         items = results if isinstance(results, list) else results.get("results", [])
@@ -736,7 +738,8 @@ class MarkdownTopicBackend(RagBackend):
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
 
-        result = await asyncio.to_thread(_do)
+        from pawlia.utils import run_sync_in_thread
+        result = await run_sync_in_thread(_do)
 
         if provider == "ollama":
             content = result.get("message", {}).get("content", "")

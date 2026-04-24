@@ -804,7 +804,7 @@ class CallSession:
             return
 
         try:
-            call_prompt = self._agent.build_system_prompt(mode="call")
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
             greeting_input = (
                 "[SYSTEM: A voice call was just accepted. "
                 "Greet the caller with a short, friendly greeting. "
@@ -1082,7 +1082,7 @@ class CallSession:
 
         try:
             first_sentence_received = False
-            call_prompt = self._agent.build_system_prompt(mode="call")
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
 
             async def _on_sentence(sentence: str) -> None:
                 """Synthesize and enqueue one sentence for immediate TTS playback."""

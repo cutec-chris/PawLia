@@ -17,7 +17,7 @@ PawLia brings persistent memory, multi-user sessions, and extensible skills to (
 
 ## Why PawLia?
 
-- **Runs locally** — any OpenAI-compatible backend: Ollama, vLLM, Groq, OpenRouter
+- **Flexible backends** — use PawLia's built-in agent stack (`backend: pawlia`, default) or delegate chats to Hermes-Agent (`backend: hermes`)
 - **Meets you where you are** — Telegram, Matrix, Web UI, CLI, or HTTP webhook, all at once
 - **Talk to it** — voice messages are transcribed automatically; Matrix VoIP calls let you speak to PawLia directly
 - **Threads** — isolate side conversations in Telegram forum topics or Matrix threads, each with its own context and model
@@ -66,6 +66,7 @@ Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and
 - [Installation](docs/installation.md) — Docker setup, first steps
 - [Interfaces](docs/interfaces.md) — CLI, Telegram, Matrix, Webhook, sessions, scheduler
 - [Configuration](docs/config.md) — providers, models, agents, fallback chain
+- [Hermes Backend](docs/hermes.md) — Hermes setup, provider config, logging behavior
 - [Skills](docs/skills.md) — bundled skills, custom skills, SKILL.md format
 - [Automation](docs/automation.md) — events, tasks, reminders, scheduled jobs, Obsidian vault
 - [Commands](docs/commands.md) — `/thread`, `/model`, `/private`, `/reload`

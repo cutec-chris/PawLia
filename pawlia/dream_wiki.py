@@ -115,7 +115,8 @@ async def _llm_call(cfg: dict, system_prompt: str, user_prompt: str) -> str:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
 
-    result = await asyncio.to_thread(_do)
+    from pawlia.utils import run_sync_in_thread
+    result = await run_sync_in_thread(_do)
 
     if provider == "ollama":
         content = result.get("message", {}).get("content", "")

@@ -274,7 +274,7 @@ class LLMFactory:
 
     def get(self, agent_type: str = "chat") -> Any:
         """Return a (cached) LLM for the given agent type."""
-        model_cfgs = self._resolve_agent_candidates(agent_type)
+        model_cfgs = self._resolve_agent_candidates(agent_type, backend="pawlia")
         if len(model_cfgs) == 1:
             return self._get_or_build_model(model_cfgs[0])
 
@@ -296,6 +296,46 @@ class LLMFactory:
             return cfg["model"]
         return name
 
+    def get_model_config(self, model_name: str) -> Dict[str, Any]:
+        """Resolve *model_name* to its full model config without building an LLM."""
+        if model_name in self.models:
+            return dict(self.models[model_name])
+
+        for _key, cfg in self.models.items():
+            if cfg.get("model") == model_name:
+                return dict(cfg)
+
+        default = self._resolve_agent("default")
+        return {**default, "model": model_name}
+
+    def get_provider_name_for_model(self, model_name: str) -> str:
+        model_cfg = self.get_model_config(model_name)
+        return str(model_cfg.get("provider") or self._default_provider_name())
+
+    def get_provider_config(self, provider_name: str) -> Dict[str, Any]:
+        return dict(self._get_provider(provider_name))
+
+    def get_backend_for_model(self, model_name: str) -> str:
+        model_cfg = self.get_model_config(model_name)
+        return self._provider_backend_from_cfg(model_cfg)
+
+    def default_model_name(self, agent_type: str = "chat") -> str:
+        """Return the first configured model selector for *agent_type*."""
+        raw = self._resolve_agent_value_name(self._agent_value(agent_type))
+        if raw:
+            return raw
+
+        fallback = self._fallback_agent(agent_type)
+        if fallback:
+            return self.default_model_name(fallback)
+
+        if self.models:
+            return next(iter(self.models))
+
+        raise RuntimeError(
+            f"Cannot resolve agent '{agent_type}': no models defined in config"
+        )
+
     def get_with_model(self, model_name: str) -> Any:
         """Return a (cached) LLM by model name.
 
@@ -304,19 +344,12 @@ class LLMFactory:
         config entry.  If still unresolved, it is treated as a raw model
         identifier and the default provider is used.
         """
-        if model_name in self.models:
-            model_cfg = self.models[model_name]
-        else:
-            # Reverse lookup: match by actual model name inside configs
-            model_cfg = None
-            for _key, cfg in self.models.items():
-                if cfg.get("model") == model_name:
-                    model_cfg = cfg
-                    break
-            if model_cfg is None:
-                # Raw model string — use default provider
-                default = self._resolve_agent("default")
-                model_cfg = {**default, "model": model_name}
+        model_cfg = self.get_model_config(model_name)
+        backend = self._provider_backend_from_cfg(model_cfg)
+        if backend != "pawlia":
+            raise RuntimeError(
+                f"Model '{model_name}' uses backend '{backend}' and cannot be built by LLMFactory"
+            )
         key = self._cache_key(model_cfg)
         if key not in self._cache:
             self._cache[key] = self._build(model_cfg)
@@ -355,6 +388,7 @@ class LLMFactory:
         self,
         agent_type: str,
         _visited: Optional[Set[str]] = None,
+        backend: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Resolve one or more model configs for an agent type.
 
@@ -369,19 +403,26 @@ class LLMFactory:
 
         value = self._agent_value(agent_type)
         resolved = self._resolve_agent_value(value)
+        if backend is not None:
+            resolved = [
+                cfg for cfg in resolved
+                if self._provider_backend_from_cfg(cfg) == backend
+            ]
         if resolved:
             return resolved
 
         # Not found or unresolvable — walk up the fallback chain
         fallback = self._fallback_agent(agent_type)
         if fallback:
-            fallback_resolved = self._resolve_agent_candidates(fallback, visited)
+            fallback_resolved = self._resolve_agent_candidates(fallback, visited, backend=backend)
             if fallback_resolved:
                 return fallback_resolved
 
         # Last resort: use the first defined model in config
         if self.models:
-            return [next(iter(self.models.values()))]
+            for cfg in self.models.values():
+                if backend is None or self._provider_backend_from_cfg(cfg) == backend:
+                    return [cfg]
 
         raise RuntimeError(
             f"Cannot resolve agent '{agent_type}': no models defined in config"
@@ -431,6 +472,16 @@ class LLMFactory:
 
         return self.agents_cfg.get(agent_type)
 
+    def _resolve_agent_value_name(self, value: Any) -> Optional[str]:
+        """Return the first selector string for a raw agent config value."""
+        if isinstance(value, str):
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            return parts[0] if parts else None
+        if isinstance(value, dict):
+            model = value.get("model")
+            return str(model) if model else None
+        return None
+
     def _fallback_agent(self, agent_type: str) -> Optional[str]:
         """Return the next agent type to try in the fallback chain."""
         if agent_type.startswith("skill."):
@@ -454,6 +505,12 @@ class LLMFactory:
         temperature = model_cfg.get("temperature", 0.7)
         provider_name = model_cfg.get("provider") or self._default_provider_name()
         provider_cfg = self._get_provider(provider_name)
+        provider_backend = str(provider_cfg.get("backend") or "pawlia")
+
+        if provider_backend != "pawlia":
+            raise RuntimeError(
+                f"Provider '{provider_name}' uses backend '{provider_backend}' and cannot be built by LLMFactory"
+            )
 
         api_base = provider_cfg.get("apiBase", "").rstrip("/")
         api_key = provider_cfg.get("apiKey", "none")
@@ -557,6 +614,7 @@ class LLMFactory:
             model_cfg.get("model", "llama3.1:latest"),
             provider_name,
             provider_cfg.get("apiBase", ""),
+            provider_cfg.get("backend", "pawlia"),
             model_cfg.get("temperature", 0.7),
             model_cfg.get("think"),
             model_cfg.get("max_tokens"),
@@ -572,6 +630,11 @@ class LLMFactory:
         if self.providers:
             return next(iter(self.providers.values()))
         return {"apiBase": "http://localhost:11434/v1", "apiKey": "none"}
+
+    def _provider_backend_from_cfg(self, model_cfg: Dict[str, Any]) -> str:
+        provider_name = str(model_cfg.get("provider") or self._default_provider_name())
+        provider_cfg = self._get_provider(provider_name)
+        return str(provider_cfg.get("backend") or "pawlia")
 
     def _default_provider_name(self) -> str:
         if self.providers:

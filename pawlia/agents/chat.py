@@ -141,6 +141,7 @@ class ChatAgent(BaseAgent):
         *,
         mode: str = "chat",
         system_prompt: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
         """Resolve the system prompt for a chat or call context."""
         if system_prompt:

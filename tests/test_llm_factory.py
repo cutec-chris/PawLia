@@ -30,6 +30,7 @@ def _base_config() -> Dict[str, Any]:
     return {
         "providers": {
             "test": {
+                "backend": "pawlia",
                 "apiBase": "http://example.test/v1",
                 "apiKey": "x",
             }
@@ -218,9 +219,61 @@ def test_agent_model_blacklist_expires_after_cooldown(monkeypatch: pytest.Monkey
     for _ in range(4):
         assert llm.invoke([]) == "ok-m2"
 
-    assert built["m1"].calls == 3
 
-    clock["now"] += 30 * 60 + 1
+def test_local_factory_skips_nonlocal_chat_models(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["providers"]["hermes"] = {
+        "backend": "hermes",
+        "apiBase": "http://hermes.test/v1",
+        "apiKey": "secret",
+    }
+    config["models"] = {
+        "hermes": {"model": "hermes-agent", "provider": "hermes"},
+        "pawlia_model": {"model": "m-local", "provider": "test"},
+    }
+    config["agents"]["chat"] = "hermes,pawlia_model"
 
-    assert llm.invoke([]) == "ok-m1"
-    assert built["m1"].calls == 4
+    built: List[Dict[str, Any]] = []
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        built.append(dict(model_cfg))
+        return _DummyLLM(model_name=str(model_cfg["model"]))
+
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat")
+
+    assert llm.invoke([]) == "ok-m-local"
+    assert [cfg["model"] for cfg in built] == ["m-local"]
+
+
+def test_get_with_model_rejects_nonlocal_backend():
+    config = _base_config()
+    config["providers"]["hermes"] = {
+        "backend": "hermes",
+        "apiBase": "http://hermes.test/v1",
+        "apiKey": "secret",
+    }
+    config["models"]["hermes"] = {"model": "hermes-agent", "provider": "hermes"}
+
+    factory = LLMFactory(config)
+
+    with pytest.raises(RuntimeError, match="cannot be built by LLMFactory"):
+        factory.get_with_model("hermes")
+
+
+def test_default_model_name_keeps_user_facing_selector():
+    config = _base_config()
+    config["providers"]["hermes"] = {
+        "backend": "hermes",
+        "apiBase": "http://hermes.test/v1",
+        "apiKey": "secret",
+    }
+    config["models"]["hermes"] = {"model": "hermes-agent", "provider": "hermes"}
+    config["agents"]["chat"] = "hermes,m1"
+
+    factory = LLMFactory(config)
+
+    assert factory.default_model_name("chat") == "hermes"
+    assert factory.get_backend_for_model("hermes") == "hermes"

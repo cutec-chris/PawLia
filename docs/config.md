@@ -4,26 +4,63 @@ PawLia is configured via `config.yaml`. Copy `config.sample.yaml` as a starting 
 
 ## Providers
 
-Define one or more LLM backends. Any OpenAI-compatible API works.
+Define one or more providers. A provider has a `backend` type plus any
+backend-specific connection settings.
 
 ```yaml
 providers:
   ollama:
+    backend: pawlia
     apiBase: http://localhost:11434/v1
     apiKey: ollama        # required by some clients, value doesn't matter for Ollama
     timeout: 240          # seconds; increase for slow hardware
     keepAlive: -1         # keep model loaded indefinitely (-1 = forever)
   groq:
+    backend: pawlia
     apiBase: https://api.groq.com/openai/v1
     apiKey: gsk_...
+  hermes_local:
+    backend: hermes
+    apiBase: http://127.0.0.1:8642/v1
+    apiKey: change-me
+    timeout: 600
+    conversation_namespace: pawlia
+    store: true
 ```
 
 | Key | Description |
 |-----|-------------|
+| `backend` | Backend type: `pawlia` (default if omitted) or `hermes` |
 | `apiBase` | Base URL of the OpenAI-compatible API |
 | `apiKey` | API key (required for cloud providers) |
 | `timeout` | Request timeout in seconds |
 | `keepAlive` | Ollama keep-alive duration (`-1` = forever, `0` = unload after each request) |
+| `conversation_namespace` | Hermes only: prefix used for stable server-side conversation IDs |
+| `store` | Hermes only: whether Hermes should persist response-chain state server-side |
+
+### Backend behavior
+
+#### `backend: pawlia`
+
+This is the normal mode and also the default when `backend` is omitted.
+PawLia uses its own stack:
+
+- `LLMFactory` / `llm.py`
+- `ChatAgent`
+- `SkillRunnerAgent`
+- bundled and workspace skills
+
+#### `backend: hermes`
+
+PawLia becomes a thin interface layer and forwards turns to Hermes via its
+Responses API. Hermes keeps the live tool/runtime context. PawLia still:
+
+- writes daily logs
+- writes thread logs
+- exposes the same interfaces (`Matrix`, `Telegram`, `Web`, `CLI`, `Webhook`)
+- keeps Dream Wiki / summaries working from the visible chat transcript
+
+In Hermes mode, PawLia does not use its own skill stack for that turn.
 
 ## Models
 
@@ -47,6 +84,9 @@ models:
     model: qwen3:4b
     provider: groq
     temperature: 0.3
+  hermes:
+    model: hermes-agent
+    provider: hermes_local
 ```
 
 | Key | Description |
@@ -55,6 +95,8 @@ models:
 | `provider` | Key from `providers:` |
 | `temperature` | Sampling temperature |
 | `think` | Enable chain-of-thought / extended thinking (optional) |
+
+The model itself does not choose the backend. The backend comes from the referenced provider.
 
 ## Agents
 
@@ -83,6 +125,8 @@ If an agent value contains a comma-separated list, models are tried in order whe
 | `skill.<name>` | `agents.skills.<name>` → `agents.skill_runner` → `agents.default` |
 
 LLMs with identical configuration are reused across agent types — no redundant connections.
+
+If an agent resolves to a Hermes-backed model, PawLia routes that conversation through Hermes instead of its own chat/skill stack.
 
 ## Interfaces
 

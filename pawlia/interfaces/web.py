@@ -561,7 +561,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
                     })
                 return nodes, edges
 
-            nodes, edges = await asyncio.to_thread(_read_graph)
+            from pawlia.utils import run_sync_in_thread
+            nodes, edges = await run_sync_in_thread(_read_graph)
             return web.json_response({"nodes": nodes, "edges": edges})
         except Exception as e:
             logger.error("Memory graph error: %s", e)

@@ -80,7 +80,7 @@ async def test_process_speech_uses_call_system_prompt():
     ):
         await session._process_speech(pcm, 48000)
 
-    agent.build_system_prompt.assert_called_once_with(mode="call")
+    agent.build_system_prompt.assert_called_once_with(mode="call", thread_id="thread-1")
     agent.run_streamed.assert_awaited_once_with(
         "Hallo da",
         system_prompt="CALL PROMPT",
