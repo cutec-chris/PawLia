@@ -140,32 +140,15 @@ class App:
         skills.update(user_skills)
         return skills
 
-    def run_instruction(self, instruction: str, user_id: str = "default") -> SkillRunnerAgent:
-        """Create a SkillRunnerAgent for a raw instruction (used by automations).
+    def run_instruction(self, instruction: str, user_id: str = "default") -> RouterAgent:
+        """Create a normal agent for a scheduled natural-language instruction.
 
-        Builds a virtual skill from the instruction and returns a runner
-        that executes it with the same tools and context as a real skill.
+        Automations should run through the same chat/skill dispatcher as an
+        interactive turn. That lets instructions such as "Nutze den perplexica
+        Skill ..." call the real skill instead of forcing the model to invent
+        shell commands inside a virtual Bash-only skill.
         """
-        session = self.memory.load_session(user_id)
-        workspace = os.path.join(self.session_dir, user_id, "workspace")
-
-        virtual_skill = AgentSkill.from_instruction(
-            name="automation",
-            instruction=instruction,
-            working_dir=workspace,
-        )
-
-        return SkillRunnerAgent(
-            llm=self.llm.get("skill.automation") or self.llm.get("chat"),
-            skill=virtual_skill,
-            tool_registry=self.tools,
-            context={
-                "user_id": user_id,
-                "session_dir": self.session_dir,
-                "session": session,
-                "config_path": self.config_path,
-            },
-        )
+        return self.make_agent(user_id)
 
     def make_agent(self, user_id: str = "default", **kwargs) -> RouterAgent:
         """Create a backend-dispatching agent for a user session.

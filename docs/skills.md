@@ -46,8 +46,8 @@ license: MIT
 metadata:
   author: Your Name
   version: "1.0"
-requires_config:           # optional: config keys that must be present
-  - url
+  requires_config:         # optional: keys under skill-config.<name>.*
+    - url
 requires_credentials:      # optional: credential keys the skill needs
   - api_key
 ---
@@ -108,7 +108,8 @@ agents:
 
 ## Skill configuration
 
-Skills that need external URLs or API keys read from `skill-config` in `config.yaml`:
+Skills that need deployment settings such as URLs, hosts, timeouts, or model
+names read from `skill-config` in `config.yaml`:
 
 ```yaml
 skill-config:
@@ -117,7 +118,23 @@ skill-config:
     timeout: 10
 ```
 
-The values are passed to the skill's scripts via environment variables or arguments — see each skill's `SKILL.md` for specifics.
+The full per-skill config is injected into skill scripts as JSON in `PAWLIA_SKILL_CONFIG`.
+Scripts should read deployment config from that env var rather than requiring the
+LLM to pass URLs, hosts, timeouts, embedding settings, or model names as CLI
+arguments:
+
+```python
+import json
+import os
+
+skill_config = json.loads(os.environ.get("PAWLIA_SKILL_CONFIG", "{}"))
+url = skill_config.get("url")
+timeout = int(skill_config.get("timeout", 30))
+```
+
+Compiled workflows also receive config automatically: placeholders such as
+`{url}` or `{timeout}` are filled from `skill-config.<skill>` when present and
+are not exposed as model-provided parameters.
 
 ## Credentials
 

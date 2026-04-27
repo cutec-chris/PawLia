@@ -304,7 +304,8 @@ Auto-commits are throttled to max 1 per 5 minutes. See [automation.md](automatio
 
 ## Skill Configuration
 
-Per-skill settings (URLs, API keys, etc.). Keys match the skill name.
+Per-skill deployment settings (URLs, hosts, timeouts, model names, etc.). Keys
+match the skill name. Secrets should use skill credentials instead.
 
 ```yaml
 skill-config:

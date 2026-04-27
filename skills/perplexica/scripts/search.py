@@ -2,6 +2,7 @@
 """Perplexica AI search CLI script. Outputs JSON results to stdout."""
 import argparse
 import json
+import os
 import sys
 import io
 import requests
@@ -46,13 +47,23 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
 def main():
     parser = argparse.ArgumentParser(description="Perplexica AI web search")
     parser.add_argument("--query", required=True, help="Search query")
-    parser.add_argument("--url", required=True, help="Perplexica instance URL")
+    parser.add_argument("--url", help="Perplexica instance URL; defaults to skill-config.perplexica.url")
     parser.add_argument("--focus", default="webSearch", help="Focus mode (webSearch, academicSearch, youtubeSearch, redditSearch)")
     parser.add_argument("--timeout", type=int, default=60, help="Request timeout in seconds")
     args = parser.parse_args()
 
     try:
-        result = search(args.query, args.url, args.focus, args.timeout)
+        url = args.url
+        if not url:
+            raw_config = os.environ.get("PAWLIA_SKILL_CONFIG", "{}")
+            try:
+                url = json.loads(raw_config).get("url", "")
+            except json.JSONDecodeError:
+                url = ""
+        if not url:
+            raise ValueError("Missing Perplexica URL. Set skill-config.perplexica.url or pass --url.")
+
+        result = search(args.query, url, args.focus, args.timeout)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)

@@ -358,7 +358,8 @@ class JobRunner:
 
             try:
                 runner = self._app.run_instruction(instruction, user_id)
-                result = await runner.run(query=instruction)
+                thread_id = f"automation_{job.get('id', 'job')}"
+                result = await runner.run(instruction, thread_id=thread_id)
                 job["last_run"] = now.isoformat()
                 job["last_result"] = "success"
                 changed = True

@@ -37,6 +37,13 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 
 def _load_skill_config() -> dict:
+    raw_config = os.environ.get("PAWLIA_SKILL_CONFIG")
+    if raw_config:
+        try:
+            return json.loads(raw_config)
+        except json.JSONDecodeError:
+            pass
+
     for candidate in (_PROJECT_ROOT / "config.yaml", _PROJECT_ROOT / "config.yml"):
         if candidate.is_file():
             with open(candidate, encoding="utf-8") as f:

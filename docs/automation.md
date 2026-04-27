@@ -229,19 +229,18 @@ Suggested reminder defaults by priority:
 
 ## Scheduled Jobs
 
-For recurring automated tasks the LLM writes a script and registers it as a job. Jobs are stored in `automations/jobs.json` (outside the workspace) since they are scheduler-internal automation config.
+For recurring automated tasks the LLM registers a natural-language instruction as a job. Jobs are stored in `automations/jobs.json` (outside the workspace) since they are scheduler-internal automation config. When due, the instruction runs through the normal agent pipeline, including skills.
 
 ### Workflow
 
 1. User: *"Erstelle mir jeden Tag um 16 Uhr eine Zusammenfassung"*
-2. LLM writes a Python script → `session/<user>/automations/daily_report.py`
-3. LLM registers the job via organizer:
+2. LLM registers the instruction via organizer:
 
 ```bash
-python organizer.py add-job --name "Tagesbericht" --script "daily_report.py" --schedule "16:00"
+python organizer.py add-job --name "Tagesbericht" --instruction "Erstelle eine kurze Tageszusammenfassung" --schedule "16:00"
 ```
 
-4. Every day at 16:00, the scheduler executes the script and sends the output as notification.
+3. Every day at 16:00, the scheduler runs the instruction through the normal agent/skill dispatcher and sends the output as notification.
 
 ### Data model (`session/<user>/automations/jobs.json`)
 
@@ -249,9 +248,8 @@ python organizer.py add-job --name "Tagesbericht" --script "daily_report.py" --s
 {
   "id": "job-a1b2c3d4",
   "name": "Tagesbericht",
-  "script": "daily_report.py",
+  "instruction": "Erstelle eine kurze Tageszusammenfassung",
   "schedule": "16:00",
-  "params": {},
   "notify": true,
   "enabled": true,
   "created_at": "2026-03-20T12:00:00",
@@ -270,9 +268,9 @@ python organizer.py add-job --name "Tagesbericht" --script "daily_report.py" --s
 | `weekly:DOW:HH:MM` | Weekly (0=Mon..6=Sun) | `weekly:4:09:00` |
 | `monthly:DD:HH:MM` | Monthly on day DD | `monthly:1:10:00` |
 
-### Writing automation scripts
+### Writing checklist scripts
 
-Scripts are plain Python (or Node.js / Bash) files stored in `session/<user>/automations/`.
+Checklist scripts are plain Python (or Node.js / Bash) files stored in `session/<user>/automations/` or `workspace/.scripts/`.
 
 **Input:** Parameters are passed via the `AUTOMATION_PARAMS` environment variable as JSON.
 User context is available via `PAWLIA_USER_ID` and `PAWLIA_SESSION_DIR` environment variables.
@@ -426,8 +424,6 @@ session/<user>/
 ├── scheduler_state.json            # Internal: notified/fired/checklist state
 ├── automations/
 │   ├── jobs.json                   # Scheduled job definitions
-│   ├── daily_report.py             # User automation scripts
-│   └── check_traffic.py
 ├── background_tasks/
 │   └── <task_id>.json
 └── memory_index/                   # RAG backend index

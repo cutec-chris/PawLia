@@ -286,12 +286,14 @@ class WorkflowExecutor:
     def _blocks_to_tools(self, workflow: Workflow) -> List[Dict[str, Any]]:
         """Convert building blocks to OpenAI tool specs."""
         tools = []
+        config_params = self._skill_config_params()
         for block in workflow.building_blocks:
             # Extract {param} placeholders, excluding context vars,
-            # plus any env_params (passed as env vars, not in command)
+            # config vars, plus any env_params (passed as env vars,
+            # not in command).
             param_names = list(dict.fromkeys(
                 [p for p in re.findall(r"\{(\w+)\}", block.command)
-                 if p not in ("scripts_dir",)]
+                 if p not in ("scripts_dir",) and p not in config_params]
                 + block.env_params
             ))
 
@@ -335,11 +337,29 @@ class WorkflowExecutor:
         result = result.replace("{scripts_dir}", scripts_dir)
         result = result.replace("<scripts_dir>", scripts_dir)
 
+        # Skill config values are system-provided, not model-provided. This
+        # lets workflow commands use {url}, {timeout}, etc. without exposing
+        # those as LLM parameters when they exist in skill-config.<skill>.
+        for key, value in self._skill_config_params().items():
+            result = result.replace(f"{{{key}}}", value)
+            result = result.replace(f"<{key}>", value)
+
         # Replace both {key} and <key> for all params
         for key, value in params.items():
             result = result.replace(f"{{{key}}}", str(value))
             result = result.replace(f"<{key}>", str(value))
 
+        return result
+
+    def _skill_config_params(self) -> Dict[str, str]:
+        """Return scalar skill-config values safe for command templating."""
+        skill_config = self.context.get("skill_config") or {}
+        if not isinstance(skill_config, dict):
+            return {}
+        result: Dict[str, str] = {}
+        for key, value in skill_config.items():
+            if isinstance(value, (str, int, float, bool)):
+                result[str(key)] = str(value)
         return result
 
     def _run_bash(
