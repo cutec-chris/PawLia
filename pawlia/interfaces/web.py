@@ -20,7 +20,7 @@ import tempfile
 import time
 import zipfile
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import jinja2
 import yaml
@@ -40,6 +40,31 @@ _jinja_env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(_TEMPLATES_DIR),
     autoescape=False,  # HTML is trusted; JS template literals must not be escaped
 )
+
+
+def build_health_payload(app: "App") -> tuple[int, Dict[str, Any]]:
+    checks: Dict[str, str] = {}
+    ok = True
+
+    sched_task = app.scheduler._task
+    if sched_task is None or sched_task.done():
+        checks["scheduler"] = "stopped"
+        ok = False
+    else:
+        checks["scheduler"] = "ok"
+
+    configured = app.config.get("interfaces", {}) if isinstance(app.config, dict) else {}
+    interface_health = getattr(app, "interface_health", {})
+    for name in sorted(configured):
+        if name == "web":
+            continue
+        state = interface_health.get(name, "unknown")
+        checks[f"interface:{name}"] = state
+        if state != "running":
+            ok = False
+
+    status = 200 if ok else 503
+    return status, {"status": "ok" if ok else "unhealthy", "checks": checks}
 
 # ---------------------------------------------------------------------------
 # Config file helpers
@@ -681,19 +706,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
     # ── Health check (no auth) ────────────────────────────────────────────────
 
     async def handle_health(request: web.Request) -> web.Response:
-        checks: Dict[str, str] = {}
-        ok = True
-
-        # Scheduler task alive?
-        sched_task = app.scheduler._task
-        if sched_task is None or sched_task.done():
-            checks["scheduler"] = "stopped"
-            ok = False
-        else:
-            checks["scheduler"] = "ok"
-
-        status = 200 if ok else 503
-        return web.json_response({"status": "ok" if ok else "unhealthy", "checks": checks}, status=status)
+        status, payload = build_health_payload(app)
+        return web.json_response(payload, status=status)
 
     webapp = web.Application()
     webapp.router.add_get("/health",              handle_health)

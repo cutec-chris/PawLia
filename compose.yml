@@ -24,8 +24,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.voip
-    restart: on-failure
+    restart: unless-stopped
     network_mode: host
+    labels:
+      autoheal: "true"
     healthcheck:
       test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:8888/health"]
       interval: 30s
