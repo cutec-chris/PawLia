@@ -14,7 +14,8 @@ networkx>=3.0
 beautifulsoup4>=4.12
 html2text>=2024.2
 ollama>=0.4
-trafilatura>=1.8
+trafilatura>=2.0,<3
+lxml>=5.4,<6
 markitdown[pdf,docx,xlsx,xls,pptx]>=0.1
 
 # VoIP / telephony extras → see requirements-voip.txt

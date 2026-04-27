@@ -3,6 +3,7 @@ lightrag-hku
 requests
 beautifulsoup4
 html2text
-trafilatura
+trafilatura>=2.0,<3
+lxml>=5.4,<6
 pdfminer.six
 youtube-transcript-api
