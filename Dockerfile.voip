@@ -13,7 +13,9 @@ RUN apk add --no-cache \
         python3-dev \
         openssl-dev \
         libffi-dev \
-        crc32c-dev
+        crc32c-dev \
+        libxml2-dev \
+        libxslt-dev
 
 COPY requirements.txt requirements-e2e.txt requirements-voip.txt ./
 
@@ -22,8 +24,7 @@ COPY requirements.txt requirements-e2e.txt requirements-voip.txt ./
 RUN pip install --break-system-packages --no-cache-dir \
         -r requirements.txt \
         -r requirements-e2e.txt \
-        -r requirements-voip.txt \
-        pathvalidate
+        -r requirements-voip.txt
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
 FROM alpine:edge
@@ -46,6 +47,8 @@ RUN apk add --no-cache \
         libffi \
         libstdc++ \
         crc32c \
+        libxml2 \
+        libxslt \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
