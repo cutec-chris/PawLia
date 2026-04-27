@@ -54,9 +54,7 @@ langsmith==0.7.22
 lightrag-hku==1.4.13
 lxml==6.0.2
 lxml_html_clean==0.4.4
-magika==0.6.2
 Markdown==3.10.2
-markitdown==0.1.4
 MarkupSafe==3.0.3
 matrix-nio==0.25.2
 multidict==6.7.1
