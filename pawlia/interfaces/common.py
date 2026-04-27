@@ -47,19 +47,21 @@ class AgentCache:
 class ModelCommandResult:
     """Result of a /model command, ready for platform-specific formatting."""
 
-    __slots__ = ("action", "model", "ctx_label", "available", "invalidate_agent")
+    __slots__ = ("action", "model", "ctx_label", "path", "available", "invalidate_agent")
 
     def __init__(
         self,
         action: str,
         model: str,
         ctx_label: str,
+        path: str = "default",
         available: Optional[List[str]] = None,
         invalidate_agent: bool = False,
     ):
-        self.action = action            # "show" | "set" | "cleared"
+        self.action = action            # "show" | "set" | "cleared" | "invalid_path"
         self.model = model              # current or new model name (or "(default)")
         self.ctx_label = ctx_label      # "Main", "Thread …", "Room", etc.
+        self.path = path                # agent selector path, e.g. "default" or "skills.browser"
         self.available = available or []  # available model keys from config.models
         self.invalidate_agent = invalidate_agent
 
@@ -72,30 +74,6 @@ class ReloadCommandResult:
     def __init__(self, message: str, warnings: Optional[List[str]] = None):
         self.message = message
         self.warnings = warnings or []
-
-
-class AgentCommandResult:
-    """Result of a /agent command."""
-
-    __slots__ = ("action", "ctx_label", "path", "value", "available", "overrides", "invalidate_agent")
-
-    def __init__(
-        self,
-        action: str,
-        ctx_label: str,
-        path: Optional[str] = None,
-        value: Optional[str] = None,
-        available: Optional[List[str]] = None,
-        overrides: Optional[Dict[str, Any]] = None,
-        invalidate_agent: bool = False,
-    ):
-        self.action = action
-        self.ctx_label = ctx_label
-        self.path = path
-        self.value = value
-        self.available = available or []
-        self.overrides = overrides or {}
-        self.invalidate_agent = invalidate_agent
 
 
 _CLEAR_TOKENS = {"off", "none", "-", "default", "clear"}
@@ -121,7 +99,8 @@ def handle_model_command(
     The caller is responsible for formatting and sending the response,
     and for invalidating the agent cache if ``result.invalidate_agent``.
 
-    Use ``args`` = "off" / "none" / "-" / "default" to clear an override.
+    ``/model <model>`` sets the default model selector.  ``/model <path>
+    <model>`` sets a specific agent selector.
     """
     session = app.memory.load_session(user_id)
     if ctx_label is None:
@@ -129,27 +108,34 @@ def handle_model_command(
     available = list_available_models(app)
 
     if not args.strip():
-        current = app.memory.get_agent_override_value(session, "chat", thread_id=thread_id) or "(default)"
-        return ModelCommandResult("show", current, ctx_label, available=available)
+        current = app.memory.get_agent_override_value(session, "default", thread_id=thread_id) or "(default)"
+        return ModelCommandResult("show", current, ctx_label, path="default", available=available)
 
-    new_model = args.strip()
-    if new_model.lower() in _CLEAR_TOKENS:
-        if thread_id:
-            app.memory.set_thread_model_override(session, thread_id, None)
-        else:
-            app.memory.set_model_override(session, None)
+    first, sep, rest = args.strip().partition(" ")
+    if sep:
+        path = first.strip()
+        new_model = rest.strip()
+    else:
+        path = "default"
+        new_model = first.strip()
+
+    if not _is_valid_agent_path(path):
         return ModelCommandResult(
-            "cleared", "(default)", ctx_label,
-            available=available, invalidate_agent=not thread_id,
+            "invalid_path", new_model or "(default)", ctx_label,
+            path=path, available=available, invalidate_agent=False,
         )
 
-    if thread_id:
-        app.memory.set_thread_model_override(session, thread_id, new_model)
-    else:
-        app.memory.set_model_override(session, new_model)
+    if new_model.lower() in _CLEAR_TOKENS:
+        app.memory.set_agent_override_value(session, path, None, thread_id=thread_id)
+        return ModelCommandResult(
+            "cleared", "(default)", ctx_label,
+            path=path, available=available, invalidate_agent=True,
+        )
+
+    app.memory.set_agent_override_value(session, path, new_model, thread_id=thread_id)
     return ModelCommandResult(
         "set", new_model, ctx_label,
-        available=available, invalidate_agent=not thread_id,
+        path=path, available=available, invalidate_agent=True,
     )
 
 
@@ -170,84 +156,6 @@ def _is_valid_agent_path(path: str) -> bool:
     if path.startswith("skills.") and len(path.split(".")) == 2:
         return True
     return False
-
-
-def handle_agent_command(
-    app: "App",
-    user_id: str,
-    args: str,
-    thread_id: Optional[str] = None,
-    ctx_label: Optional[str] = None,
-) -> AgentCommandResult:
-    """Shared logic for /agent commands using the `agents:` config shape."""
-    session = app.memory.load_session(user_id)
-    if ctx_label is None:
-        ctx_label = f"Thread {thread_id}" if thread_id else "Main"
-    available = list_available_models(app)
-
-    stripped = args.strip()
-    current = app.memory.get_thread_agent_overrides(session, thread_id) if thread_id else app.memory.get_agent_overrides(session)
-
-    if not stripped:
-        return AgentCommandResult(
-            "show_all",
-            ctx_label,
-            available=available,
-            overrides=current,
-            invalidate_agent=False,
-        )
-
-    path, sep, value = stripped.partition(" ")
-    path = path.strip()
-    value = value.strip()
-    if not _is_valid_agent_path(path):
-        return AgentCommandResult(
-            "invalid_path",
-            ctx_label,
-            path=path,
-            available=available,
-            overrides=current,
-        )
-
-    if not sep:
-        return AgentCommandResult(
-            "show_path",
-            ctx_label,
-            path=path,
-            value=app.memory.get_agent_override_value(session, path, thread_id=thread_id) or "(default)",
-            available=available,
-            overrides=current,
-        )
-
-    if value.lower() in _CLEAR_TOKENS:
-        app.memory.set_agent_override_value(session, path, None, thread_id=thread_id)
-        return AgentCommandResult(
-            "cleared",
-            ctx_label,
-            path=path,
-            value="(default)",
-            available=available,
-            overrides=app.memory.get_thread_agent_overrides(session, thread_id) if thread_id else app.memory.get_agent_overrides(session),
-            invalidate_agent=not thread_id,
-        )
-
-    app.memory.set_agent_override_value(session, path, value, thread_id=thread_id)
-    return AgentCommandResult(
-        "set",
-        ctx_label,
-        path=path,
-        value=value,
-        available=available,
-        overrides=app.memory.get_thread_agent_overrides(session, thread_id) if thread_id else app.memory.get_agent_overrides(session),
-        invalidate_agent=not thread_id,
-    )
-
-
-def format_agent_overrides(overrides: Dict[str, Any]) -> str:
-    flat = _flatten_agent_overrides(overrides)
-    if not flat:
-        return "_(keine Overrides)_"
-    return "\n".join(f"- `{path}` = `{value}`" for path, value in sorted(flat.items()))
 
 
 def handle_reload_command(app: "App") -> ReloadCommandResult:

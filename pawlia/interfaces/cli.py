@@ -39,8 +39,7 @@ async def start_cli(app: "App") -> None:
     global _waiting_for_input
 
     from pawlia.interfaces.common import (
-        build_status, format_status, md_to_text, handle_model_command, handle_agent_command,
-        format_agent_overrides,
+        build_status, format_status, md_to_text, handle_model_command,
         format_private_toggle, format_bg_enqueue, handle_reload_command,
     )
 
@@ -171,29 +170,16 @@ async def start_cli(app: "App") -> None:
             args_str = user_input.strip()[len("/model"):].strip()
             result = handle_model_command(app, "cli_user", args_str)
             if result.action == "show":
-                print(f"Aktives Modell: {result.model}\n")
-            else:
-                if result.invalidate_agent:
-                    agent = app.make_agent("cli_user", on_interim=_on_interim)
-                print(f"✓ Modell auf '{result.model}' gesetzt.\n")
-            continue
-
-        if user_input.strip().lower().startswith("/agent"):
-            args_str = user_input.strip()[len("/agent"):].strip()
-            result = handle_agent_command(app, "cli_user", args_str)
-            if result.action == "show_all":
-                print(f"Agent-Overrides ({result.ctx_label}):\n{md_to_text(format_agent_overrides(result.overrides))}\n")
-            elif result.action == "show_path":
-                print(f"Agent-Override {result.path}: {result.value}\n")
+                print(f"Default-Modell: {result.model}\n")
             elif result.action == "invalid_path":
-                print("Ungültiger Agent-Pfad. Erlaubt: default, chat, skill_runner, vision, compiler, skills.<name>\n")
+                print("Ungültiger Model-Pfad. Erlaubt: default, chat, skill_runner, vision, compiler, skills.<name>\n")
             else:
                 if result.invalidate_agent:
                     agent = app.make_agent("cli_user", on_interim=_on_interim)
                 if result.action == "cleared":
-                    print(f"✓ Agent-Override '{result.path}' entfernt.\n")
+                    print(f"✓ Model-Override '{result.path}' entfernt.\n")
                 else:
-                    print(f"✓ Agent-Override '{result.path}' auf '{result.value}' gesetzt.\n")
+                    print(f"✓ Model-Override '{result.path}' auf '{result.model}' gesetzt.\n")
             continue
 
         if user_input.strip().lower() == "/reload":

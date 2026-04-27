@@ -25,7 +25,9 @@ class _FakeLLMFactory:
             },
         }
 
-    def default_model_name(self, agent_type: str = "chat") -> str:
+    def default_model_name(self, agent_type: str = "chat", agent_overrides=None) -> str:
+        if agent_overrides and agent_overrides.get(agent_type):
+            return agent_overrides[agent_type]
         return "pawlia_model"
 
     def get_model_config(self, model_name: str):
@@ -46,7 +48,7 @@ class _FakeLLMFactory:
 async def test_router_agent_persists_hermes_turns(tmp_path):
     mm = MemoryManager(str(tmp_path))
     session = mm.load_session("alice")
-    session.model_override = "hermes"
+    mm.set_agent_override_value(session, "chat", "hermes")
 
     local_agent = SimpleNamespace(
         llm=SimpleNamespace(model_name="m-local", model="m-local", temperature=0.3),
@@ -70,7 +72,7 @@ async def test_router_agent_persists_hermes_turns(tmp_path):
     )
 
     hermes = AsyncMock(return_value="Antwort von Hermes")
-    router._hermes_client = lambda thread_id=None: SimpleNamespace(run=hermes)
+    router._hermes_client = lambda thread_id=None, agent_type="chat": SimpleNamespace(run=hermes)
 
     result = await router.run("Hallo")
 
@@ -85,7 +87,7 @@ async def test_router_agent_persists_hermes_turns(tmp_path):
 async def test_router_agent_uses_local_agent_for_local_backend(tmp_path):
     mm = MemoryManager(str(tmp_path))
     session = mm.load_session("bob")
-    session.model_override = "pawlia_model"
+    mm.set_agent_override_value(session, "chat", "pawlia_model")
 
     local_agent = SimpleNamespace(
         llm=SimpleNamespace(model_name="m-local", model="m-local", temperature=0.3),

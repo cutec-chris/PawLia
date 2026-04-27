@@ -145,11 +145,6 @@ def cmd_model(args) -> None:
         if os.path.isfile(agents_path):
             overrides = _read(agents_path)
             current = str((overrides or {}).get("chat", "") or "").strip()
-        if not current:
-            override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
-            if os.path.isfile(override_path):
-                with open(override_path, encoding="utf-8") as f:
-                    current = f.read().strip()
         available = {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)}
         _out({"success": True, "model": current or "(default)", "available_models": available})
         return
@@ -179,17 +174,14 @@ def cmd_agent(args) -> None:
 
     memory_dir = os.path.join(session_dir, user_id, "workspace", "memory")
     os.makedirs(memory_dir, exist_ok=True)
-    override_path = os.path.join(
-        memory_dir,
-        f"thread_{args.thread}_agents.yaml" if args.thread else "agent_overrides.yaml",
-    )
+    override_path = os.path.join(memory_dir, "agent_overrides.yaml")
     overrides = _read(override_path) if os.path.isfile(override_path) else {}
     flat = _flatten_overrides(overrides)
 
     if not args.path:
         _out({
             "success": True,
-            "scope": f"thread:{args.thread}" if args.thread else "session",
+            "scope": "session",
             "overrides": overrides,
             "flat_overrides": flat,
             "available_models": {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)},
@@ -206,7 +198,7 @@ def cmd_agent(args) -> None:
 
     if args.off:
         _out({"__directive__": "set_agent_override", "path": args.path, "value": None, "thread": args.thread})
-        _out({"success": True, "path": args.path, "value": "(default)", "scope": f"thread:{args.thread}" if args.thread else "session"})
+        _out({"success": True, "path": args.path, "value": "(default)", "scope": "session"})
         return
 
     if not args.value:
@@ -214,13 +206,13 @@ def cmd_agent(args) -> None:
             "success": True,
             "path": args.path,
             "value": flat.get(args.path, "(default)"),
-            "scope": f"thread:{args.thread}" if args.thread else "session",
+            "scope": "session",
             "available_models": {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)},
         })
         return
 
     _out({"__directive__": "set_agent_override", "path": args.path, "value": args.value, "thread": args.thread})
-    _out({"success": True, "path": args.path, "value": args.value, "scope": f"thread:{args.thread}" if args.thread else "session"})
+    _out({"success": True, "path": args.path, "value": args.value, "scope": "session"})
 
 
 _PIPER_DIR = "/app/piper"

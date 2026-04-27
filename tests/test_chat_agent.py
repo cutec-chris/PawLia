@@ -80,7 +80,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={},
-            skill_runner_factory=lambda s: None,
+            skill_runner_factory=lambda s, thread_id=None: None,
         )
 
         result = await agent.run("Hi there")
@@ -107,7 +107,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         result = await agent.run("Search for Python tutorials")
@@ -134,11 +134,36 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         await agent.run("Search for Python tutorials")
         mock_runner.run.assert_called_once_with(query="Python tutorials")
+
+    @pytest.mark.asyncio
+    async def test_recovers_text_form_skill_call(self):
+        """Text-form tool calls should be executed as real skill calls."""
+        skill = _make_skill("searxng", "Web search")
+
+        turn1 = _make_ai_message(
+            '<tool_call>{"name":"searxng","arguments":{"query":"Python tutorials"}}</tool_call>'
+        )
+        turn2 = _make_ai_message("Here are some Python tutorials: ...")
+
+        llm = _mock_llm([turn1, turn2])
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value="1. Tutorial A\n2. Tutorial B")
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"searxng": skill},
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
+        )
+
+        result = await agent.run("Search for Python tutorials")
+
+        mock_runner.run.assert_called_once_with(query="Python tutorials")
+        assert "Python tutorials" in result
 
     @pytest.mark.asyncio
     async def test_skill_delegation_repairs_alias_args(self):
@@ -157,7 +182,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         await agent.run("Search for Python tutorials")
@@ -180,7 +205,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={"web_search": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         await agent.run("Search for Python tutorials")
@@ -199,7 +224,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={},
-            skill_runner_factory=lambda s: None,
+            skill_runner_factory=lambda s, thread_id=None: None,
         )
 
         result = await agent.run("Do something")
@@ -230,7 +255,7 @@ class TestChatAgentInterim:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
             on_interim=on_interim,
         )
 
@@ -252,7 +277,7 @@ class TestChatAgentInterim:
         agent = ChatAgent(
             llm=llm,
             skills={},
-            skill_runner_factory=lambda s: None,
+            skill_runner_factory=lambda s, thread_id=None: None,
             on_interim=on_interim,
         )
 
@@ -282,7 +307,7 @@ class TestChatAgentInterim:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
             on_interim=on_interim,
         )
 
@@ -306,7 +331,7 @@ class TestChatAgentPersist:
             agent = ChatAgent(
                 llm=llm,
                 skills={},
-                skill_runner_factory=lambda s: None,
+                skill_runner_factory=lambda s, thread_id=None: None,
                 memory=mm,
                 session=session,
             )
@@ -339,7 +364,7 @@ class TestChatAgentPersist:
             agent = ChatAgent(
                 llm=llm,
                 skills={"searxng": skill},
-                skill_runner_factory=lambda s: mock_runner,
+                skill_runner_factory=lambda s, thread_id=None: mock_runner,
                 memory=mm,
                 session=session,
             )
@@ -365,7 +390,7 @@ class TestChatAgentPersist:
             agent = ChatAgent(
                 llm=llm,
                 skills={},
-                skill_runner_factory=lambda s: None,
+                skill_runner_factory=lambda s, thread_id=None: None,
                 memory=mm,
                 session=session,
             )
@@ -397,7 +422,7 @@ class TestChatAgentPersist:
         agent = ChatAgent(
             llm=llm,
             skills={},
-            skill_runner_factory=lambda s: None,
+            skill_runner_factory=lambda s, thread_id=None: None,
             memory=memory,
             session=session,
         )
@@ -439,7 +464,7 @@ class TestChatAgentMultiSkill:
         agent = ChatAgent(
             llm=llm,
             skills={"skill_a": skill_a, "skill_b": skill_b},
-            skill_runner_factory=lambda s: runners[s.name],
+            skill_runner_factory=lambda s, thread_id=None: runners[s.name],
         )
 
         result = await agent.run("Use both skills")
@@ -472,7 +497,7 @@ class TestChatAgentMultiSkill:
         agent = ChatAgent(
             llm=llm,
             skills={"skill_a": skill_a, "skill_b": skill_b},
-            skill_runner_factory=lambda s: runners[s.name],
+            skill_runner_factory=lambda s, thread_id=None: runners[s.name],
         )
 
         result = await agent.run("Use both skills")
@@ -500,7 +525,7 @@ class TestChatAgentMultiSkill:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         result = await agent.run("Search for Python tutorials")
@@ -582,6 +607,23 @@ class TestSkillRunnerAgent:
         )
         result = await runner.run("do something")
         assert "fallback_output" in result
+
+    @pytest.mark.asyncio
+    async def test_recovers_bash_code_block_in_tool_mode(self):
+        """A bash code block in tool-call mode should be executed."""
+        turn1 = _make_ai_message("```bash\necho recovered_output\n```")
+        turn2 = _make_ai_message("The result is: recovered_output")
+        turn3 = _make_ai_message("The result is: recovered_output")
+
+        llm = _mock_llm([turn1, turn2, turn3])
+        skill = _make_skill()
+        tools = ToolRegistry()
+        tools.register(BashTool())
+
+        runner = SkillRunnerAgent(llm=llm, skill=skill, tool_registry=tools)
+        result = await runner.run("run command")
+
+        assert "recovered_output" in result
 
     @pytest.mark.asyncio
     async def test_no_command_fallback(self):

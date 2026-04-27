@@ -35,7 +35,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, md_to_tg_html,
-        handle_model_command, handle_agent_command, format_agent_overrides,
+        handle_model_command,
         list_available_models, preview_text,
         format_private_toggle, format_bg_enqueue, bytes_to_data_uri,
         handle_reload_command,
@@ -195,7 +195,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         )
 
     async def on_model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """/model [name] — show or change the active model for this session."""
+        """/model [model] or /model [path] [model] — show/change model selectors."""
         if not update.message:
             return
         user = update.message.from_user
@@ -220,67 +220,24 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         avail = ", ".join(f"<code>{m}</code>" for m in result.available) or "<i>(keine konfiguriert)</i>"
         if result.action == "show":
             await update.message.reply_text(
-                f"<b>Aktives Modell</b> [{result.ctx_label}]: <code>{result.model}</code>\n"
+                f"<b>Default-Modell</b> [{result.ctx_label}]: <code>{result.model}</code>\n"
                 f"<b>Verfügbar:</b> {avail}\n"
-                f"<i>Wechseln: /model &lt;name&gt; — Override löschen: /model off</i>",
-                parse_mode=ParseMode.HTML,
-            )
-        elif result.action == "cleared":
-            await update.message.reply_text(
-                f"✓ Model-Override für <b>{result.ctx_label}</b> entfernt — fällt auf Default zurück.",
-                parse_mode=ParseMode.HTML,
-            )
-        else:
-            await update.message.reply_text(
-                f"✓ Modell für <b>{result.ctx_label}</b> auf <code>{result.model}</code> gesetzt.",
-                parse_mode=ParseMode.HTML,
-            )
-
-    async def on_agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """/agent [path] [value] — show or change session/thread agent overrides."""
-        if not update.message:
-            return
-        user = update.message.from_user
-        if user is None:
-            return
-
-        user_id = f"tg_{user.id}"
-        thread_id: Optional[int] = update.message.message_thread_id
-        args_str = " ".join(context.args) if context.args else ""
-        result = handle_agent_command(
-            app, user_id, args_str,
-            thread_id=str(thread_id) if thread_id else None,
-        )
-
-        if result.invalidate_agent:
-            agent_cache.invalidate(user_id)
-
-        if result.action == "show_all":
-            await update.message.reply_text(
-                md_to_tg_html(
-                    f"**Agent Overrides** [{result.ctx_label}]\n{format_agent_overrides(result.overrides)}\n"
-                    "_Setzen: /agent <path> <wert> — Löschen: /agent <path> off_"
-                ),
-                parse_mode=ParseMode.HTML,
-            )
-        elif result.action == "show_path":
-            await update.message.reply_text(
-                f"<b>Agent Override</b> <code>{result.path}</code> [{result.ctx_label}]: <code>{result.value}</code>",
+                f"<i>Default setzen: /model &lt;modell&gt; — Agent setzen: /model &lt;pfad&gt; &lt;modell&gt; — Löschen: /model &lt;pfad&gt; off</i>",
                 parse_mode=ParseMode.HTML,
             )
         elif result.action == "invalid_path":
             await update.message.reply_text(
-                "Ungültiger Agent-Pfad. Erlaubt: <code>default</code>, <code>chat</code>, <code>skill_runner</code>, <code>vision</code>, <code>compiler</code>, <code>skills.&lt;name&gt;</code>.",
+                "Ungültiger Model-Pfad. Erlaubt: <code>default</code>, <code>chat</code>, <code>skill_runner</code>, <code>vision</code>, <code>compiler</code>, <code>skills.&lt;name&gt;</code>.",
                 parse_mode=ParseMode.HTML,
             )
         elif result.action == "cleared":
             await update.message.reply_text(
-                f"✓ Agent-Override <code>{result.path}</code> für <b>{result.ctx_label}</b> entfernt.",
+                f"✓ Model-Override <code>{result.path}</code> für <b>{result.ctx_label}</b> entfernt.",
                 parse_mode=ParseMode.HTML,
             )
         else:
             await update.message.reply_text(
-                f"✓ Agent-Override <code>{result.path}</code> für <b>{result.ctx_label}</b> auf <code>{result.value}</code> gesetzt.",
+                f"✓ Model-Override <code>{result.path}</code> für <b>{result.ctx_label}</b> auf <code>{result.model}</code> gesetzt.",
                 parse_mode=ParseMode.HTML,
             )
 
@@ -395,7 +352,6 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     application = Application.builder().token(token).build()
     application.add_handler(CommandHandler("private", on_private_command))
     application.add_handler(CommandHandler("model", on_model_command))
-    application.add_handler(CommandHandler("agent", on_agent_command))
     application.add_handler(CommandHandler("reload", on_reload_command))
     application.add_handler(CommandHandler("thread", on_thread_command))
     application.add_handler(CommandHandler("status", on_status_command))
