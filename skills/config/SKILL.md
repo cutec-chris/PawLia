@@ -156,7 +156,7 @@ python <scripts_dir>/config.py voice --off
 ```
 
 **How `available_voices` is discovered:**
-- Piper: glob `/app/piper/*.onnx` (the voice files baked into the VoIP image). **This list is authoritative** — a voice not listed does not exist on disk. Setting a non-listed Piper voice is always rejected, even with `--force`, because Piper would immediately crash with "Model file doesn't exist" and break TTS. If a user asks for a Piper voice that isn't available, tell them so and offer one from the list; never try to force it.
+- Piper: glob configured model directories for `*.onnx`. Directory precedence is `PAWLIA_PIPER_DIR`, `PIPER_VOICE_DIR`, `tts.piper.voice_dir`, `tts.piper.model_dir`, the directory of `tts.piper.model` if it is a path, then `/app/piper` (the voice files baked into the VoIP image). **This list is authoritative** — a voice not listed does not exist on disk. Setting a non-listed Piper voice is always rejected, even with `--force`, because Piper would immediately crash with "Model file doesn't exist" and break TTS. If a user asks for a Piper voice that isn't available, tell them so and offer one from the list; never try to force it.
 - Edge: `edge_tts.list_voices()` (full Microsoft catalog). If the dynamic listing is unreachable (`edge_tts` not installed / no internet) the list may be empty — only then may `--force` be used to write a voice name the user explicitly asked for:
 
   ```

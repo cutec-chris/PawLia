@@ -216,6 +216,7 @@ def cmd_agent(args) -> None:
 
 
 _PIPER_DIR = "/app/piper"
+_PIPER_DIR_ENV_VARS = ("PAWLIA_PIPER_DIR", "PIPER_VOICE_DIR")
 
 
 def _current_tts_provider() -> str:
@@ -227,15 +228,50 @@ def _current_tts_provider() -> str:
     return (data.get("tts") or {}).get("provider") or "piper"
 
 
+def _configured_piper_dirs() -> list:
+    """Return candidate Piper model directories, in precedence order."""
+    dirs = []
+    for key in _PIPER_DIR_ENV_VARS:
+        value = os.environ.get(key)
+        if value:
+            dirs.append(value)
+
+    path = _find_config()
+    if path:
+        data = _read(path)
+        piper_cfg = (data.get("tts") or {}).get("piper") or {}
+        for key in ("voice_dir", "model_dir"):
+            value = piper_cfg.get(key)
+            if value:
+                dirs.append(value)
+        model = piper_cfg.get("model")
+        if isinstance(model, str) and (os.sep in model or "/" in model):
+            dirs.append(os.path.dirname(model))
+
+    dirs.append(_PIPER_DIR)
+
+    result = []
+    seen = set()
+    for directory in dirs:
+        directory = os.path.abspath(os.path.expanduser(str(directory)))
+        if directory and directory not in seen:
+            seen.add(directory)
+            result.append(directory)
+    return result
+
+
 def _list_piper_voices() -> list:
-    """Return Piper voice names by globbing the model dir."""
+    """Return Piper voice names by globbing configured model dirs."""
     import glob
-    if not os.path.isdir(_PIPER_DIR):
-        return []
-    return sorted(
-        os.path.basename(p)[:-len(".onnx")]
-        for p in glob.glob(os.path.join(_PIPER_DIR, "*.onnx"))
-    )
+    voices = set()
+    for directory in _configured_piper_dirs():
+        if not os.path.isdir(directory):
+            continue
+        voices.update(
+            os.path.basename(p)[:-len(".onnx")]
+            for p in glob.glob(os.path.join(directory, "*.onnx"))
+        )
+    return sorted(voices)
 
 
 def _list_edge_voices() -> list:
@@ -286,6 +322,7 @@ def cmd_voice(args) -> None:
             "voice": current or "(default)",
             "provider": provider,
             "available_voices": available,
+            "piper_dirs": _configured_piper_dirs() if provider == "piper" else None,
         })
         return
 
@@ -304,6 +341,7 @@ def cmd_voice(args) -> None:
                 ),
                 "provider": provider,
                 "available_voices": available,
+                "piper_dirs": _configured_piper_dirs() if provider == "piper" else None,
             })
             return
 
@@ -363,6 +401,7 @@ def cmd_set(args) -> None:
                     ),
                     "provider": provider,
                     "available_voices": available,
+                    "piper_dirs": _configured_piper_dirs() if provider == "piper" else None,
                 })
                 return
 

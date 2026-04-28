@@ -75,6 +75,18 @@ async def synthesize_pcm(
 
 _DEFAULT_PIPER_VOICE = "de_DE-kerstin-low"
 _PIPER_DOWNLOAD_DIR = "/app/piper"
+_PIPER_DIR_ENV_VARS = ("PAWLIA_PIPER_DIR", "PIPER_VOICE_DIR")
+
+
+def _piper_voice_dir(cfg: Dict[str, Any]) -> str:
+    """Return the directory used to resolve short Piper voice names."""
+    import os
+
+    for key in _PIPER_DIR_ENV_VARS:
+        value = os.environ.get(key)
+        if value:
+            return value
+    return cfg.get("voice_dir") or cfg.get("model_dir") or _PIPER_DOWNLOAD_DIR
 
 
 def _effective_tts_cfg(
@@ -195,7 +207,7 @@ async def _synthesize_piper(text: str, cfg: Dict) -> bytes:
     # Voice name (no path separator, no .onnx) → resolve to bundled model path
     is_voice_name = os.sep not in model and "/" not in model and not model.endswith(".onnx")
     if is_voice_name:
-        model = os.path.join(_PIPER_DOWNLOAD_DIR, f"{model}.onnx")
+        model = os.path.join(_piper_voice_dir(cfg), f"{model}.onnx")
         model_config = model + ".json"
 
     executable = cfg.get("executable", "piper")
