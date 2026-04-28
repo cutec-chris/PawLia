@@ -129,6 +129,144 @@ async def test_local_without_base_url_uses_faster_whisper(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_transcription_provider_fallback_tries_next_provider(monkeypatch):
+    calls = []
+
+    async def fake_api(audio_bytes, provider, cfg, mime):
+        calls.append((provider, cfg, mime))
+        if provider == "local":
+            raise TimeoutError("local STT timed out")
+        return "Hallo fallback"
+
+    async def fake_local(audio_bytes, cfg, mime):
+        raise AssertionError("local base_url should use the API path")
+
+    monkeypatch.setattr("pawlia.transcription._transcribe_api", fake_api)
+    monkeypatch.setattr("pawlia.transcription._transcribe_local", fake_local)
+
+    cfg = {
+        "transcription": {
+            "providers": [
+                {
+                    "name": "lan-whisper",
+                    "provider": "local",
+                    "base_url": "http://192.168.177.120:8005/v1",
+                    "model": "whisper-large-v3-turbo",
+                    "timeout": 8,
+                },
+                "groq",
+            ],
+            "groq": {
+                "api_key": "secret",
+                "model": "whisper-large-v3-turbo",
+                "language": "de",
+            },
+        }
+    }
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Hallo fallback"
+    assert calls[0][0] == "local"
+    assert calls[0][1]["name"] == "lan-whisper"
+    assert calls[0][1]["timeout"] == 8
+    assert calls[1] == ("groq", cfg["transcription"]["groq"], "audio/wav")
+
+
+@pytest.mark.asyncio
+async def test_transcription_provider_fallback_continues_on_empty_text(monkeypatch):
+    calls = []
+
+    async def fake_api(audio_bytes, provider, cfg, mime):
+        calls.append(provider)
+        return None if provider == "local" else "Hallo danach"
+
+    monkeypatch.setattr("pawlia.transcription._transcribe_api", fake_api)
+
+    cfg = {
+        "transcription": {
+            "providers": [
+                {"provider": "local", "base_url": "http://127.0.0.1:8005/v1"},
+                {"provider": "openai", "api_key": "secret", "model": "whisper-1"},
+            ],
+        }
+    }
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Hallo danach"
+    assert calls == ["local", "openai"]
+
+
+@pytest.mark.asyncio
+async def test_transcription_blacklists_provider_after_three_failed_requests(monkeypatch):
+    from pawlia import transcription
+
+    transcription._stt_provider_state.clear()
+    calls = []
+
+    async def fake_api(audio_bytes, provider, cfg, mime):
+        calls.append(provider)
+        if provider == "local":
+            raise TimeoutError("local STT timed out")
+        return "Fallback ok"
+
+    monkeypatch.setattr("pawlia.transcription._transcribe_api", fake_api)
+
+    cfg = {
+        "transcription": {
+            "providers": [
+                {"provider": "local", "base_url": "http://127.0.0.1:8005/v1", "model": "whisper"},
+                {"provider": "groq", "api_key": "secret", "model": "whisper-large-v3-turbo"},
+            ],
+        }
+    }
+
+    for _ in range(3):
+        assert await transcribe(b"audio", cfg, mime="audio/wav") == "Fallback ok"
+
+    assert calls == ["local", "groq", "local", "groq", "local", "groq"]
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Fallback ok"
+    assert calls == ["local", "groq", "local", "groq", "local", "groq", "groq"]
+
+
+@pytest.mark.asyncio
+async def test_transcription_blacklist_expires_after_cooldown(monkeypatch):
+    from pawlia import transcription
+
+    transcription._stt_provider_state.clear()
+    now = [100.0]
+    calls = []
+
+    async def fake_api(audio_bytes, provider, cfg, mime):
+        calls.append(provider)
+        if provider == "local":
+            raise TimeoutError("local STT timed out")
+        return "Fallback ok"
+
+    monkeypatch.setattr("pawlia.transcription._now", lambda: now[0])
+    monkeypatch.setattr("pawlia.transcription._transcribe_api", fake_api)
+
+    cfg = {
+        "transcription": {
+            "providers": [
+                {"provider": "local", "base_url": "http://127.0.0.1:8005/v1", "model": "whisper"},
+                {"provider": "groq", "api_key": "secret", "model": "whisper-large-v3-turbo"},
+            ],
+        }
+    }
+
+    for _ in range(3):
+        assert await transcribe(b"audio", cfg, mime="audio/wav") == "Fallback ok"
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Fallback ok"
+    assert calls[-1] == "groq"
+    assert calls.count("local") == 3
+
+    now[0] += 30 * 60 + 1
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Fallback ok"
+    assert calls.count("local") == 4
+
+
+@pytest.mark.asyncio
 async def test_api_omits_authorization_header_without_api_key(monkeypatch):
     from pawlia import transcription
     captured = {}

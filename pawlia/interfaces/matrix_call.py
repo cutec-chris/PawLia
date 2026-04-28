@@ -1059,8 +1059,14 @@ class CallSession:
         audio_info = self._app.llm.audio_model_info(active_model or "chat")
         if audio_info:
             from pawlia.transcription import transcribe_pcm_via_model
-            return await transcribe_pcm_via_model(
+            text = await transcribe_pcm_via_model(
                 pcm, sample_rate, audio_info[0], audio_info[1]
+            )
+            if text:
+                return text
+            logger.info(
+                "call %s: native audio transcription returned nothing; falling back to configured STT",
+                self.call_id[:8],
             )
         return await transcribe_pcm(pcm, sample_rate, self._app.config)
 
