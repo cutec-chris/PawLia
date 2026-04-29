@@ -209,6 +209,37 @@ async def test_transcription_provider_fallback_accepts_comma_separated_string(mo
 
 
 @pytest.mark.asyncio
+async def test_transcription_legacy_provider_accepts_comma_separated_string(monkeypatch):
+    calls = []
+
+    async def fake_api(audio_bytes, provider, cfg, mime):
+        calls.append((provider, cfg, mime))
+        if provider == "local":
+            raise TimeoutError("local STT timed out")
+        return "Hallo legacy fallback"
+
+    monkeypatch.setattr("pawlia.transcription._transcribe_api", fake_api)
+
+    cfg = {
+        "transcription": {
+            "provider": "local,groq",
+            "local": {
+                "base_url": "http://192.168.177.120:8005/v1",
+                "model": "deepdml/faster-whisper-large-v3-turbo-ct2",
+            },
+            "groq": {
+                "api_key": "secret",
+                "model": "whisper-large-v3-turbo",
+            },
+        }
+    }
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Hallo legacy fallback"
+    assert calls[0] == ("local", cfg["transcription"]["local"], "audio/wav")
+    assert calls[1] == ("groq", cfg["transcription"]["groq"], "audio/wav")
+
+
+@pytest.mark.asyncio
 async def test_transcription_provider_fallback_continues_on_empty_text(monkeypatch):
     calls = []
 

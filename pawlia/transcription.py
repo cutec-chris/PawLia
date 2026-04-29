@@ -171,6 +171,12 @@ def _transcription_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Dict[str, An
     if not isinstance(configured, Iterable):
         logger.warning("transcription: invalid providers=%r; falling back to provider", configured)
         configured = [cfg.get("provider", "groq")]
+    configured = [
+        part.strip() if isinstance(entry, str) else entry
+        for entry in configured
+        for part in (entry.split(",") if isinstance(entry, str) else [entry])
+        if not isinstance(entry, str) or part.strip()
+    ]
 
     attempts: List[Tuple[str, Dict[str, Any]]] = []
     for entry in configured:
