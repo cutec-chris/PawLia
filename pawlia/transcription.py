@@ -164,7 +164,9 @@ def _transcription_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Dict[str, An
     configured = cfg.get("providers")
     if configured is None:
         configured = [cfg.get("provider", "groq")]
-    if isinstance(configured, (str, dict)):
+    if isinstance(configured, str):
+        configured = [part.strip() for part in configured.split(",") if part.strip()]
+    elif isinstance(configured, dict):
         configured = [configured]
     if not isinstance(configured, Iterable):
         logger.warning("transcription: invalid providers=%r; falling back to provider", configured)

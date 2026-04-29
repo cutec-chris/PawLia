@@ -172,6 +172,43 @@ async def test_transcription_provider_fallback_tries_next_provider(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_transcription_provider_fallback_accepts_comma_separated_string(monkeypatch):
+    calls = []
+
+    async def fake_api(audio_bytes, provider, cfg, mime):
+        calls.append((provider, cfg, mime))
+        if provider == "local":
+            raise TimeoutError("local STT timed out")
+        return "Hallo fallback"
+
+    async def fake_local(audio_bytes, cfg, mime):
+        raise AssertionError("local base_url should use the API path")
+
+    monkeypatch.setattr("pawlia.transcription._transcribe_api", fake_api)
+    monkeypatch.setattr("pawlia.transcription._transcribe_local", fake_local)
+
+    cfg = {
+        "transcription": {
+            "providers": "local, groq",
+            "local": {
+                "base_url": "http://192.168.177.120:8005/v1",
+                "model": "deepdml/faster-whisper-large-v3-turbo-ct2",
+                "timeout": 10,
+            },
+            "groq": {
+                "api_key": "secret",
+                "model": "whisper-large-v3-turbo",
+                "language": "de",
+            },
+        }
+    }
+
+    assert await transcribe(b"audio", cfg, mime="audio/wav") == "Hallo fallback"
+    assert calls[0] == ("local", cfg["transcription"]["local"], "audio/wav")
+    assert calls[1] == ("groq", cfg["transcription"]["groq"], "audio/wav")
+
+
+@pytest.mark.asyncio
 async def test_transcription_provider_fallback_continues_on_empty_text(monkeypatch):
     calls = []
 
