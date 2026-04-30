@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
 import io
 import logging
 import sys
@@ -312,7 +313,11 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
         send_cb=send_cb,
     )
 
-    session._tts_track = SimpleNamespace(interrupt=MagicMock(), stop_hold=MagicMock())
+    session._tts_track = SimpleNamespace(
+        interrupt=MagicMock(),
+        stop_after_current_sentence=MagicMock(),
+        stop_hold=MagicMock(),
+    )
     session._cancel_active_response = AsyncMock()
     session._respond_to_transcript = AsyncMock()
 
@@ -320,6 +325,7 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
 
     session._tts_track.interrupt.assert_not_called()
+    session._tts_track.stop_after_current_sentence.assert_not_called()
     session._cancel_active_response.assert_not_awaited()
     session._respond_to_transcript.assert_not_awaited()
     send_cb.assert_not_awaited()
@@ -343,16 +349,78 @@ async def test_process_speech_interrupts_for_meaningful_barge_in():
         send_cb=send_cb,
     )
 
-    session._tts_track = SimpleNamespace(interrupt=MagicMock(), stop_hold=MagicMock())
+    session._tts_track = SimpleNamespace(
+        interrupt=MagicMock(),
+        stop_after_current_sentence=MagicMock(),
+        stop_hold=MagicMock(),
+    )
     session._cancel_active_response = AsyncMock()
     session._respond_to_transcript = AsyncMock()
 
     with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="warte kurz")):
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
 
-    session._tts_track.interrupt.assert_called_once()
+    session._tts_track.interrupt.assert_not_called()
+    session._tts_track.stop_after_current_sentence.assert_called_once()
     session._cancel_active_response.assert_awaited_once()
     session._respond_to_transcript.assert_awaited_once_with("warte kurz")
+
+
+@pytest.mark.asyncio
+async def test_meaningful_barge_in_cancels_previous_response_task():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    session = CallSession(
+        call_id="call-barge-cancel",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-barge-cancel",
+        client=client,
+        app=app,
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    previous_response = asyncio.create_task(asyncio.sleep(30))
+    session._track_response_task(previous_response)
+    session._tts_track = SimpleNamespace(stop_after_current_sentence=MagicMock(), stop_hold=MagicMock())
+    session._respond_to_transcript = AsyncMock()
+
+    try:
+        with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="warte kurz")):
+            await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
+    finally:
+        if not previous_response.done():
+            previous_response.cancel()
+
+    assert previous_response.cancelled()
+    session._tts_track.stop_after_current_sentence.assert_called_once()
+    session._respond_to_transcript.assert_awaited_once_with("warte kurz")
+
+
+@pytest.mark.skipif(not matrix_call._AIORTC_AVAILABLE, reason="aiortc not installed")
+def test_tts_barge_in_finishes_current_sentence_and_discards_later_sentences():
+    track = matrix_call._TTSAudioTrack()
+    frame_count = track.SAMPLES_PER_FRAME * 2
+
+    track.enqueue_pcm_float32(np.ones(frame_count, dtype=np.float32) * 0.1)
+    track.enqueue_pcm_float32(np.ones(frame_count, dtype=np.float32) * 0.2)
+
+    first_item = track._queue.get_nowait()
+    assert first_item[1] == 1
+    track._current_sentence_id = 1
+
+    track.stop_after_current_sentence()
+
+    kept = []
+    while not track._queue.empty():
+        kept.append(track._queue.get_nowait())
+
+    assert kept
+    assert {item[1] for item in kept} == {1}
+
+
 def test_call_session_loads_voip_audio_thresholds_from_config():
     with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([])):
         session = CallSession(

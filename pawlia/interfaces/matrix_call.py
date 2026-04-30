@@ -94,10 +94,12 @@ if _AIORTC_AVAILABLE:
 
         def __init__(self) -> None:
             super().__init__()
-            self._queue: asyncio.Queue[Optional[np.ndarray]] = asyncio.Queue()
+            self._queue: asyncio.Queue[Any] = asyncio.Queue()
             self._pts = 0
             self._time_base = fractions.Fraction(1, self.SAMPLE_RATE)
             self._start_time: Optional[float] = None
+            self._next_sentence_id = 1
+            self._current_sentence_id: Optional[int] = None
             # Hold audio: looping background sound while waiting for agent
             self._hold_pcm: Optional[np.ndarray] = None  # int16 mono @ 48 kHz
             self._hold_pos: int = 0
@@ -123,13 +125,33 @@ if _AIORTC_AVAILABLE:
             self._hold_active = False
 
         def interrupt(self) -> None:
-            """Barge-in: clear all queued TTS audio and stop hold."""
+            """Barge-in: clear all queued TTS audio and stop hold immediately."""
             while not self._queue.empty():
                 try:
                     self._queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
             self._hold_active = False
+            self._current_sentence_id = None
+
+        def stop_after_current_sentence(self) -> None:
+            """Barge-in: finish the sentence in progress and discard later TTS."""
+            self._hold_active = False
+            current_sid = self._current_sentence_id
+            if current_sid is None:
+                self.interrupt()
+                return
+
+            kept: List[Any] = []
+            while not self._queue.empty():
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if isinstance(item, tuple) and len(item) == 3 and item[1] == current_sid:
+                    kept.append(item)
+            for item in kept:
+                self._queue.put_nowait(item)
 
         async def recv(self):  # noqa: D401
             from av import AudioFrame  # type: ignore
@@ -143,9 +165,19 @@ if _AIORTC_AVAILABLE:
                 await asyncio.sleep(delay)
 
             try:
-                samples = self._queue.get_nowait()
+                item = self._queue.get_nowait()
             except asyncio.QueueEmpty:
+                item = None
+
+            if item is None:
                 samples = None
+            elif isinstance(item, tuple) and len(item) == 3:
+                samples, sentence_id, is_last = item
+                self._current_sentence_id = sentence_id
+                if is_last:
+                    self._current_sentence_id = None
+            else:
+                samples = item
 
             if samples is None or len(samples) == 0:
                 if (self._hold_active
@@ -190,10 +222,15 @@ if _AIORTC_AVAILABLE:
             logger.debug("TTS: Enqueuing audio - samples: %d, min: %.4f, max: %.4f, mean: %.4f",
                        len(pcm), float(np.min(pcm)), float(np.max(pcm)), float(np.mean(pcm)))
 
-            for i in range(0, len(pcm_int16), self.SAMPLES_PER_FRAME):
-                chunk = pcm_int16[i : i + self.SAMPLES_PER_FRAME]
+            sentence_id = self._next_sentence_id
+            self._next_sentence_id += 1
+            chunks = [
+                pcm_int16[i : i + self.SAMPLES_PER_FRAME]
+                for i in range(0, len(pcm_int16), self.SAMPLES_PER_FRAME)
+            ]
+            for index, chunk in enumerate(chunks):
                 if len(chunk) > 0:
-                    self._queue.put_nowait(chunk)
+                    self._queue.put_nowait((chunk, sentence_id, index == len(chunks) - 1))
 
 
 # ---------------------------------------------------------------------------
@@ -1099,11 +1136,16 @@ class CallSession:
                 nonlocal first_sentence_received
                 if not self._tts_track:
                     return
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelling():
+                    return
                 try:
                     tts_pcm = await synthesize_pcm(
                         sentence, self._app.config, sample_rate=48000,
                         voice_override=self._voice_override(),
                     )
+                    if current_task and current_task.cancelling():
+                        return
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info("call %s: TTS sentence (%d samples): %s",
                                     self.call_id[:8], len(tts_pcm), sentence[:60])
@@ -1261,7 +1303,6 @@ class CallSession:
                                             interrupt_playback=True,
                                         )
                                     )
-                                    self._track_response_task(task)
                                 else:
                                     logger.info(
                                         "call %s: barge-in candidate looked like noise "
@@ -1363,8 +1404,11 @@ class CallSession:
                     text[:120],
                 )
                 if self._tts_track:
-                    self._tts_track.interrupt()
+                    self._tts_track.stop_after_current_sentence()
                 await self._cancel_active_response()
+                current_task = asyncio.current_task()
+                if current_task:
+                    self._track_response_task(current_task)
 
             await self._respond_to_transcript(text)
         except asyncio.CancelledError:
