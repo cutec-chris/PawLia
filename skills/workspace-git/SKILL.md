@@ -20,6 +20,16 @@ metadata:
 Sets up authenticated git push for the Pawlia workspace and registers an
 automation job that keeps it synced.
 
+## Current workspace
+
+The workspace for this session is always:
+
+```
+<session_dir>/<user_id>/workspace
+```
+
+Use this path for all commands below. Never scan other sessions.
+
 ## Workflow
 
 ### Step 1 — Check current state
@@ -28,9 +38,8 @@ automation job that keeps it synced.
 python <scripts_dir>/setup.py list-workspaces
 ```
 
-Report what workspaces exist, which have a remote configured, and whether
-SSH is already set up. If everything is already configured and working, skip
-ahead to Step 4 (test).
+Only used to check whether the current workspace already has a remote and
+SSH configured (`ssh_configured: true`). If yes, skip to Step 4.
 
 ### Step 2 — Generate SSH key
 
@@ -48,17 +57,16 @@ Once the user confirms the key is added:
 
 ```
 python <scripts_dir>/setup.py configure \
-  --workspace <path> \
+  --workspace <session_dir>/<user_id>/workspace \
   [--remote-url <git-ssh-url>]
 ```
 
-Use the workspace path from Step 1. Include `--remote-url` only if the
-remote is not yet configured or the user provided a new URL.
+Include `--remote-url` only if the remote is not yet configured or the
+user provided a new URL.
 
 The script sets `core.sshCommand` in the workspace `.git/config` so all
 subsequent git operations (including the automatic push in `workspace_git.py`)
-use the session-persisted key. It then runs `git ls-remote` to verify the
-connection.
+use the session-persisted key. It then runs `git ls-remote` to verify.
 
 If the test fails: check the error. Common causes:
 - Key not yet added on the remote → ask the user to double-check
@@ -68,7 +76,8 @@ If the test fails: check the error. Common causes:
 ### Step 4 — Verify push
 
 ```
-python <scripts_dir>/setup.py test --workspace <path>
+python <scripts_dir>/setup.py test \
+  --workspace <session_dir>/<user_id>/workspace
 ```
 
 Run a `git push --dry-run`. Report success or the full error output.
@@ -79,7 +88,7 @@ After a successful test:
 
 ```
 python <scripts_dir>/setup.py create-job \
-  --workspace <path> \
+  --workspace <session_dir>/<user_id>/workspace \
   --schedule 03:00
 ```
 
@@ -120,4 +129,4 @@ automatisch synchron bleibt.
 | `Host key verification failed` | SSH key not yet in known_hosts — `configure` uses `accept-new`, retrying after key add should fix it |
 | `Permission denied (publickey)` | Key not added to remote or wrong key — show key again, ask user to re-check |
 | `Repository not found` | Wrong URL — ask user for correct SSH URL |
-| `Not a git repo` | Run `list-workspaces` again, pick correct path |
+| `Not a git repo` | Workspace not initialized — ensure `<session_dir>/<user_id>/workspace` exists |
