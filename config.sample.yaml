@@ -98,6 +98,7 @@ interfaces:
 #   webrtcvad_min_voiced_ratio: 0.12  # voiced-frame ratio required if enabled
 #   webrtcvad_min_consecutive_frames: 4
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
+#   response_delay_seconds: 2.5       # wait this long after speech ends before replying
 #   agc_window_seconds: 15.0          # keep AGC active this long after bot/user activity
 #   agc_target_rms: 0.10              # target loudness used for VAD normalization
 #   agc_max_gain: 12.0                # upper cap for AGC amplification

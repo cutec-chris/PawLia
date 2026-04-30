@@ -338,6 +338,10 @@ class CallSession:
     BARGEIN_RMS_THRESHOLD = 0.05
     BARGEIN_MIN_WORDS = 4
     BARGEIN_MIN_CHARS = 12
+    # Wait this long after the user's latest speech before replying.  This
+    # lets callers tell a longer story without the agent jumping into every
+    # pause that was only used for breathing or thinking.
+    RESPONSE_DELAY_SECONDS = 2.5
 
     def __init__(
         self,
@@ -369,16 +373,29 @@ class CallSession:
         self._speaking = False
         self._ice_reconnect_task: Optional[asyncio.Task] = None
         self._last_activity_at = time.monotonic()
+        self._last_user_speech_at = self._last_activity_at
         # AGC state
         self._agc_until: float = 0.0   # monotonic timestamp; AGC active while now < this
         self._agc_gain: float = 1.0    # current smoothed gain factor
         self._active_response_task: Optional[asyncio.Task] = None
+        self._pending_response_task: Optional[asyncio.Task] = None
+        self._pending_transcripts: List[str] = []
         self._load_voip_audio_config()
         self._webrtc_vad = self._init_webrtc_vad()
 
     def _mark_activity(self) -> None:
         """Record user or bot activity to keep the call alive."""
         self._last_activity_at = time.monotonic()
+
+    def _mark_user_speech_started(self) -> None:
+        self._speaking = True
+        self._last_user_speech_at = time.monotonic()
+        self._mark_activity()
+
+    def _mark_user_speech_ended(self) -> None:
+        self._speaking = False
+        self._last_user_speech_at = time.monotonic()
+        self._mark_activity()
 
     def _bot_is_active(self) -> bool:
         """Return True while Pawlia is still speaking or generating audio."""
@@ -548,6 +565,12 @@ class CallSession:
             voip_cfg,
             "bargein_rms_threshold",
             self.BARGEIN_RMS_THRESHOLD,
+            minimum=0.0,
+        )
+        self.RESPONSE_DELAY_SECONDS = self._get_float_config(
+            voip_cfg,
+            "response_delay_seconds",
+            self.RESPONSE_DELAY_SECONDS,
             minimum=0.0,
         )
 
@@ -1051,8 +1074,18 @@ class CallSession:
 
     async def _cancel_active_response(self) -> None:
         """Cancel any in-flight response generation for this call."""
-        task = self._active_response_task
+        pending = self._pending_response_task
         current = asyncio.current_task()
+        if pending and not pending.done() and pending is not current:
+            pending.cancel()
+            try:
+                await pending
+            except asyncio.CancelledError:
+                logger.info("call %s: pending response cancelled", self.call_id[:8])
+            except Exception as e:
+                logger.debug("call %s: pending response cancel cleanup failed: %s", self.call_id[:8], e)
+
+        task = self._active_response_task
         if not task or task.done() or task is current:
             return
         task.cancel()
@@ -1111,14 +1144,13 @@ class CallSession:
             )
         return await transcribe_pcm(pcm, sample_rate, self._app.config)
 
-    async def _respond_to_transcript(self, text: str) -> None:
+    async def _respond_to_transcript(self, text: str, announce_transcript: bool = True) -> None:
         """Stream the agent response for an already transcribed utterance."""
         from pawlia.tts import synthesize_pcm
 
-        logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
-
-        # Send transcription immediately so it appears before the response
-        await self._send_cb(f"🎙️ *{text}*")
+        if announce_transcript:
+            logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
+            await self._send_cb(f"🎙️ *{text}*")
 
         # Start hold audio while waiting for agent response
         if self._tts_track:
@@ -1190,6 +1222,49 @@ class CallSession:
                 pass
 
         await self._send_cb(response)
+
+    async def _queue_transcript_response(self, text: str) -> None:
+        """Show the transcript now, but reply only after the caller is quiet."""
+        logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
+        await self._send_cb(f"🎙️ *{text}*")
+        self._pending_transcripts.append(text)
+
+        current = asyncio.current_task()
+        pending = self._pending_response_task
+        if pending and not pending.done() and pending is not current:
+            pending.cancel()
+
+        task = asyncio.create_task(self._delayed_pending_response())
+        self._pending_response_task = task
+        self._track_response_task(task)
+
+    async def _delayed_pending_response(self) -> None:
+        try:
+            while not self._done.is_set():
+                idle_for = time.monotonic() - self._last_user_speech_at
+                if not self._speaking and idle_for >= self.RESPONSE_DELAY_SECONDS:
+                    if self._tts_track and self._tts_track.is_playing:
+                        await asyncio.sleep(0.2)
+                        continue
+                    break
+                await asyncio.sleep(0.2)
+
+            if self._done.is_set() or not self._pending_transcripts:
+                return
+
+            text = "\n".join(self._pending_transcripts)
+            self._pending_transcripts = []
+            logger.info(
+                "call %s: replying after %.1fs quiet to %d transcript chunk(s)",
+                self.call_id[:8],
+                self.RESPONSE_DELAY_SECONDS,
+                len(text.splitlines()),
+            )
+            await self._respond_to_transcript(text, announce_transcript=False)
+        finally:
+            if self._pending_response_task is asyncio.current_task():
+                self._pending_response_task = None
+
     async def _drain_video_track(self, track) -> None:
         """Discard incoming video frames so aiortc doesn't buffer them in memory."""
         try:
@@ -1266,6 +1341,7 @@ class CallSession:
                                 self.call_id[:8],
                                 rms,
                             )
+                            self._mark_user_speech_started()
                         speech_buffer.append(pcm)
                         silence_count = 0
                     elif speech_buffer:
@@ -1281,6 +1357,7 @@ class CallSession:
                             )
                             speech_buffer = []
                             silence_count = 0
+                            self._mark_user_speech_ended()
 
                             if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
                                 chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
@@ -1319,6 +1396,7 @@ class CallSession:
                     if not speech_buffer and silence_count == 0:
                         logger.info("call %s: speech started (rms=%.4f)",
                                     self.call_id[:8], rms)
+                        self._mark_user_speech_started()
                     speech_buffer.append(pcm)
                     silence_count = 0
                 elif speech_buffer:
@@ -1332,6 +1410,7 @@ class CallSession:
                                     self.call_id[:8], duration, len(chunk))
                         speech_buffer = []
                         silence_count = 0
+                        self._mark_user_speech_ended()
 
                         if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
                             chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
@@ -1410,7 +1489,7 @@ class CallSession:
                 if current_task:
                     self._track_response_task(current_task)
 
-            await self._respond_to_transcript(text)
+            await self._queue_transcript_response(text)
         except asyncio.CancelledError:
             if self._tts_track:
                 self._tts_track.stop_hold()

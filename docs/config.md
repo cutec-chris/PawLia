@@ -171,6 +171,7 @@ voip:
   webrtcvad_min_voiced_ratio: 0.12
   webrtcvad_min_consecutive_frames: 4
   call_inactivity_seconds: 180
+  response_delay_seconds: 2.5
   agc_window_seconds: 15.0
   agc_target_rms: 0.10
   agc_max_gain: 12.0
@@ -193,6 +194,7 @@ voip:
 | `voip.webrtcvad_min_voiced_ratio` | Minimum share of frames WebRTC VAD must classify as voiced before a chunk is sent to STT |
 | `voip.webrtcvad_min_consecutive_frames` | Minimum sustained run of WebRTC-voiced frames required before a chunk is sent to STT |
 | `voip.call_inactivity_seconds` | Hang up the VoIP call when no speech chunk has been sent to STT for this many seconds |
+| `voip.response_delay_seconds` | Quiet time after the latest caller speech before PawLia starts answering |
 | `voip.agc_window_seconds` | How long PawLia keeps automatic gain control active after recent speech / call activity |
 | `voip.agc_target_rms` | Target loudness AGC tries to normalize incoming audio toward for VAD decisions |
 | `voip.agc_max_gain` | Upper amplification cap AGC may apply to quiet incoming audio |
