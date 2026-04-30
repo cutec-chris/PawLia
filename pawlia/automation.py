@@ -358,13 +358,14 @@ class JobRunner:
 
             try:
                 runner = self._app.run_instruction(instruction, user_id)
-                result = await runner.run(query=instruction)
+                thread_id = f"automation_{job.get('id', 'job')}"
+                result = await runner.run(instruction, thread_id=thread_id)
                 job["last_run"] = now.isoformat()
                 job["last_result"] = "success"
                 changed = True
 
                 if job.get("notify", True):
-                    output = result[:500] if result else "erledigt"
+                    output = result if result else "erledigt"
                     await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{output}")
 
             except Exception as e:

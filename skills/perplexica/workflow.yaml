@@ -8,10 +8,8 @@ workflows:
   max_steps: 1
   building_blocks:
   - id: run_search
-    command: python {scripts_dir}/search.py --query "{query}" --url "{url}" --focus
-      {focus_mode}
-    description: Execute Perplexica AI search with specified query, URL, and focus
-      mode
+    command: python {scripts_dir}/search.py --query "{query}"
+    description: Execute Perplexica AI search with the configured Perplexica URL
     status_desc: Suche {query} mit Perplexica
     verify:
       exit_code: 0

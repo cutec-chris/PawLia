@@ -2,41 +2,30 @@
 
 Config layout (YAML)::
 
-    # API-based — Groq example (any compatible endpoint works):
+    # Explicit STT fallback list (one entry means no fallback):
     transcription:
-      provider: groq
+      providers:
+        - name: lan-whisper
+          provider: local
+          base_url: http://127.0.0.1:8000/v1
+          model: whisper-large-v3-turbo
+          timeout: 12
+        - groq
+
       groq:
         api_key: YOUR_GROQ_API_KEY
         model: whisper-large-v3-turbo
         # base_url: https://api.groq.com/openai/v1   # set automatically; override if needed
         # language: de
-
-    # Other provider (OpenAI or self-hosted):
-    # transcription:
-    #   provider: openai
-    #   openai:
-    #     api_key: YOUR_API_KEY
-    #     base_url: https://api.openai.com/v1
-    #     model: whisper-1
-    #     # language: de
-
-    # Local (faster-whisper, requires FFmpeg) or self-hosted OpenAI-compatible:
-    # transcription:
-    #   provider: local
-    #   local:
-    #     model: base
-    #     # base_url: http://127.0.0.1:8000/v1
-    #     device: cpu
-    #     compute_type: int8
-    #     # language: de
 """
 
-import asyncio
 import logging
 import os
 import subprocess
 import tempfile
-from typing import Any, Dict, Optional, Tuple
+import time
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("pawlia.transcription")
 
@@ -63,6 +52,11 @@ _DEFAULT_PREPROCESS: Dict[str, float] = {
     "gate_ratio": 0.2,
 }
 
+_BLACKLIST_THRESHOLD = 3
+_BLACKLIST_COOLDOWN_SECONDS = 30 * 60
+_stt_provider_state: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+_now = time.monotonic
+
 
 async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "audio/ogg") -> Optional[str]:
     """Transcribe *audio_bytes* to text.
@@ -75,30 +69,159 @@ async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "au
         logger.warning("transcription: no config — skipping")
         return None
 
-    provider = cfg.get("provider", "groq")
-    provider_cfg = cfg.get(provider, {})
-
-    try:
-        if provider == "local":
-            if provider_cfg.get("base_url"):
-                base_url = provider_cfg.get("base_url", "").rstrip("/")
-                model = provider_cfg.get("model", _DEFAULT_MODEL)
+    attempts = _transcription_attempts(cfg)
+    for idx, (provider, provider_cfg) in enumerate(attempts, start=1):
+        label = provider_cfg.get("name") or provider
+        state_key = _provider_state_key(provider, provider_cfg)
+        remaining = _blacklist_remaining_seconds(state_key)
+        if remaining > 0:
+            logger.info(
+                "transcription: skip provider '%s' temporarily blacklisted for %ds more",
+                label,
+                remaining,
+            )
+            continue
+        try:
+            text = await _transcribe_with_provider(audio_bytes, provider, provider_cfg, mime)
+        except Exception as e:
+            _note_provider_failure(state_key, str(label), e)
+            logger.error(
+                "transcription: error (provider=%s attempt=%d/%d): %s",
+                label,
+                idx,
+                len(attempts),
+                e,
+                exc_info=True,
+            )
+            continue
+        if text:
+            _note_provider_success(state_key)
+            if idx > 1:
                 logger.info(
-                    "transcription: sending to %s/audio/transcriptions (provider=%s model=%s)",
-                    base_url,
-                    provider,
-                    model,
+                    "transcription: fallback provider succeeded (provider=%s attempt=%d/%d)",
+                    label,
+                    idx,
+                    len(attempts),
                 )
-                return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
-            logger.debug("transcription: using local faster-whisper (model=%s)", provider_cfg.get("model", "base"))
-            return await _transcribe_local(audio_bytes, provider_cfg, mime)
-        base_url = provider_cfg.get("base_url", _PROVIDER_BASE_URLS.get(provider, "<no base_url>")).rstrip("/")
-        model = provider_cfg.get("model", _DEFAULT_MODEL)
-        logger.info("transcription: sending to %s/audio/transcriptions (provider=%s model=%s)", base_url, provider, model)
-        return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
-    except Exception as e:
-        logger.error("transcription: error (provider=%s): %s", provider, e, exc_info=True)
-        return None
+            return text
+        logger.info("transcription: provider returned no text (provider=%s attempt=%d/%d)", label, idx, len(attempts))
+
+    logger.info("transcription: all providers returned no text")
+    return None
+
+
+def _provider_state_key(provider: str, provider_cfg: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    return (
+        provider,
+        str(provider_cfg.get("name") or ""),
+        str(provider_cfg.get("base_url") or _PROVIDER_BASE_URLS.get(provider, "")),
+        str(provider_cfg.get("model") or _DEFAULT_MODEL),
+    )
+
+
+def _provider_state(state_key: Tuple[str, str, str, str]) -> Dict[str, Any]:
+    return _stt_provider_state.setdefault(
+        state_key,
+        {"failures": 0, "blacklisted_until": 0.0, "last_error": None},
+    )
+
+
+def _blacklist_remaining_seconds(state_key: Tuple[str, str, str, str]) -> int:
+    state = _provider_state(state_key)
+    return max(0, int(state["blacklisted_until"] - _now()))
+
+
+def _note_provider_success(state_key: Tuple[str, str, str, str]) -> None:
+    state = _provider_state(state_key)
+    state["failures"] = 0
+    state["blacklisted_until"] = 0.0
+    state["last_error"] = None
+
+
+def _note_provider_failure(state_key: Tuple[str, str, str, str], label: str, exc: Exception) -> None:
+    state = _provider_state(state_key)
+    state["last_error"] = exc
+    state["failures"] += 1
+    if state["failures"] < _BLACKLIST_THRESHOLD:
+        return
+    state["blacklisted_until"] = _now() + _BLACKLIST_COOLDOWN_SECONDS
+    state["failures"] = 0
+    logger.warning(
+        "transcription: provider '%s' failed %d times across requests, skipping it for %d minutes",
+        label,
+        _BLACKLIST_THRESHOLD,
+        _BLACKLIST_COOLDOWN_SECONDS // 60,
+    )
+
+
+def _transcription_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """Return normalized transcription provider attempts.
+
+    Backwards compatible with ``provider: groq`` while also supporting
+    ``providers`` fallback chains.  ``providers`` may contain provider names
+    or inline provider configs, e.g. ``{"provider": "local", "base_url": ...}``.
+    """
+    configured = cfg.get("providers")
+    if configured is None:
+        configured = [cfg.get("provider", "groq")]
+    if isinstance(configured, str):
+        configured = [part.strip() for part in configured.split(",") if part.strip()]
+    elif isinstance(configured, dict):
+        configured = [configured]
+    if not isinstance(configured, Iterable):
+        logger.warning("transcription: invalid providers=%r; falling back to provider", configured)
+        configured = [cfg.get("provider", "groq")]
+    configured = [
+        part.strip() if isinstance(entry, str) else entry
+        for entry in configured
+        for part in (entry.split(",") if isinstance(entry, str) else [entry])
+        if not isinstance(entry, str) or part.strip()
+    ]
+
+    attempts: List[Tuple[str, Dict[str, Any]]] = []
+    for entry in configured:
+        if isinstance(entry, str):
+            provider = entry
+            provider_cfg = dict(cfg.get(provider, {}) or {})
+        elif isinstance(entry, dict):
+            provider = str(entry.get("provider") or entry.get("type") or cfg.get("provider", "groq"))
+            provider_cfg = dict(cfg.get(provider, {}) or {})
+            provider_cfg.update({k: v for k, v in entry.items() if k not in {"provider", "type"}})
+        else:
+            logger.warning("transcription: ignoring invalid provider entry %r", entry)
+            continue
+        if provider:
+            attempts.append((provider, provider_cfg))
+
+    if not attempts:
+        attempts.append((cfg.get("provider", "groq"), dict(cfg.get(cfg.get("provider", "groq"), {}) or {})))
+    return attempts
+
+
+async def _transcribe_with_provider(
+    audio_bytes: bytes,
+    provider: str,
+    provider_cfg: Dict[str, Any],
+    mime: str,
+) -> Optional[str]:
+    if provider == "local":
+        if provider_cfg.get("base_url"):
+            base_url = provider_cfg.get("base_url", "").rstrip("/")
+            model = provider_cfg.get("model", _DEFAULT_MODEL)
+            logger.info(
+                "transcription: sending to %s/audio/transcriptions (provider=%s model=%s)",
+                base_url,
+                provider,
+                model,
+            )
+            return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
+        logger.debug("transcription: using local faster-whisper (model=%s)", provider_cfg.get("model", "base"))
+        return await _transcribe_local(audio_bytes, provider_cfg, mime)
+
+    base_url = provider_cfg.get("base_url", _PROVIDER_BASE_URLS.get(provider, "<no base_url>")).rstrip("/")
+    model = provider_cfg.get("model", _DEFAULT_MODEL)
+    logger.info("transcription: sending to %s/audio/transcriptions (provider=%s model=%s)", base_url, provider, model)
+    return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
 
 
 def _bandpass_pcm(pcm: "np.ndarray", sample_rate: int, low_hz: float = 80.0, high_hz: float = 8000.0) -> "np.ndarray":
@@ -518,7 +641,7 @@ async def _transcribe_api(audio_bytes: bytes, provider: str, cfg: Dict, mime: st
                 headers=headers,
                 files={"file": (f"audio.{ext}", audio_bytes, mime)},
                 data=data,
-                timeout=60,
+                timeout=float(cfg.get("timeout", 60)),
             )
         except httpx.ConnectError as e:
             raise ConnectionError(f"STT: could not connect to {url} — {e}") from e

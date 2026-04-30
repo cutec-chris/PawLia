@@ -13,6 +13,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+import yaml
+
 # Project root (for finding bundled skills to validate/list against)
 PROJECT_ROOT = Path(__file__).resolve().parents[3]  # thalia/
 BUNDLED_DIR = PROJECT_ROOT / "skills"
@@ -49,6 +51,9 @@ metadata:
    ```
    python <scripts_dir>/{script_name} <args>
    ```
+   Do not pass deployment config such as URLs or timeouts as CLI args unless
+   the user explicitly asks for an override. Scripts read those values from
+   `PAWLIA_SKILL_CONFIG`.
 3. Parse the JSON output (`success`, plus result fields or `error`).
 4. Return a clean, formatted result to the user.
 
@@ -101,6 +106,7 @@ def main():
     # Read PawLia runtime env:
     #   user_id = os.environ.get("PAWLIA_USER_ID")
     #   session_dir = os.environ.get("PAWLIA_SESSION_DIR")
+    #   skill_config = json.loads(os.environ.get("PAWLIA_SKILL_CONFIG", "{}"))
 
     try:
         # TODO: implement your skill logic here
@@ -531,12 +537,40 @@ def _build_cred_env(meta: dict):
     return env, missing
 
 
+def _build_skill_config_env(name: str, meta: dict):
+    """Load skill-config.<name> for harness runs.
+
+    The harness should see the same PAWLIA_SKILL_CONFIG env var that the real
+    SkillRunner/BashTool injects at runtime.
+    Returns (env_dict, missing_keys).
+    """
+    config = {}
+    config_path = os.environ.get("PAWLIA_CONFIG_PATH")
+    candidates = [Path(config_path)] if config_path else []
+    candidates.extend([PROJECT_ROOT / "config.yaml", PROJECT_ROOT / "config.yml"])
+    for candidate in candidates:
+        if not candidate or not candidate.is_file():
+            continue
+        try:
+            with open(candidate, encoding="utf-8") as f:
+                root = yaml.safe_load(f) or {}
+            config = (root.get("skill-config") or {}).get(name, {}) or {}
+            break
+        except (OSError, yaml.YAMLError):
+            continue
+
+    required = (meta.get("metadata") or {}).get("requires_config") or []
+    missing = [key for key in required if key not in config]
+    return {"PAWLIA_SKILL_CONFIG": json.dumps(config, ensure_ascii=False)}, missing
+
+
 def cmd_test(args):
     """Run the skill's harness with production-equivalent env.
 
     Loads credentials from .credentials.json, injects them as CRED_* env
-    vars, sets PAWLIA_SESSION_DIR/PAWLIA_USER_ID, and runs the harness
-    script. Returns full stdout/stderr — no truncation, no wrapping.
+    vars, injects skill-config.<name> as PAWLIA_SKILL_CONFIG, keeps
+    PAWLIA_SESSION_DIR/PAWLIA_USER_ID, and runs the harness script. Returns
+    full stdout/stderr — no truncation, no wrapping.
     """
     name = args.name
     skill_path = _find_skill(name)
@@ -567,7 +601,8 @@ def cmd_test(args):
 
     harness_path, cmd = found
     cred_env, missing = _build_cred_env(meta)
-    env = {**os.environ, **cred_env}
+    config_env, missing_config = _build_skill_config_env(name, meta)
+    env = {**os.environ, **cred_env, **config_env}
 
     try:
         proc = subprocess.run(
@@ -588,6 +623,7 @@ def cmd_test(args):
         "exit_code": exit_code,
         "timed_out": timed_out,
         "missing_credentials": missing,
+        "missing_config": missing_config,
         "stdout": stdout,
         "stderr": stderr,
     }, ensure_ascii=False))

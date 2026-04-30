@@ -67,6 +67,16 @@ class TestBashTool:
         result = tool.execute({"command": "echo ok"})
         assert "ok" in result
 
+    def test_skill_config_injected_as_env(self):
+        tool = BashTool()
+        result = tool.execute(
+            {"command": "printf '%s' \"$PAWLIA_SKILL_CONFIG\""},
+            context={"skill_config": {"url": "http://example.test", "timeout": 12}},
+        )
+        config = json.loads(result)
+        assert config["url"] == "http://example.test"
+        assert config["timeout"] == 12
+
 
 class TestReminderTool:
     def test_add_and_list(self):

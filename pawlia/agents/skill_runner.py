@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import (
@@ -29,6 +30,8 @@ from pawlia.skills.loader import AgentSkill
 from pawlia.tools.base import ToolExecutionResult, ToolRegistry
 
 _RE_CODE_BLOCK = re.compile(r"```(?:bash|sh)?\s*\n(.+?)```", re.DOTALL)
+_RE_ANY_CODE_BLOCK = re.compile(r"```[^\n]*\n(.+?)```", re.DOTALL)
+_RE_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
 
 
 class SkillRunnerAgent(BaseAgent):
@@ -198,6 +201,16 @@ class SkillRunnerAgent(BaseAgent):
         if response.tool_calls:
             return await self._tool_call_loop(messages, response)
 
+        recovered_calls = self._recover_text_tool_calls(response)
+        if recovered_calls:
+            self.logger.warning(
+                "Recovered %d text-form tool call(s) in skill '%s'",
+                len(recovered_calls),
+                self.skill.name,
+            )
+            response.tool_calls = recovered_calls
+            return await self._tool_call_loop(messages, response)
+
         # Model answered directly without tools
         return self.extract_text(response)
 
@@ -360,6 +373,78 @@ class SkillRunnerAgent(BaseAgent):
                 return line
 
         return ""
+
+    def _recover_text_tool_calls(self, response: AIMessage) -> List[Dict[str, Any]]:
+        """Recover tool calls that were emitted as plain text.
+
+        GLM/Qwen-style local models sometimes write a bash command or
+        ``<tool_call>{...}</tool_call>`` even though tools are bound.  Turning
+        that into a real ToolMessage keeps the same recovery loop alive without
+        adding another agent layer.
+        """
+        if response.tool_calls:
+            return []
+        content = response.content if isinstance(response.content, str) else ""
+        valid_names = set(self.tool_registry.names())
+        calls: List[Dict[str, Any]] = []
+
+        def _append_from_obj(obj: Any) -> None:
+            if isinstance(obj, list):
+                for item in obj:
+                    _append_from_obj(item)
+                return
+            if not isinstance(obj, dict):
+                return
+            name = str(obj.get("name") or obj.get("tool") or obj.get("function") or "").strip()
+            if not name:
+                return
+            resolved = self.tool_registry._resolve(name)
+            if resolved not in valid_names:
+                return
+            args = obj.get("args")
+            if args is None:
+                args = obj.get("arguments")
+            if args is None:
+                args = obj.get("parameters")
+            if args is None:
+                args = {
+                    key: value
+                    for key, value in obj.items()
+                    if key not in {"id", "name", "tool", "function"}
+                }
+            calls.append({
+                "id": obj.get("id") or f"fake_{uuid.uuid4().hex[:8]}",
+                "name": resolved,
+                "args": args,
+            })
+
+        snippets: List[str] = [m.group(1).strip() for m in _RE_TOOL_CALL_TAG.finditer(content)]
+        snippets.extend(m.group(1).strip() for m in _RE_ANY_CODE_BLOCK.finditer(content))
+
+        stripped = content.strip()
+        if stripped.startswith(("{", "[")):
+            snippets.append(stripped)
+
+        for snippet in snippets:
+            if not snippet:
+                continue
+            try:
+                _append_from_obj(json.loads(snippet))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+
+        if calls:
+            return calls
+
+        command = self._extract_command(content)
+        if command and "bash" in valid_names:
+            return [{
+                "id": f"fake_{uuid.uuid4().hex[:8]}",
+                "name": "bash",
+                "args": {"command": command},
+            }]
+
+        return []
 
     # ------------------------------------------------------------------
     # Step display

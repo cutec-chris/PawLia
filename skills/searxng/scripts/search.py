@@ -2,6 +2,7 @@
 """SearXNG search CLI script. Outputs JSON results to stdout."""
 import argparse
 import json
+import os
 import sys
 import io
 import requests
@@ -37,12 +38,26 @@ def main():
     parser = argparse.ArgumentParser(description="SearXNG web search")
     parser.add_argument("--query", required=True, help="Search query")
     parser.add_argument("--limit", type=int, default=5, help="Max results")
-    parser.add_argument("--url", required=True, help="SearXNG instance URL")
+    parser.add_argument("--url", help="SearXNG instance URL; defaults to skill-config.searxng.url")
     parser.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
     args = parser.parse_args()
 
     try:
-        results = search(args.query, args.limit, args.url, args.timeout)
+        skill_config = {}
+        raw_config = os.environ.get("PAWLIA_SKILL_CONFIG", "{}")
+        try:
+            skill_config = json.loads(raw_config)
+        except json.JSONDecodeError:
+            skill_config = {}
+
+        url = args.url or skill_config.get("url", "")
+        timeout = args.timeout
+        if "timeout" in skill_config and "--timeout" not in sys.argv:
+            timeout = int(skill_config["timeout"])
+        if not url:
+            raise ValueError("Missing SearXNG URL. Set skill-config.searxng.url or pass --url.")
+
+        results = search(args.query, args.limit, url, timeout)
         print(json.dumps(results, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)

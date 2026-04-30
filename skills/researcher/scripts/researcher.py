@@ -42,7 +42,14 @@ USER_AGENT = "pawlia-researcher/1.0"
 
 
 def _load_skill_config() -> dict:
-    """Load researcher config from config.yaml -> skill-config.researcher."""
+    """Load researcher config from PawLia runtime env, then config.yaml fallback."""
+    raw_config = os.environ.get("PAWLIA_SKILL_CONFIG")
+    if raw_config:
+        try:
+            return json.loads(raw_config)
+        except json.JSONDecodeError:
+            pass
+
     for candidate in (
         _PROJECT_ROOT / "config.yaml",
         _PROJECT_ROOT / "config.yml",

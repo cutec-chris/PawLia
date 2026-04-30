@@ -8,9 +8,8 @@ workflows:
   max_steps: 1
   building_blocks:
   - id: run_search
-    command: python {scripts_dir}/search.py --query "{query}" --limit {limit} --url
-      "{url}" --timeout {timeout}
-    description: Execute SearXNG web search with specified parameters
+    command: python {scripts_dir}/search.py --query "{query}" --limit {limit}
+    description: Execute SearXNG web search with the configured SearXNG URL
     status_desc: Suche im Web nach {query}
     verify:
       exit_code: 0

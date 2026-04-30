@@ -20,7 +20,7 @@ import tempfile
 import time
 import zipfile
 from collections import defaultdict
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import jinja2
 import yaml
@@ -40,6 +40,31 @@ _jinja_env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(_TEMPLATES_DIR),
     autoescape=False,  # HTML is trusted; JS template literals must not be escaped
 )
+
+
+def build_health_payload(app: "App") -> tuple[int, Dict[str, Any]]:
+    checks: Dict[str, str] = {}
+    ok = True
+
+    sched_task = app.scheduler._task
+    if sched_task is None or sched_task.done():
+        checks["scheduler"] = "stopped"
+        ok = False
+    else:
+        checks["scheduler"] = "ok"
+
+    configured = app.config.get("interfaces", {}) if isinstance(app.config, dict) else {}
+    interface_health = getattr(app, "interface_health", {})
+    for name in sorted(configured):
+        if name == "web":
+            continue
+        state = interface_health.get(name, "unknown")
+        checks[f"interface:{name}"] = state
+        if state != "running":
+            ok = False
+
+    status = 200 if ok else 503
+    return status, {"status": "ok" if ok else "unhealthy", "checks": checks}
 
 # ---------------------------------------------------------------------------
 # Config file helpers
@@ -129,7 +154,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
 
     from pawlia.interfaces.common import (
         AgentCache, preview_text, build_status, format_status,
-        handle_model_command, handle_agent_command, format_agent_overrides,
+        handle_model_command,
         format_private_toggle, format_bg_enqueue,
         handle_reload_command,
     )
@@ -198,7 +223,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
         if not message and not images:
             return web.json_response({"error": "empty message"}, status=400)
 
-        # ── Commands (/status, /model, /agent, /private, /reload, /thread) ──
+        # ── Commands (/status, /model, /private, /reload, /thread) ──
         lower = message.lower().strip()
 
         if lower == "/status":
@@ -212,23 +237,12 @@ async def start_web(app: "App", cfg: Dict) -> None:
             if result.invalidate_agent:
                 agent_cache.invalidate(user_id)
             if result.action == "show":
-                return web.json_response({"response": f"**Model ({result.ctx_label}):** `{result.model}`"})
-            return web.json_response({"response": f"Model auf `{result.model}` gesetzt ({result.ctx_label})."})
-
-        if lower.startswith("/agent"):
-            args_str = message.strip()[len("/agent"):].strip()
-            result = handle_agent_command(app, user_id, args_str, thread_id=thread_id)
-            if result.invalidate_agent:
-                agent_cache.invalidate(user_id)
-            if result.action == "show_all":
-                return web.json_response({"response": f"**Agent Overrides ({result.ctx_label}):**\n{format_agent_overrides(result.overrides)}"})
-            if result.action == "show_path":
-                return web.json_response({"response": f"**Agent Override `{result.path}` ({result.ctx_label}):** `{result.value}`"})
+                return web.json_response({"response": f"**Default Model ({result.ctx_label}):** `{result.model}`"})
             if result.action == "invalid_path":
-                return web.json_response({"response": "Ungültiger Agent-Pfad. Erlaubt: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`."})
+                return web.json_response({"response": "Ungültiger Model-Pfad. Erlaubt: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`."})
             if result.action == "cleared":
-                return web.json_response({"response": f"Agent-Override `{result.path}` entfernt ({result.ctx_label})."})
-            return web.json_response({"response": f"Agent-Override `{result.path}` auf `{result.value}` gesetzt ({result.ctx_label})."})
+                return web.json_response({"response": f"Model-Override `{result.path}` entfernt ({result.ctx_label})."})
+            return web.json_response({"response": f"Model-Override `{result.path}` auf `{result.model}` gesetzt ({result.ctx_label})."})
 
         if lower == "/reload":
             result = handle_reload_command(app)
@@ -681,19 +695,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
     # ── Health check (no auth) ────────────────────────────────────────────────
 
     async def handle_health(request: web.Request) -> web.Response:
-        checks: Dict[str, str] = {}
-        ok = True
-
-        # Scheduler task alive?
-        sched_task = app.scheduler._task
-        if sched_task is None or sched_task.done():
-            checks["scheduler"] = "stopped"
-            ok = False
-        else:
-            checks["scheduler"] = "ok"
-
-        status = 200 if ok else 503
-        return web.json_response({"status": "ok" if ok else "unhealthy", "checks": checks}, status=status)
+        status, payload = build_health_payload(app)
+        return web.json_response(payload, status=status)
 
     webapp = web.Application()
     webapp.router.add_get("/health",              handle_health)

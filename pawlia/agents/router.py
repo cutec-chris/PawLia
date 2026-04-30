@@ -125,16 +125,10 @@ class RouterAgent:
 
     def active_model_name(self, thread_id: Optional[str] = None, *, agent_type: str = "chat") -> str:
         overrides = self._agent_overrides(thread_id)
-        try:
-            return self._llm_factory.default_model_name(
-                agent_type,
-                agent_overrides=overrides,
-            )
-        except TypeError:
-            override = self._active_override_model(thread_id, agent_type=agent_type)
-            if override:
-                return override
-            return self._llm_factory.default_model_name(agent_type)
+        return self._llm_factory.default_model_name(
+            agent_type,
+            agent_overrides=overrides,
+        )
 
     def describe_backend(
         self,
@@ -223,10 +217,7 @@ class RouterAgent:
             system_prompt=system_prompt,
             thread_id=thread_id,
         )
-        try:
-            client = self._hermes_client(thread_id, agent_type=agent_type)
-        except TypeError:
-            client = self._hermes_client(thread_id)
+        client = self._hermes_client(thread_id, agent_type=agent_type)
         result = await client.run(
             user_input=user_input,
             system_prompt=prompt,

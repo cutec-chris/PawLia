@@ -171,6 +171,7 @@ voip:
   webrtcvad_min_voiced_ratio: 0.12
   webrtcvad_min_consecutive_frames: 4
   call_inactivity_seconds: 180
+  response_delay_seconds: 2.5
   agc_window_seconds: 15.0
   agc_target_rms: 0.10
   agc_max_gain: 12.0
@@ -196,6 +197,7 @@ voip:
 | `voip.webrtcvad_min_voiced_ratio` | Minimum share of frames WebRTC VAD must classify as voiced before a chunk is sent to STT |
 | `voip.webrtcvad_min_consecutive_frames` | Minimum sustained run of WebRTC-voiced frames required before a chunk is sent to STT |
 | `voip.call_inactivity_seconds` | Hang up the VoIP call when no speech chunk has been sent to STT for this many seconds |
+| `voip.response_delay_seconds` | Quiet time after the latest caller speech before PawLia starts answering |
 | `voip.agc_window_seconds` | How long PawLia keeps automatic gain control active after recent speech / call activity |
 | `voip.agc_target_rms` | Target loudness AGC tries to normalize incoming audio toward for VAD decisions |
 | `voip.agc_max_gain` | Upper amplification cap AGC may apply to quiet incoming audio |
@@ -215,12 +217,22 @@ Used for voice messages in Telegram and Matrix, and for VoIP calls.
 
 ```yaml
 transcription:
-  provider: groq          # groq | openai | local
+  # Explicit STT fallback list, tried top to bottom.
+  # PawLia only uses providers listed here.
+  providers:
+    - name: lan-whisper
+      provider: local
+      base_url: http://192.168.177.120:8005/v1
+      model: deepdml/faster-whisper-large-v3-turbo-ct2
+      language: de
+      timeout: 10
+    - groq
 
   groq:
     api_key: YOUR_GROQ_API_KEY
     model: whisper-large-v3-turbo
-    # language: de
+    language: de
+    timeout: 30
 
   preprocess:
     highpass_hz: 140
@@ -232,6 +244,7 @@ transcription:
     gate_threshold: 0.015
     gate_ratio: 0.2
 
+  # Provider configs are only used when referenced from `providers`.
   # openai:
   #   api_key: YOUR_API_KEY
   #   base_url: https://api.openai.com/v1
@@ -248,8 +261,18 @@ transcription:
   #   compute_type: int8
 ```
 
+`transcription.providers` is the explicit STT fallback list. Use one entry for
+no fallback, or multiple entries for fallback. PawLia does not try every
+configured provider automatically. Each entry can be a provider name, or an
+inline provider config. Inline configs are useful for per-provider `timeout`
+values or for trying multiple endpoints of the same provider type. Runtime
+failures are tracked across requests: after 3 failures a provider is skipped for
+30 minutes, then tried again.
+
 | Key | Description |
 |-----|-------------|
+| `transcription.providers` | Ordered STT fallback chain; tries entries until one returns text; providers are temporarily skipped after repeated runtime failures |
+| `transcription.<provider>.timeout` | HTTP timeout in seconds for OpenAI-compatible transcription endpoints |
 | `transcription.preprocess.highpass_hz` | Removes low-frequency rumble such as wind, handling noise or desk vibrations |
 | `transcription.preprocess.lowpass_hz` | Cuts very high frequencies that mostly contain hiss and sharp background noise |
 | `transcription.preprocess.denoise_strength` | Strength of spectral background-noise subtraction |
@@ -310,7 +333,8 @@ Auto-commits are throttled to max 1 per 5 minutes. See [automation.md](automatio
 
 ## Skill Configuration
 
-Per-skill settings (URLs, API keys, etc.). Keys match the skill name.
+Per-skill deployment settings (URLs, hosts, timeouts, model names, etc.). Keys
+match the skill name. Secrets should use skill credentials instead.
 
 ```yaml
 skill-config:

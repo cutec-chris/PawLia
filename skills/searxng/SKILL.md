@@ -16,8 +16,9 @@ metadata:
 
 1. Run the search script with the provided arguments:
    ```
-   python <scripts_dir>/search.py --query "<query>" --limit <limit> --url "<url>" --timeout <timeout>
+   python <scripts_dir>/search.py --query "<query>" --limit <limit>
    ```
+   The script reads the SearXNG URL from `skill-config.searxng.url`. It also uses `skill-config.searxng.timeout` when present. Pass `--url` or `--timeout` only for explicit overrides.
 2. Parse the JSON output (array of objects with `title`, `url`, `content` fields)
 3. Return the results as a structured list
 

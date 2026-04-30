@@ -14,7 +14,11 @@ networkx>=3.0
 beautifulsoup4>=4.12
 html2text>=2024.2
 ollama>=0.4
-trafilatura>=1.8
-markitdown[pdf,docx,xlsx,xls,pptx]>=0.1
+trafilatura>=2.0,<3
+lxml>=5.4,<7
+# Optional Matrix attachment conversion:
+# markitdown[pdf,docx,xlsx,xls,pptx]>=0.1
+# Disabled in the default install because markitdown pulls magika -> onnxruntime,
+# which has no pip wheel for Alpine/musllinux aarch64 on Python 3.14.
 
 # VoIP / telephony extras → see requirements-voip.txt
