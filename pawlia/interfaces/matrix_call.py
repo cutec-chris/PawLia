@@ -693,6 +693,10 @@ class CallSession:
                         logger.debug("call %s: receiver params: %s",
                                      self.call_id[:8], getattr(r, "_track", None))
                 asyncio.ensure_future(self._audio_pipeline(track))
+            elif track.kind == "video":
+                # Drain decoded video frames so aiortc doesn't buffer them indefinitely.
+                # Replace with frame-processing logic once video input to the model is implemented.
+                asyncio.ensure_future(self._drain_video_track(track))
 
         @self._pc.on("connectionstatechange")
         async def on_conn_state():
@@ -1144,6 +1148,14 @@ class CallSession:
                 pass
 
         await self._send_cb(response)
+    async def _drain_video_track(self, track) -> None:
+        """Discard incoming video frames so aiortc doesn't buffer them in memory."""
+        try:
+            while not self._done.is_set():
+                await track.recv()
+        except Exception:
+            pass
+
     async def _audio_pipeline(self, track) -> None:
         """Continuously read audio frames, detect speech, transcribe, respond."""
         SAMPLE_RATE = 48000
