@@ -167,6 +167,21 @@ intended and flag any mismatch.
    output `{"success": bool, ...}` as JSON, exit 0 on success and non-zero on
    failure.
 
+   **Data vs. presentation — hard rule:** Scripts output raw structured data
+   (facts, numbers, lists, timestamps) in the JSON payload. They do NOT
+   pre-format the final answer as a user-facing string. The LLM sub-agent is
+   responsible for turning the data into a response: choosing what to highlight,
+   applying Pawlia's tone, trimming noise, and structuring the text. A script
+   that returns a pre-built wall of text locks out the LLM and makes the skill
+   impossible to adjust conversationally.
+
+   **Example output in SKILL.md:** Every skill body must contain a
+   `## Example output` section with one realistic sample of what a *good LLM
+   response* looks like (the final text the user should see — not the JSON).
+   This anchors the LLM's formatting decisions and gives Pawlia a stable
+   output shape even when the underlying data varies. Keep the sample
+   representative but concise (5–20 lines).
+
 5. **Validate.** `creator.py validate --name "<name>"` — fix all `issues`,
    review `warnings`.
 

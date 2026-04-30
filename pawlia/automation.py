@@ -365,7 +365,7 @@ class JobRunner:
                 changed = True
 
                 if job.get("notify", True):
-                    output = result[:500] if result else "erledigt"
+                    output = result if result else "erledigt"
                     await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{output}")
 
             except Exception as e:
