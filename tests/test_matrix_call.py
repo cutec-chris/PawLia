@@ -377,6 +377,9 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
                     "webrtcvad_min_voiced_ratio": 0.22,
                     "webrtcvad_min_consecutive_frames": 5,
                     "call_inactivity_seconds": 240,
+                    "preanswer_warmup_enabled": False,
+                    "preanswer_warmup_timeout_seconds": 7.5,
+                    "preanswer_stt_silence_seconds": 0.2,
                 }
             }),
             cfg={},
@@ -398,6 +401,9 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
         assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(0.22)
         assert session.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == 5
         assert session.CALL_INACTIVITY_SECONDS == 240
+        assert session.PREANSWER_WARMUP_ENABLED is False
+        assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(7.5)
+        assert session.PREANSWER_STT_SILENCE_SECONDS == pytest.approx(0.2)
 
 
 def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
@@ -423,6 +429,9 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
                 "webrtcvad_min_voiced_ratio": 2,
                 "webrtcvad_min_consecutive_frames": 0,
                 "call_inactivity_seconds": 0,
+                "preanswer_warmup_enabled": "perhaps",
+                "preanswer_warmup_timeout_seconds": 0,
+                "preanswer_stt_silence_seconds": 0,
             }
         }),
         cfg={},
@@ -444,6 +453,64 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
     assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(CallSession.WEBRTC_VAD_MIN_VOICED_RATIO)
     assert session.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == CallSession.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
     assert session.CALL_INACTIVITY_SECONDS == CallSession.CALL_INACTIVITY_SECONDS
+    assert session.PREANSWER_WARMUP_ENABLED == CallSession.PREANSWER_WARMUP_ENABLED
+    assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(CallSession.PREANSWER_WARMUP_TIMEOUT_SECONDS)
+    assert session.PREANSWER_STT_SILENCE_SECONDS == pytest.approx(CallSession.PREANSWER_STT_SILENCE_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_preanswer_warmup_runs_stt_and_greeting_before_answer():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    agent = MagicMock()
+    agent.build_system_prompt.return_value = "CALL PROMPT"
+    agent.run_streamed = AsyncMock(return_value="Hallo, ich bin da.")
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-warmup",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-warmup",
+        client=client,
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=send_cb,
+    )
+    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+
+    with patch("pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value=None)) as transcribe_pcm, \
+         patch("pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=np.ones(480, dtype=np.float32))):
+        await session._run_preanswer_warmup()
+
+    transcribe_pcm.assert_awaited_once()
+    agent.run_streamed.assert_awaited_once()
+    send_cb.assert_awaited_once_with("Hallo, ich bin da.")
+    session._tts_track.enqueue_pcm_float32.assert_called_once()
+    assert session._greeting_sent is True
+
+
+@pytest.mark.asyncio
+async def test_send_greeting_is_noop_after_preanswer_greeting():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    agent = MagicMock()
+    agent.run_streamed = AsyncMock(return_value="Hallo")
+    session = CallSession(
+        call_id="call-greeting-once",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-greeting-once",
+        client=SimpleNamespace(),
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=AsyncMock(),
+    )
+    session._greeting_sent = True
+
+    await session._send_greeting()
+
+    agent.run_streamed.assert_not_awaited()
 
 
 def test_load_hold_audio_uses_ndarray_resampling():
