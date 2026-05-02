@@ -1024,6 +1024,38 @@ class CallSession:
             "p90_rms": float(np.percentile(frame_rms, 90)),
         }
 
+    def _is_speech_like_frame(
+        self,
+        pcm: "np.ndarray",
+        sample_rate: int,
+        adjusted_rms: float,
+    ) -> bool:
+        """Return True when a live frame looks like speech, not just loud noise."""
+        if adjusted_rms <= self.SILENCE_THRESHOLD:
+            return False
+
+        if len(pcm) < 2:
+            return False
+
+        window = np.hanning(len(pcm)).astype(np.float32)
+        spectrum = np.fft.rfft(pcm * window)
+        power = np.abs(spectrum) ** 2
+        total_power = float(np.sum(power))
+        if total_power <= 1e-9:
+            return False
+
+        freqs = np.fft.rfftfreq(len(pcm), d=1.0 / sample_rate)
+        speech_band = (freqs >= 180.0) & (freqs <= 4000.0)
+        band_ratio = float(np.sum(power[speech_band]) / total_power)
+        flatness = float(
+            np.exp(np.mean(np.log(power + 1e-9)))
+            / max(float(np.mean(power + 1e-9)), 1e-9)
+        )
+        return (
+            band_ratio >= self.MIN_SPEECH_BAND_RATIO
+            and flatness <= self.MAX_SPECTRAL_FLATNESS
+        )
+
     def _should_transcribe_chunk(
         self,
         pcm: "np.ndarray",
@@ -1330,11 +1362,19 @@ class CallSession:
 
                 # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
                 adjusted_rms = self._agc_rms(rms)
+                speech_like_frame = self._is_speech_like_frame(
+                    pcm,
+                    SAMPLE_RATE,
+                    adjusted_rms,
+                )
 
                 # While TTS is playing, keep buffering possible interruptions, but
                 # only stop playback after the resulting transcript is meaningful.
                 if self._tts_track and self._tts_track.is_playing:
-                    if rms >= max(self.BARGEIN_RMS_THRESHOLD, self.SILENCE_THRESHOLD):
+                    if (
+                        rms >= max(self.BARGEIN_RMS_THRESHOLD, self.SILENCE_THRESHOLD)
+                        and speech_like_frame
+                    ):
                         if not speech_buffer and silence_count == 0:
                             logger.info(
                                 "call %s: possible barge-in started (rms=%.4f)",
@@ -1392,7 +1432,7 @@ class CallSession:
                                         chunk_stats["p90_rms"],
                                     )
                     continue
-                if adjusted_rms > self.SILENCE_THRESHOLD:
+                if speech_like_frame:
                     if not speech_buffer and silence_count == 0:
                         logger.info("call %s: speech started (rms=%.4f)",
                                     self.call_id[:8], rms)

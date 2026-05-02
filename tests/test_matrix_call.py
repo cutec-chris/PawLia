@@ -262,6 +262,44 @@ def test_should_transcribe_chunk_rejects_when_webrtcvad_disagrees():
 
         assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
 
+
+def test_live_frame_filter_rejects_broadband_wind_noise():
+    session = CallSession(
+        call_id="call-live-wind",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-live-wind",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    rng = np.random.default_rng(9)
+    pcm = rng.normal(0.0, 0.08, 960).astype(np.float32)
+
+    assert session._is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is False
+
+
+def test_live_frame_filter_accepts_speech_band_tone():
+    session = CallSession(
+        call_id="call-live-speech",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-live-speech",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    pcm = _make_tonal_pcm_from_frame_levels([0.08], freq_hz=220.0)
+
+    assert session._is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is True
+
+
 def test_meaningful_interrupt_accepts_keywords_and_full_sentences():
     session = CallSession(
         call_id="call-interrupt-ok",
