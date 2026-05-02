@@ -176,6 +176,9 @@ voip:
   agc_target_rms: 0.10
   agc_max_gain: 12.0
   agc_smoothing: 0.15
+  preanswer_warmup_enabled: true
+  preanswer_warmup_timeout_seconds: 25.0
+  preanswer_stt_silence_seconds: 0.4
 ```
 
 | Key | Description |
@@ -199,6 +202,9 @@ voip:
 | `voip.agc_target_rms` | Target loudness AGC tries to normalize incoming audio toward for VAD decisions |
 | `voip.agc_max_gain` | Upper amplification cap AGC may apply to quiet incoming audio |
 | `voip.agc_smoothing` | How quickly AGC adapts toward the target loudness (`1.0` = very fast) |
+| `voip.preanswer_warmup_enabled` | Warm STT with silent audio and prepare the LLM/TTS greeting before sending `m.call.answer` |
+| `voip.preanswer_warmup_timeout_seconds` | Maximum time to wait for pre-answer warmup before answering anyway |
+| `voip.preanswer_stt_silence_seconds` | Duration of the silent WAV sent through STT during pre-answer warmup |
 
   webhook:
     port: 8080

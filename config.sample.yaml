@@ -104,6 +104,9 @@ interfaces:
 #   agc_max_gain: 12.0                # upper cap for AGC amplification
 #   agc_smoothing: 0.15               # how quickly AGC reacts (higher = faster)
 #   bargein_rms_threshold: 0.05       # raw RMS to interrupt TTS playback
+#   preanswer_warmup_enabled: true    # warm STT + prepare greeting before answering calls
+#   preanswer_warmup_timeout_seconds: 25.0
+#   preanswer_stt_silence_seconds: 0.4
 
 # Speech-to-text transcription (voice messages + VoIP calls).
 # Any OpenAI-compatible /audio/transcriptions endpoint works.

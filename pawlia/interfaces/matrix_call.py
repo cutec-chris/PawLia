@@ -338,6 +338,11 @@ class CallSession:
     BARGEIN_RMS_THRESHOLD = 0.05
     BARGEIN_MIN_WORDS = 4
     BARGEIN_MIN_CHARS = 12
+    # Pre-answer warmup: load STT and prepare the greeting before Matrix sees
+    # the call as answered, so the caller does not sit through cold-start time.
+    PREANSWER_WARMUP_ENABLED = True
+    PREANSWER_WARMUP_TIMEOUT_SECONDS = 25.0
+    PREANSWER_STT_SILENCE_SECONDS = 0.4
     # Wait this long after the user's latest speech before replying.  This
     # lets callers tell a longer story without the agent jumping into every
     # pause that was only used for breathing or thinking.
@@ -378,6 +383,7 @@ class CallSession:
         self._agc_until: float = 0.0   # monotonic timestamp; AGC active while now < this
         self._agc_gain: float = 1.0    # current smoothed gain factor
         self._active_response_task: Optional[asyncio.Task] = None
+        self._greeting_sent = False
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
         self._load_voip_audio_config()
@@ -566,6 +572,23 @@ class CallSession:
             "bargein_rms_threshold",
             self.BARGEIN_RMS_THRESHOLD,
             minimum=0.0,
+        )
+        self.PREANSWER_WARMUP_ENABLED = self._get_bool_config(
+            voip_cfg,
+            "preanswer_warmup_enabled",
+            self.PREANSWER_WARMUP_ENABLED,
+        )
+        self.PREANSWER_WARMUP_TIMEOUT_SECONDS = self._get_float_config(
+            voip_cfg,
+            "preanswer_warmup_timeout_seconds",
+            self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+            minimum=0.1,
+        )
+        self.PREANSWER_STT_SILENCE_SECONDS = self._get_float_config(
+            voip_cfg,
+            "preanswer_stt_silence_seconds",
+            self.PREANSWER_STT_SILENCE_SECONDS,
+            minimum=0.05,
         )
         self.RESPONSE_DELAY_SECONDS = self._get_float_config(
             voip_cfg,
@@ -817,17 +840,85 @@ class CallSession:
             logger.info("call %s: hold audio loaded (%d samples, %.1fs)",
                         self.call_id[:8], len(hold_pcm), len(hold_pcm) / self._tts_track.SAMPLE_RATE)
 
+        await self._run_preanswer_warmup()
+
         # Auto-hangup watchdog
         asyncio.ensure_future(self._watchdog())
         # Send our ICE candidates once gathering completes (parsed from local SDP)
         asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
         # Periodic RTP receiver stats for diagnostics
         asyncio.ensure_future(self._log_receiver_stats())
-        # Greet the caller so they don't have to speak first
-        asyncio.ensure_future(self._send_greeting())
+        # Greet the caller so they don't have to speak first.  If the
+        # pre-answer warmup already prepared it, the queued TTS will play as
+        # soon as media starts and this becomes a no-op.
+        if not self._greeting_sent:
+            asyncio.ensure_future(self._send_greeting())
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
+
+    async def _run_preanswer_warmup(self) -> None:
+        """Warm STT and queue the LLM greeting before the call is answered."""
+        if not self.PREANSWER_WARMUP_ENABLED:
+            return
+
+        started = time.monotonic()
+        tasks = [
+            asyncio.create_task(self._warm_stt_with_silence()),
+            asyncio.create_task(self._send_greeting()),
+        ]
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+            )
+            logger.info(
+                "call %s: pre-answer warmup finished in %.1fs",
+                self.call_id[:8],
+                time.monotonic() - started,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "call %s: pre-answer warmup timed out after %.1fs; answering anyway",
+                self.call_id[:8],
+                self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+            )
+
+    async def _warm_stt_with_silence(self) -> None:
+        """Send a short silent WAV through the active STT path to trigger loading."""
+        try:
+            sample_rate = 16000
+            sample_count = max(1, int(sample_rate * self.PREANSWER_STT_SILENCE_SECONDS))
+            silence = np.zeros(sample_count, dtype=np.float32)
+
+            active_model = None
+            active_override = getattr(self._agent, "_active_override_model", None)
+            if callable(active_override):
+                active_model = active_override(self.thread_id)
+            llm_factory = getattr(self._app, "llm", None)
+            audio_model_info = getattr(llm_factory, "audio_model_info", None)
+            audio_info = (
+                audio_model_info(active_model or "chat")
+                if callable(audio_model_info)
+                else None
+            )
+            if audio_info:
+                from pawlia.transcription import transcribe_pcm_via_model
+                await transcribe_pcm_via_model(
+                    silence,
+                    sample_rate,
+                    audio_info[0],
+                    audio_info[1],
+                    prompt="This is a silent warmup audio clip. Return an empty response.",
+                )
+            else:
+                from pawlia.transcription import transcribe_pcm
+                await transcribe_pcm(silence, sample_rate, self._app.config)
+            logger.info("call %s: STT warmup completed", self.call_id[:8])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("call %s: STT warmup failed: %s", self.call_id[:8], e)
 
     async def _flush_local_candidates(self, done: asyncio.Event) -> None:
         """Wait for ICE gathering then send candidates parsed from local SDP."""
@@ -858,6 +949,9 @@ class CallSession:
 
     async def _send_greeting(self) -> None:
         """Generate and play a greeting via LLM + TTS when the call is accepted."""
+        if self._greeting_sent:
+            return
+
         try:
             from pawlia.tts import synthesize_pcm
         except ImportError:
@@ -902,6 +996,7 @@ class CallSession:
                 on_sentence=_on_sentence,
             )
             await self._send_cb(response)
+            self._greeting_sent = True
             self._mark_activity()
             self._activate_agc()
             logger.info("call %s: greeting sent", self.call_id[:8])
