@@ -1,16 +1,25 @@
 """
-File workspace script – sandboxed read/write/list within session/{user_id}/workspace/.
+File workspace script – sandboxed read/write/list/edit/grep within
+session/{user_id}/workspace/.
 
 Usage:
   python files.py list   --user-id <id> --session-dir <dir>
   python files.py read   --user-id <id> --session-dir <dir> --filename <name>
+                         [--offset N] [--limit M]
   python files.py write  --user-id <id> --session-dir <dir> --filename <name>
-                         (file content is read from stdin)
+                         (file content via CONTENT env var or stdin)
+  python files.py edit   --user-id <id> --session-dir <dir> --filename <name>
+                         [--replace-all]
+                         (old/new strings via OLD_STRING / NEW_STRING env vars)
+  python files.py grep   --user-id <id> --session-dir <dir> --pattern <regex>
+                         [--filename <name>]
+  python files.py delete --user-id <id> --session-dir <dir> --filename <name>
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 
 # Add the project root to the Python path so we can import pawlia modules
@@ -46,6 +55,17 @@ def _out(data) -> None:
     print(json.dumps(data, ensure_ascii=False))
 
 
+def _walk_files(workdir: str):
+    """Yield (abs_path, rel_path) for every file under workdir, recursively."""
+    for root, dirs, files in os.walk(workdir):
+        dirs.sort()
+        for name in sorted(files):
+            abs_path = os.path.join(root, name)
+            rel_path = os.path.relpath(abs_path, workdir)
+            # Normalize to forward slashes so the LLM gets consistent paths
+            yield abs_path, rel_path.replace(os.sep, "/")
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -53,12 +73,12 @@ def _out(data) -> None:
 def cmd_list(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
     entries = []
-    for name in sorted(os.listdir(workdir)):
-        path = os.path.join(workdir, name)
-        entry = {"name": name, "type": "directory" if os.path.isdir(path) else "file"}
-        if entry["type"] == "file":
-            entry["size"] = os.path.getsize(path)
-        entries.append(entry)
+    for abs_path, rel_path in _walk_files(workdir):
+        entries.append({
+            "name": rel_path,
+            "type": "file",
+            "size": os.path.getsize(abs_path),
+        })
     _out({"success": True, "files": entries, "count": len(entries)})
 
 
@@ -77,7 +97,25 @@ def cmd_read(args) -> None:
         return
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
-    _out({"success": True, "filename": args.filename, "content": content, "size": len(content)})
+
+    if args.offset is None and args.limit is None:
+        _out({"success": True, "filename": args.filename, "content": content, "size": len(content)})
+        return
+
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    offset = max(0, args.offset or 0)
+    limit = args.limit if args.limit is not None else total
+    sliced = "".join(lines[offset:offset + limit])
+    _out({
+        "success": True,
+        "filename": args.filename,
+        "content": sliced,
+        "offset": offset,
+        "limit": limit,
+        "lines_returned": max(0, min(total - offset, limit)),
+        "total_lines": total,
+    })
 
 
 def cmd_delete(args) -> None:
@@ -119,6 +157,120 @@ def cmd_write(args) -> None:
     _out({"success": True, "message": f"File '{args.filename}' written.", "bytes_written": len(written), "content_written": written})
 
 
+def cmd_edit(args) -> None:
+    workdir = _workdir(args.user_id, args.session_dir)
+    try:
+        filepath = _safe_path(workdir, args.filename)
+    except ValueError as e:
+        _out({"success": False, "error": str(e)})
+        return
+    if not os.path.exists(filepath):
+        _out({"success": False, "error": f"File '{args.filename}' not found."})
+        return
+    if os.path.isdir(filepath):
+        _out({"success": False, "error": f"'{args.filename}' is a directory."})
+        return
+
+    old_string = os.environ.get("OLD_STRING")
+    new_string = os.environ.get("NEW_STRING")
+    if old_string is None:
+        old_string = args.old_string
+    if new_string is None:
+        new_string = args.new_string
+    if old_string is None or new_string is None:
+        _out({"success": False, "error": "OLD_STRING and NEW_STRING (env vars or --old-string/--new-string) are required."})
+        return
+    if old_string == "":
+        _out({"success": False, "error": "OLD_STRING must not be empty."})
+        return
+    if old_string == new_string:
+        _out({"success": False, "error": "OLD_STRING and NEW_STRING are identical — nothing to do."})
+        return
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    count = content.count(old_string)
+    if count == 0:
+        _out({
+            "success": False,
+            "error": f"OLD_STRING not found in '{args.filename}'. Read the file again and copy the exact text to replace."
+        })
+        return
+    if count > 1 and not args.replace_all:
+        _out({
+            "success": False,
+            "error": (
+                f"OLD_STRING occurs {count} times in '{args.filename}'. "
+                "Either include more surrounding context to make it unique, or pass --replace-all."
+            ),
+        })
+        return
+
+    if args.replace_all:
+        new_content = content.replace(old_string, new_string)
+        replacements = count
+    else:
+        new_content = content.replace(old_string, new_string, 1)
+        replacements = 1
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(new_content)
+    with open(filepath, "r", encoding="utf-8") as f:
+        written = f.read()
+
+    _out({
+        "success": True,
+        "message": f"File '{args.filename}' edited ({replacements} replacement{'s' if replacements != 1 else ''}).",
+        "replacements": replacements,
+        "bytes_written": len(written),
+        "content_after": written,
+    })
+
+
+def cmd_grep(args) -> None:
+    workdir = _workdir(args.user_id, args.session_dir)
+    try:
+        regex = re.compile(args.pattern)
+    except re.error as e:
+        _out({"success": False, "error": f"Invalid regex: {e}"})
+        return
+
+    if args.filename:
+        try:
+            filepath = _safe_path(workdir, args.filename)
+        except ValueError as e:
+            _out({"success": False, "error": str(e)})
+            return
+        if not os.path.isfile(filepath):
+            _out({"success": False, "error": f"File '{args.filename}' not found."})
+            return
+        targets = [(filepath, args.filename.lower().replace(os.sep, "/"))]
+    else:
+        targets = list(_walk_files(workdir))
+
+    matches = []
+    skipped: list[str] = []
+    for abs_path, rel_path in targets:
+        try:
+            with open(abs_path, "r", encoding="utf-8") as f:
+                for i, line in enumerate(f, 1):
+                    if regex.search(line):
+                        matches.append({
+                            "filename": rel_path,
+                            "line": i,
+                            "text": line.rstrip("\n"),
+                        })
+        except (UnicodeDecodeError, OSError):
+            skipped.append(rel_path)
+            continue
+
+    out = {"success": True, "matches": matches, "count": len(matches)}
+    if skipped:
+        out["skipped_binary_or_unreadable"] = skipped
+    _out(out)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -137,11 +289,25 @@ def main():
     p = sub.add_parser("read")
     _base(p)
     p.add_argument("--filename", required=True)
+    p.add_argument("--offset", type=int, default=None, help="0-based line offset")
+    p.add_argument("--limit", type=int, default=None, help="max lines to return")
 
     p = sub.add_parser("write")
     _base(p)
     p.add_argument("--filename", required=True)
     p.add_argument("--content", default=None, help="File content (alternative to stdin)")
+
+    p = sub.add_parser("edit")
+    _base(p)
+    p.add_argument("--filename", required=True)
+    p.add_argument("--old-string", default=None, help="text to replace (or use OLD_STRING env var)")
+    p.add_argument("--new-string", default=None, help="replacement text (or use NEW_STRING env var)")
+    p.add_argument("--replace-all", action="store_true", help="replace every occurrence instead of requiring uniqueness")
+
+    p = sub.add_parser("grep")
+    _base(p)
+    p.add_argument("--pattern", required=True, help="Python regex")
+    p.add_argument("--filename", default=None, help="restrict to a single file (default: whole workspace)")
 
     p = sub.add_parser("delete")
     _base(p)
@@ -153,7 +319,14 @@ def main():
         _out({"success": False, "error": "user-id and session-dir are required (via args or PAWLIA_USER_ID / PAWLIA_SESSION_DIR env vars)."})
         sys.exit(1)
 
-    dispatch = {"list": cmd_list, "read": cmd_read, "write": cmd_write, "delete": cmd_delete}
+    dispatch = {
+        "list": cmd_list,
+        "read": cmd_read,
+        "write": cmd_write,
+        "edit": cmd_edit,
+        "grep": cmd_grep,
+        "delete": cmd_delete,
+    }
     fn = dispatch.get(args.cmd)
     if not fn:
         _out({"success": False, "error": f"Unknown subcommand: {args.cmd}"})
