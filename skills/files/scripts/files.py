@@ -66,6 +66,38 @@ def _walk_files(workdir: str):
             yield abs_path, rel_path.replace(os.sep, "/")
 
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _parse_headings(lines: list[str]) -> list[dict]:
+    """Return ATX markdown headings as [{level, title, line}], skipping fenced code."""
+    out: list[dict] = []
+    in_fence = False
+    fence_marker = ""
+    for i, raw in enumerate(lines, 1):
+        line = raw.rstrip("\n")
+        fence_match = _FENCE_RE.match(line)
+        if fence_match:
+            marker = fence_match.group(1)
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            continue
+        if in_fence:
+            continue
+        # ATX headings must not be indented by 4+ spaces (would be code block)
+        if line.startswith("    "):
+            continue
+        m = _HEADING_RE.match(line.lstrip(" "))
+        if m:
+            out.append({"level": len(m.group(1)), "title": m.group(2).strip(), "line": i})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -115,6 +147,84 @@ def cmd_read(args) -> None:
         "limit": limit,
         "lines_returned": max(0, min(total - offset, limit)),
         "total_lines": total,
+    })
+
+
+def cmd_outline(args) -> None:
+    workdir = _workdir(args.user_id, args.session_dir)
+    try:
+        filepath = _safe_path(workdir, args.filename)
+    except ValueError as e:
+        _out({"success": False, "error": str(e)})
+        return
+    if not os.path.isfile(filepath):
+        _out({"success": False, "error": f"File '{args.filename}' not found."})
+        return
+    with open(filepath, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    headings = _parse_headings(lines)
+    _out({
+        "success": True,
+        "filename": args.filename,
+        "headings": headings,
+        "count": len(headings),
+        "total_lines": len(lines),
+    })
+
+
+def cmd_read_section(args) -> None:
+    workdir = _workdir(args.user_id, args.session_dir)
+    try:
+        filepath = _safe_path(workdir, args.filename)
+    except ValueError as e:
+        _out({"success": False, "error": str(e)})
+        return
+    if not os.path.isfile(filepath):
+        _out({"success": False, "error": f"File '{args.filename}' not found."})
+        return
+    with open(filepath, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    headings = _parse_headings(lines)
+    target = args.section.lstrip("#").strip()
+    matches = [h for h in headings if h["title"] == target]
+    if not matches:
+        # Fall back to case-insensitive comparison so the LLM doesn't have to nail the case
+        ci_matches = [h for h in headings if h["title"].lower() == target.lower()]
+        if not ci_matches:
+            available = [h["title"] for h in headings]
+            _out({
+                "success": False,
+                "error": f"Section '{args.section}' not found in '{args.filename}'.",
+                "available_sections": available,
+            })
+            return
+        matches = ci_matches
+    if len(matches) > 1:
+        _out({
+            "success": False,
+            "error": (
+                f"Section '{args.section}' is ambiguous ({len(matches)} matches at lines "
+                f"{[m['line'] for m in matches]}). Heading titles must be unique to use read_section."
+            ),
+        })
+        return
+    head = matches[0]
+    start = head["line"] - 1  # 0-based, include the heading line itself
+    # End at the next heading with level <= head['level']
+    end = len(lines)
+    for h in headings:
+        if h["line"] > head["line"] and h["level"] <= head["level"]:
+            end = h["line"] - 1
+            break
+    section_text = "".join(lines[start:end])
+    _out({
+        "success": True,
+        "filename": args.filename,
+        "section": head["title"],
+        "level": head["level"],
+        "start_line": start + 1,
+        "end_line": end,
+        "content": section_text,
     })
 
 
@@ -309,6 +419,15 @@ def main():
     p.add_argument("--pattern", required=True, help="Python regex")
     p.add_argument("--filename", default=None, help="restrict to a single file (default: whole workspace)")
 
+    p = sub.add_parser("outline")
+    _base(p)
+    p.add_argument("--filename", required=True, help="markdown file to outline")
+
+    p = sub.add_parser("read-section")
+    _base(p)
+    p.add_argument("--filename", required=True)
+    p.add_argument("--section", required=True, help="heading title (without leading #s)")
+
     p = sub.add_parser("delete")
     _base(p)
     p.add_argument("--filename", required=True)
@@ -325,6 +444,8 @@ def main():
         "write": cmd_write,
         "edit": cmd_edit,
         "grep": cmd_grep,
+        "outline": cmd_outline,
+        "read-section": cmd_read_section,
         "delete": cmd_delete,
     }
     fn = dispatch.get(args.cmd)

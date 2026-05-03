@@ -1,5 +1,5 @@
 skill: files
-version: '1.2'
+version: '1.3'
 compiled_at: '2026-05-03'
 compiled_by: workflow_compiler
 workflows:
@@ -79,6 +79,22 @@ workflows:
     command: python {scripts_dir}/files.py grep --pattern "{pattern}" --filename "{filename}"
     description: Search a regex inside a single workspace file.
     status_desc: Suche in {filename} nach {pattern}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: outline_file
+    command: python {scripts_dir}/files.py outline --filename "{filename}"
+    description: Return the markdown heading structure of a file (level, title, line). Use to orient in a long markdown file before reading specific parts.
+    status_desc: Outline für {filename}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: read_section
+    command: python {scripts_dir}/files.py read-section --filename "{filename}" --section "{section}"
+    description: Read a markdown section by heading title (without leading #s). Returns content from the heading down to the next same-or-higher-level heading. Heading title must be unique in the file.
+    status_desc: Lese Abschnitt {section} aus {filename}
     verify:
       exit_code: 0
       output_not_contains:

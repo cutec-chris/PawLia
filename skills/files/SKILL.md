@@ -1,10 +1,10 @@
 ---
 name: files
-description: Read, write, edit, list, grep, and delete files in the user's personal workspace. Use for creating notes, saving text, reading previously saved files, making targeted edits to existing files, searching across the workspace, writing workspace config files like identity.md, soul.md, user.md, and deleting files like bootstrap.md. All filenames are automatically lowercased.
+description: Read, write, edit, list, grep, outline, read-section, and delete files in the user's personal workspace. Use for creating notes, saving text, reading previously saved files, making targeted edits to existing files, searching across the workspace, writing workspace config files like identity.md, soul.md, user.md, and deleting files like bootstrap.md. All filenames are automatically lowercased.
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "1.2"
+  version: "1.3"
 ---
 
 # File Workspace
@@ -81,6 +81,22 @@ python <scripts_dir>/files.py grep --pattern "<regex>" --filename "<name>"
 ```
 
 Returns a list of `{filename, line, text}` matches. Use this to locate where a string lives before editing.
+
+## Outline a markdown file
+
+```
+python <scripts_dir>/files.py outline --filename "<name>"
+```
+
+Returns the file's heading structure as `[{level, title, line}, ...]` (ATX `#` headings only; headings inside fenced code blocks are skipped). Use this to orient yourself in a long file before reading specific parts.
+
+## Read a section by heading
+
+```
+python <scripts_dir>/files.py read-section --filename "<name>" --section "<heading title>"
+```
+
+Returns content from the matching heading line up to (but not including) the next heading at the same or higher level. Pass the heading **title only**, without leading `#`s. Match is exact, with case-insensitive fallback. If multiple headings share the same title the call fails — use `read --offset --limit` based on `outline` line numbers in that case.
 
 ## Delete a file
 
