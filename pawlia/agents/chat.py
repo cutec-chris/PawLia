@@ -6,6 +6,7 @@ the ChatAgent spawns a SkillRunnerAgent to do the actual work, then
 incorporates the result into its final response.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -524,91 +525,35 @@ class ChatAgent(BaseAgent):
             messages.append(HumanMessage(content=user_input))
 
         # ---- Stream turn 1 ----
-        accumulated, raw_text = await self._stream_with_sentences(
-            messages, bound_llm, on_sentence,
-        )
+        # _partial_text tracks generated text for persist-on-cancel (barge-in during TTS
+        # cancels this coroutine before _persist is reached, losing the user's turn from history).
+        _partial_text = ""
+        try:
+            accumulated, raw_text = await self._stream_with_sentences(
+                messages, bound_llm, on_sentence,
+            )
+            _partial_text = raw_text
 
-        self.logger.debug("Streamed turn 1: tool_calls=%s, len=%d",
-                          bool(getattr(accumulated, "tool_calls", None)), len(raw_text))
+            self.logger.debug("Streamed turn 1: tool_calls=%s, len=%d",
+                              bool(getattr(accumulated, "tool_calls", None)), len(raw_text))
 
-        # If the streamed response is a fake tool call, retry non-streamed
-        if accumulated and self._is_fake_tool_call(accumulated):
-            self.logger.warning("Fake tool call detected in streamed turn 1, retrying non-streamed")
-            accumulated, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
-            raw_text = accumulated.content if isinstance(accumulated.content, str) else ""
+            # If the streamed response is a fake tool call, retry non-streamed
+            if accumulated and self._is_fake_tool_call(accumulated):
+                self.logger.warning("Fake tool call detected in streamed turn 1, retrying non-streamed")
+                accumulated, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
+                raw_text = accumulated.content if isinstance(accumulated.content, str) else ""
+                _partial_text = raw_text
 
-        if not accumulated or not getattr(accumulated, "tool_calls", None):
-            result = self.strip_thinking(raw_text)
-            await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
-            return result
+            if not accumulated or not getattr(accumulated, "tool_calls", None):
+                result = self.strip_thinking(raw_text)
+                await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
+                return result
 
-        # ---- Skill calls detected → execute (non-streamed) ----
-        messages.append(accumulated)
-        tool_calls_info: List[Dict[str, Any]] = []
+            # ---- Skill calls detected → execute (non-streamed) ----
+            messages.append(accumulated)
+            tool_calls_info: List[Dict[str, Any]] = []
 
-        for tool_call in accumulated.tool_calls:
-            skill_name, normalized_args, error = self._decode_skill_call(tool_call)
-            query = normalized_args.get("query", "")
-            skill = self.skills.get(skill_name)
-
-            if error:
-                self.logger.warning("Skill call rejected: %s", error)
-                skill_result = error
-            elif skill:
-                self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
-                if _on_skill_start:
-                    try:
-                        await _on_skill_start(skill_name, query)
-                    except Exception:
-                        pass
-                runner = self.skill_runner_factory(skill, thread_id)
-                runner.on_step = _on_skill_step
-                skill_result = await runner.run(query=query)
-                skill_result = self._process_directives(skill_result, thread_id)
-                if _on_skill_done:
-                    try:
-                        await _on_skill_done(skill_name)
-                    except Exception:
-                        pass
-            else:
-                self.logger.warning("Unknown skill called: %s", skill_name)
-                skill_result = f"Error: Unknown skill '{skill_name}'."
-
-            tool_calls_info.append({
-                "name": skill_name,
-                "args": normalized_args,
-                "result": skill_result,
-            })
-            messages.append(ToolMessage(
-                content=skill_result,
-                tool_call_id=tool_call.get("id", ""),
-            ))
-
-        # Refresh workspace skills (e.g. skill-creator may have added one)
-        if self._refresh_and_rebind_skills():
-            bound_llm = self.bound_llm
-
-        # ---- Continue tool loop until the task is actually complete ----
-        raw_text2 = ""
-        nudge_count = 0
-        final_response: Optional[AIMessage] = None
-
-        for _turn in range(_MAX_CHAT_TOOL_TURNS):
-            next_response, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
-
-            if not next_response.tool_calls:
-                text = self.extract_text(next_response)
-                if self._should_nudge_for_incomplete_task(text, has_tool_history=True) \
-                   and nudge_count < _MAX_CHAT_NUDGES:
-                    nudge_count += 1
-                    messages = messages + [next_response, HumanMessage(content=_CHAT_CONTINUE_NUDGE)]
-                    continue
-                final_response = next_response
-                raw_text2 = text
-                break
-
-            messages.append(next_response)
-            for tool_call in next_response.tool_calls:
+            for tool_call in accumulated.tool_calls:
                 skill_name, normalized_args, error = self._decode_skill_call(tool_call)
                 query = normalized_args.get("query", "")
                 skill = self.skills.get(skill_name)
@@ -646,32 +591,109 @@ class ChatAgent(BaseAgent):
                     tool_call_id=tool_call.get("id", ""),
                 ))
 
-            # Refresh workspace skills after each skill return
+            # Refresh workspace skills (e.g. skill-creator may have added one)
             if self._refresh_and_rebind_skills():
                 bound_llm = self.bound_llm
-        else:
-            accumulated2, raw_text2 = await self._stream_with_sentences(
-                messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)], unbound_llm, on_sentence,
+
+            # ---- Continue tool loop until the task is actually complete ----
+            raw_text2 = ""
+            nudge_count = 0
+            final_response: Optional[AIMessage] = None
+
+            for _turn in range(_MAX_CHAT_TOOL_TURNS):
+                next_response, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
+
+                if not next_response.tool_calls:
+                    text = self.extract_text(next_response)
+                    if self._should_nudge_for_incomplete_task(text, has_tool_history=True) \
+                       and nudge_count < _MAX_CHAT_NUDGES:
+                        nudge_count += 1
+                        messages = messages + [next_response, HumanMessage(content=_CHAT_CONTINUE_NUDGE)]
+                        continue
+                    final_response = next_response
+                    raw_text2 = text
+                    break
+
+                messages.append(next_response)
+                for tool_call in next_response.tool_calls:
+                    skill_name, normalized_args, error = self._decode_skill_call(tool_call)
+                    query = normalized_args.get("query", "")
+                    skill = self.skills.get(skill_name)
+
+                    if error:
+                        self.logger.warning("Skill call rejected: %s", error)
+                        skill_result = error
+                    elif skill:
+                        self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
+                        if _on_skill_start:
+                            try:
+                                await _on_skill_start(skill_name, query)
+                            except Exception:
+                                pass
+                        runner = self.skill_runner_factory(skill, thread_id)
+                        runner.on_step = _on_skill_step
+                        skill_result = await runner.run(query=query)
+                        skill_result = self._process_directives(skill_result, thread_id)
+                        if _on_skill_done:
+                            try:
+                                await _on_skill_done(skill_name)
+                            except Exception:
+                                pass
+                    else:
+                        self.logger.warning("Unknown skill called: %s", skill_name)
+                        skill_result = f"Error: Unknown skill '{skill_name}'."
+
+                    tool_calls_info.append({
+                        "name": skill_name,
+                        "args": normalized_args,
+                        "result": skill_result,
+                    })
+                    messages.append(ToolMessage(
+                        content=skill_result,
+                        tool_call_id=tool_call.get("id", ""),
+                    ))
+
+                # Refresh workspace skills after each skill return
+                if self._refresh_and_rebind_skills():
+                    bound_llm = self.bound_llm
+            else:
+                accumulated2, raw_text2 = await self._stream_with_sentences(
+                    messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)], unbound_llm, on_sentence,
+                )
+                final_response = accumulated2 if isinstance(accumulated2, AIMessage) else None
+
+            if on_sentence and raw_text2.strip():
+                sentences, remainder = _split_sentences(raw_text2)
+                for sentence in sentences:
+                    if sentence.strip():
+                        await on_sentence(sentence)
+                if remainder.strip():
+                    await on_sentence(remainder.strip())
+
+            result = self.strip_thinking(raw_text2)
+            used_skills = bool(tool_calls_info)
+            await self._persist(
+                user_input, result,
+                track_similarity=not used_skills,
+                thread_id=thread_id,
+                tool_calls_info=tool_calls_info if used_skills else None,
             )
-            final_response = accumulated2 if isinstance(accumulated2, AIMessage) else None
-
-        if on_sentence and raw_text2.strip():
-            sentences, remainder = _split_sentences(raw_text2)
-            for sentence in sentences:
-                if sentence.strip():
-                    await on_sentence(sentence)
-            if remainder.strip():
-                await on_sentence(remainder.strip())
-
-        result = self.strip_thinking(raw_text2)
-        used_skills = bool(tool_calls_info)
-        await self._persist(
-            user_input, result,
-            track_similarity=not used_skills,
-            thread_id=thread_id,
-            tool_calls_info=tool_calls_info if used_skills else None,
-        )
-        return result
+            return result
+        except asyncio.CancelledError:
+            # Barge-in: the TTS-playing coroutine was cancelled before _persist was reached.
+            # Persist whatever text was generated so the user's utterance stays in history
+            # and the next LLM turn has the full conversation context.
+            if _partial_text:
+                partial = self.strip_thinking(_partial_text)
+                try:
+                    await asyncio.shield(
+                        self._persist(user_input, partial,
+                                      track_similarity=False, thread_id=thread_id)
+                    )
+                    self.logger.debug("run_streamed: persisted partial response on cancel (%d chars)", len(partial))
+                except Exception as exc:
+                    self.logger.debug("run_streamed: persist-on-cancel failed: %s", exc)
+            raise
 
     async def _stream_with_sentences(
         self,
