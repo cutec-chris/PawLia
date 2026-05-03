@@ -83,6 +83,11 @@ interfaces:
   #   # stun_servers:                        # STUN for VoIP (optional)
   #   #   - stun:stun.l.google.com:19302
 
+  # openai:                                  # OpenAI- & Ollama-compatible REST API
+  #   port: 11435                            # POST /v1/chat/completions, GET /v1/models
+  #   # host: 0.0.0.0                        # GET /api/tags, POST /api/chat (Ollama format)
+  #   # api_key: mysecret                    # optional — require Bearer token
+
 # voip:
 #   silence_threshold: 0.018          # frame RMS above this counts as speech (after AGC)
 #   silence_seconds: 2.2              # trailing silence that ends a chunk

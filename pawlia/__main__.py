@@ -217,6 +217,12 @@ async def _run(args) -> None:
             _supervise("webhook", lambda: start_webhook(app, iface_cfg["webhook"]))
         ))
 
+    if "openai" in iface_cfg:
+        from pawlia.interfaces.openai_compat import start_openai_compat
+        tasks.append(asyncio.create_task(
+            _supervise("openai", lambda: start_openai_compat(app, iface_cfg["openai"]))
+        ))
+
     from pawlia.interfaces.web import start_web
     tasks.append(asyncio.create_task(
         _supervise("web", lambda: start_web(app, iface_cfg.get("web", {})))
