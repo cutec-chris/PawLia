@@ -20,6 +20,7 @@ from pawlia.utils import run_sync_in_thread
 
 
 _RE_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
+_RE_TOOL_CALL_LEAKED = re.compile(r"<tool_call>.*?(?:</tool_call>|$)", re.DOTALL)
 # Chat-template tokens that some models leak into their output
 _RE_CHAT_TOKENS = re.compile(r"<\|.*?\|>.*", re.DOTALL)
 # Pattern for tool call in failed_generation from API errors
@@ -148,6 +149,8 @@ class BaseAgent(ABC):
         for tag in ("</think>", "</thinking>"):
             if tag in text:
                 text = text[text.find(tag) + len(tag):]
+        # Strip leaked <tool_call>…</tool_call> blocks (model forced to respond without tools)
+        text = _RE_TOOL_CALL_LEAKED.sub("", text)
         # Strip chat-template tokens like <|endoftext|><|im_start|>user ...
         text = _RE_CHAT_TOKENS.sub("", text)
         return text.lstrip("\n").rstrip()

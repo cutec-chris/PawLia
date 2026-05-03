@@ -43,12 +43,16 @@ _FAKE_TOOL_CALL_NUDGE = (
     "Use a real tool call now."
 )
 _MAX_FAKE_TOOL_RETRIES = 5
-_EMPTY_TURN2_NUDGE = "The tool finished. Please respond to the user now."
+_EMPTY_TURN2_NUDGE = (
+    "You have reached the maximum number of tool calls. "
+    "Do NOT call any more tools. "
+    "Summarize what you found so far and give the user a direct text response."
+)
 _CHAT_CONTINUE_NUDGE = (
     "The task is not complete yet. If you need a skill, call it now instead of describing "
     "what you plan to do. Only answer the user once the requested work is actually done."
 )
-_MAX_CHAT_TOOL_TURNS = 8
+_MAX_CHAT_TOOL_TURNS = 16
 _MAX_CHAT_NUDGES = 3
 _REPLAY_TOOL_RESULT_LIMIT = 240
 _REPLAY_TOOL_CALLS_LIMIT = 3
