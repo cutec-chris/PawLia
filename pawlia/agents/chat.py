@@ -263,15 +263,14 @@ class ChatAgent(BaseAgent):
         bot_text: str,
         tool_calls_info: Optional[List[Dict[str, Any]]],
     ) -> str:
-        """Return a compact assistant turn for replay into the chat context.
+        """Return an assistant turn for replay into the chat context.
 
-        Prior skill-backed exchanges are replayed as plain assistant text with a
-        concise note about earlier skill usage. This avoids re-inflating the
-        prompt with full ToolMessage payloads and raw tool outputs.
+        Conversational responses are replayed verbatim. Skill-backed exchanges
+        keep the assistant text and append a concise note about the tool calls,
+        so the prompt is not re-inflated with full raw tool outputs.
         """
-        base = self._compact_text(bot_text, limit=600)
         if not tool_calls_info:
-            return base
+            return bot_text or ""
 
         lines: List[str] = []
         for tc in tool_calls_info[:_REPLAY_TOOL_CALLS_LIMIT]:
@@ -291,7 +290,7 @@ class ChatAgent(BaseAgent):
             lines.append(f"- ... {len(tool_calls_info) - _REPLAY_TOOL_CALLS_LIMIT} more earlier skill call(s)")
 
         summary = "Earlier skill use:\n" + "\n".join(lines)
-        return f"{base}\n\n{summary}" if base else summary
+        return f"{bot_text}\n\n{summary}" if bot_text else summary
 
     async def run(
         self,
