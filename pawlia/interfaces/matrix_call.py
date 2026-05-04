@@ -346,7 +346,7 @@ class CallSession:
     # Wait this long after the user's latest speech before replying.  This
     # lets callers tell a longer story without the agent jumping into every
     # pause that was only used for breathing or thinking.
-    RESPONSE_DELAY_SECONDS = 2.5
+    RESPONSE_DELAY_SECONDS = 1.2
 
     def __init__(
         self,
@@ -386,6 +386,10 @@ class CallSession:
         self._greeting_sent = False
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
+        # Adaptive silence detection: rolling EMA of background noise floor
+        self._noise_floor: float = 0.01
+        # Duration of the most recently accepted speech chunk (seconds)
+        self._last_speech_duration: float = 0.0
         self._load_voip_audio_config()
         self._webrtc_vad = self._init_webrtc_vad()
 
@@ -1126,7 +1130,13 @@ class CallSession:
         adjusted_rms: float,
     ) -> bool:
         """Return True when a live frame looks like speech, not just loud noise."""
-        if adjusted_rms <= self.SILENCE_THRESHOLD:
+        # Raise silence threshold dynamically when background noise is present.
+        # noise_floor is an EMA of RMS during non-speech periods; a frame whose
+        # RMS is less than 2× the measured floor is treated as silence so that
+        # steady background noise (e.g. cycling) does not prevent silence_count
+        # from accumulating.
+        effective_threshold = max(self.SILENCE_THRESHOLD, self._noise_floor * 2.0)
+        if adjusted_rms <= effective_threshold:
             return False
 
         if len(pcm) < 2:
@@ -1198,6 +1208,28 @@ class CallSession:
                 self._active_response_task = None
 
         task.add_done_callback(_clear)
+
+    def _compute_response_delay(self) -> float:
+        """Return how long to wait before replying after the user goes quiet.
+
+        Scales with the duration of the last accepted speech chunk: a longer
+        monologue gets a longer pause window so brief thinking gaps are not
+        mistaken for end-of-turn.  Also adds a small bonus when significant
+        background noise is present so transient noise dips don't cut off early.
+        """
+        base = self.RESPONSE_DELAY_SECONDS
+        dur = self._last_speech_duration
+        if dur > 20.0:
+            base = max(base, 5.0)
+        elif dur > 12.0:
+            base = max(base, 4.0)
+        elif dur > 6.0:
+            base = max(base, 3.0)
+        # Small bonus when noise floor is elevated (background noise context)
+        noise_ratio = self._noise_floor / max(self.SILENCE_THRESHOLD, 1e-4)
+        if noise_ratio > 1.5:
+            base += min((noise_ratio - 1.5) * 0.5, 1.5)
+        return base
 
     async def _cancel_active_response(self) -> None:
         """Cancel any in-flight response generation for this call."""
@@ -1367,9 +1399,10 @@ class CallSession:
 
     async def _delayed_pending_response(self) -> None:
         try:
+            response_delay = self._compute_response_delay()
             while not self._done.is_set():
                 idle_for = time.monotonic() - self._last_user_speech_at
-                if not self._speaking and idle_for >= self.RESPONSE_DELAY_SECONDS:
+                if not self._speaking and idle_for >= response_delay:
                     if self._tts_track and self._tts_track.is_playing:
                         await asyncio.sleep(0.2)
                         continue
@@ -1382,10 +1415,13 @@ class CallSession:
             text = "\n".join(self._pending_transcripts)
             self._pending_transcripts = []
             logger.info(
-                "call %s: replying after %.1fs quiet to %d transcript chunk(s)",
+                "call %s: replying after %.1fs quiet to %d transcript chunk(s) "
+                "(speech_dur=%.1fs noise_floor=%.4f)",
                 self.call_id[:8],
-                self.RESPONSE_DELAY_SECONDS,
+                response_delay,
                 len(text.splitlines()),
+                self._last_speech_duration,
+                self._noise_floor,
             )
             await self._respond_to_transcript(text, announce_transcript=False)
         finally:
@@ -1404,7 +1440,6 @@ class CallSession:
         """Continuously read audio frames, detect speech, transcribe, respond."""
         SAMPLE_RATE = 48000
         fps = 50  # aiortc default: 20 ms frames
-        silence_threshold = int(self.SILENCE_SECONDS * fps)
         min_speech_frames = int(self.MIN_SPEECH_SECONDS * fps)
 
         speech_buffer: List[np.ndarray] = []
@@ -1451,12 +1486,26 @@ class CallSession:
                 elif frames_received % 50 == 0 and logger.isEnabledFor(logging.DEBUG):
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
-                    logger.debug("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
-                                 self.call_id[:8], frames_received, rms,
+                    logger.debug("call %s: frame #%d rms=%.4f nf=%.4f buf=%d silence=%d hash=%s",
+                                 self.call_id[:8], frames_received, rms, self._noise_floor,
                                  len(speech_buffer), silence_count, h)
 
                 # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
                 adjusted_rms = self._agc_rms(rms)
+
+                # Update background noise floor while not accumulating speech.
+                # EMA alpha=0.02 → ~50-frame (1 s) time constant, slow enough to
+                # ignore transient spikes but fast enough to adapt to the cycling
+                # noise floor within the first few seconds of a call.
+                if not speech_buffer:
+                    self._noise_floor = 0.02 * rms + 0.98 * self._noise_floor
+
+                # silence_threshold in frames; kept at the configured value (minimum
+                # 1.2 s).  Because _is_speech_like_frame now uses an adaptive
+                # threshold that treats background noise as silence, silence_count
+                # accumulates naturally without needing to reduce this value.
+                silence_threshold = int(max(1.2, self.SILENCE_SECONDS) * fps)
+
                 speech_like_frame = self._is_speech_like_frame(
                     pcm,
                     SAMPLE_RATE,
@@ -1550,15 +1599,17 @@ class CallSession:
                         if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
                             chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
                             if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
+                                self._last_speech_duration = duration
                                 logger.info(
                                     "call %s: sending chunk for transcription "
-                                    "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
+                                    "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f noise_floor=%.4f)",
                                     self.call_id[:8],
                                     chunk_stats["active_ratio"],
                                     int(chunk_stats["longest_run"]),
                                     chunk_stats["speech_like_ratio"],
                                     chunk_stats["voiced_ratio"],
                                     chunk_stats["p90_rms"],
+                                    self._noise_floor,
                                 )
                                 self._mark_activity()
                                 task = asyncio.create_task(
