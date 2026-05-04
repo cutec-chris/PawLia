@@ -483,37 +483,54 @@ class SimpleVectorBackend(RagBackend):
     # ── embedding ───────────────────────────────────────────────────────────
 
     async def _embed(self, texts: list[str]):
+        import json as _json
+        import urllib.request as _urllib
         import numpy as np
         cfg = self._cfg
         provider = cfg.get("embedding_provider", "ollama")
         model = cfg.get("embedding_model", "bge-m3:latest")
         host = cfg.get("embedding_host", "http://localhost:11434")
         dim = int(cfg.get("embedding_dim", 1024))
+        timeout = int(cfg.get("embedding_timeout", cfg.get("rag_embedding_timeout", 120)))
 
         if self._llm_busy and self._llm_busy():
             raise RuntimeError("LLM busy — deferring memory embedding")
 
         if provider == "ollama":
-            import lightrag.llm.ollama
+            url = f"{host.rstrip('/')}/api/embed"
+            payload = _json.dumps({"model": model, "input": texts}).encode()
+            req = _urllib.Request(url, data=payload,
+                                  headers={"Content-Type": "application/json"},
+                                  method="POST")
+            def _do():
+                with _urllib.urlopen(req, timeout=timeout) as resp:
+                    return _json.loads(resp.read().decode())
+            from pawlia.utils import run_sync_in_thread
             try:
-                result = await lightrag.llm.ollama.ollama_embed.func(
-                    texts, host=host, embed_model=model, max_token_size=8192,
-                )
+                data = await run_sync_in_thread(_do)
+                result = data["embeddings"]
             except Exception as e:
                 if "NaN" in str(e):
                     return np.zeros((len(texts), dim))
                 raise
-            arr = np.array(result, dtype="float32")
         else:
-            import lightrag.llm.openai
-            result = await lightrag.llm.openai.openai_embed(
-                texts,
-                embed_model=model,
-                api_key=cfg.get("embedding_api_key"),
-                base_url=cfg.get("embedding_base_url"),
-            )
-            arr = np.array(result, dtype="float32")
+            # OpenAI-compatible embeddings endpoint
+            base_url = cfg.get("embedding_base_url", host)
+            api_key = cfg.get("embedding_api_key", "")
+            url = f"{base_url.rstrip('/')}/embeddings"
+            payload = _json.dumps({"model": model, "input": texts}).encode()
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            req = _urllib.Request(url, data=payload, headers=headers, method="POST")
+            def _do_openai():
+                with _urllib.urlopen(req, timeout=timeout) as resp:
+                    return _json.loads(resp.read().decode())
+            from pawlia.utils import run_sync_in_thread
+            data = await run_sync_in_thread(_do_openai)
+            result = [item["embedding"] for item in data["data"]]
 
+        arr = np.array(result, dtype="float32")
         if np.isnan(arr).any():
             arr = np.nan_to_num(arr, nan=0.0)
         return arr

@@ -67,6 +67,69 @@ def _find_similar_slug(
     return best_slug if best_ratio >= threshold else None
 
 
+# (model_key) → context_length in tokens
+_context_length_cache: dict[str, int] = {}
+
+_DEFAULT_CTX = 4096
+_RESERVED_TOKENS = 2000   # system prompt + JSON output headroom
+_CHARS_PER_TOKEN = 3      # conservative estimate for mixed content
+
+
+async def _get_model_context_length(cfg: dict) -> int:
+    """Query Ollama /api/show for the model's native context length.
+
+    Falls back to cfg['rag_numctx'] or _DEFAULT_CTX on any error.
+    Result is cached per (host, model) key.
+    """
+    import urllib.request
+    provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
+    model = cfg.get("rag_model", "qwen3.5:latest")
+    host = cfg.get("embedding_host", "http://localhost:11434")
+    configured_ctx = int(cfg.get("rag_numctx", 0))
+
+    if provider != "ollama":
+        return configured_ctx or _DEFAULT_CTX
+
+    cache_key = f"{host}|{model}"
+    if cache_key in _context_length_cache:
+        native = _context_length_cache[cache_key]
+    else:
+        try:
+            body = json.dumps({"model": model}).encode()
+            req = urllib.request.Request(
+                f"{host.rstrip('/')}/api/show",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            from pawlia.utils import run_sync_in_thread
+            def _do():
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode())
+            data = await run_sync_in_thread(_do)
+            info = data.get("model_info", {})
+            arch = info.get("general.architecture", "")
+            native = int(info.get(f"{arch}.context_length", 0)) or _DEFAULT_CTX
+        except Exception:
+            native = _DEFAULT_CTX
+        _context_length_cache[cache_key] = native
+
+    if configured_ctx:
+        # Honour the explicit config, but don't exceed what the model supports.
+        effective = min(native, configured_ctx)
+    else:
+        # No explicit config: Ollama defaults to 2048 regardless of model max.
+        # Use _DEFAULT_CTX (4096) as a safe practical baseline.
+        effective = _DEFAULT_CTX
+    return effective
+
+
+async def _max_input_chars(cfg: dict) -> int:
+    """Compute max input chars for _llm_analyze based on model context window."""
+    ctx = await _get_model_context_length(cfg)
+    return max(1000, (ctx - _RESERVED_TOKENS) * _CHARS_PER_TOKEN)
+
+
 async def _llm_call(cfg: dict, system_prompt: str, user_prompt: str) -> str:
     """Make a single LLM call and return the stripped content string."""
     import urllib.request
@@ -127,26 +190,36 @@ async def _llm_call(cfg: dict, system_prompt: str, user_prompt: str) -> str:
             .get("content", "")
         )
 
-    return re.sub(r"<think.*?</think >", "", content, flags=re.DOTALL).strip()
+    return re.sub(r"<think.*?</think>", "", content, flags=re.DOTALL).strip()
 
 
-def _parse_json_array(content: str) -> list:
-    """Try to parse a JSON array from LLM output, tolerating wrapping."""
-    try:
-        data = json.loads(content)
-        if isinstance(data, list):
-            return data
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"\[.*\]", content, re.DOTALL)
-    if m:
+_SENTINEL = object()
+
+
+def _parse_json_array(content: str):
+    """Try to parse a JSON array from LLM output, tolerating wrapping.
+
+    Returns the parsed list, or _SENTINEL if no JSON array could be found.
+    An empty list [] is a valid (successful) parse result.
+    """
+    # Strip code fences: ```json ... ``` or ``` ... ```
+    stripped = re.sub(r"```(?:json)?\s*(.*?)\s*```", r"\1", content, flags=re.DOTALL).strip()
+    for candidate in (stripped, content):
         try:
-            data = json.loads(m.group())
+            data = json.loads(candidate)
             if isinstance(data, list):
                 return data
         except json.JSONDecodeError:
             pass
-    return []
+        m = re.search(r"\[.*\]", candidate, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group())
+                if isinstance(data, list):
+                    return data
+            except json.JSONDecodeError:
+                pass
+    return _SENTINEL
 
 
 def _now_iso() -> str:
@@ -322,6 +395,12 @@ class DreamWikiBackend:
         """Analyze a chat log and return wiki actions (create/update pages)."""
         from pawlia.prompt_utils import load_system_prompt
 
+        max_chars = await _max_input_chars(self._cfg)
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n\n[... truncated ...]"
+            logger.debug("DreamWikiBackend: input truncated to %d chars (ctx=%d tokens)",
+                         max_chars, max_chars // _CHARS_PER_TOKEN + _RESERVED_TOKENS)
+
         system_prompt = load_system_prompt("dream/analyze.md")
         user_prompt = (
             f"## Aktueller Wiki-Index\n{wiki_index}\n\n"
@@ -331,7 +410,7 @@ class DreamWikiBackend:
         content = await _llm_call(self._cfg, system_prompt, user_prompt)
         actions = _parse_json_array(content)
 
-        if not actions:
+        if actions is _SENTINEL:
             logger.warning("DreamWikiBackend: could not parse LLM JSON, using raw")
             return [{"action": "create", "slug": "misc",
                       "title": "Miscellaneous", "content": content,
@@ -439,7 +518,7 @@ class DreamWikiBackend:
         # Try parsing as a single JSON object first
         data = {}
         arrays = _parse_json_array(content)
-        if arrays:
+        if arrays is not _SENTINEL and arrays:
             data = arrays[0] if isinstance(arrays[0], dict) else {}
         if not data:
             try:
