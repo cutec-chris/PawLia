@@ -171,7 +171,7 @@ voip:
   webrtcvad_min_voiced_ratio: 0.12
   webrtcvad_min_consecutive_frames: 4
   call_inactivity_seconds: 180
-  response_delay_seconds: 2.5
+  response_delay_seconds: 1.2
   agc_window_seconds: 15.0
   agc_target_rms: 0.10
   agc_max_gain: 12.0
@@ -183,7 +183,7 @@ voip:
 
 | Key | Description |
 |-----|-------------|
-| `voip.silence_threshold` | Per-frame RMS threshold above which incoming audio counts as speech |
+| `voip.silence_threshold` | Baseline per-frame RMS threshold for silence detection. Acts as a floor: the effective threshold is raised automatically when background noise is present (see adaptive silence below) |
 | `voip.silence_seconds` | Silence duration that closes the current VoIP speech chunk |
 | `voip.min_speech_seconds` | Minimum chunk duration before deeper speech/noise analysis runs |
 | `voip.min_active_speech_ratio` | Minimum share of active 20 ms frames required before a chunk is sent to STT |
@@ -197,7 +197,7 @@ voip:
 | `voip.webrtcvad_min_voiced_ratio` | Minimum share of frames WebRTC VAD must classify as voiced before a chunk is sent to STT |
 | `voip.webrtcvad_min_consecutive_frames` | Minimum sustained run of WebRTC-voiced frames required before a chunk is sent to STT |
 | `voip.call_inactivity_seconds` | Hang up the VoIP call when no speech chunk has been sent to STT for this many seconds |
-| `voip.response_delay_seconds` | Quiet time after the latest caller speech before PawLia starts answering |
+| `voip.response_delay_seconds` | Minimum quiet time after the latest caller speech before PawLia starts answering. The actual delay scales up automatically with long monologues (see adaptive response delay below) |
 | `voip.agc_window_seconds` | How long PawLia keeps automatic gain control active after recent speech / call activity |
 | `voip.agc_target_rms` | Target loudness AGC tries to normalize incoming audio toward for VAD decisions |
 | `voip.agc_max_gain` | Upper amplification cap AGC may apply to quiet incoming audio |
@@ -205,6 +205,25 @@ voip:
 | `voip.preanswer_warmup_enabled` | Warm STT with silent audio and prepare the LLM/TTS greeting before sending `m.call.answer` |
 | `voip.preanswer_warmup_timeout_seconds` | Maximum time to wait for pre-answer warmup before answering anyway |
 | `voip.preanswer_stt_silence_seconds` | Duration of the silent WAV sent through STT during pre-answer warmup |
+
+### Adaptive silence detection
+
+The pipeline tracks a rolling EMA of the background noise floor (measured during inter-speech periods). The frame-level silence gate then raises the effective threshold to `max(silence_threshold, noise_floor × 2)` so that steady background noise — road noise, cycling, wind — falls below the effective threshold and counts as silence. This prevents speech chunks from growing indefinitely when the raw RMS never drops all the way to zero.
+
+`silence_threshold` remains the configurable floor; the adaptive part only ever raises it, never lowers it.
+
+### Adaptive response delay
+
+After a speech chunk is accepted the pipeline waits at least `response_delay_seconds` before generating a reply. The actual delay scales with how long the caller just spoke:
+
+| Last speech duration | Minimum wait |
+|----------------------|--------------|
+| < 6 s | `response_delay_seconds` (default 1.2 s) |
+| 6 – 12 s | 3.0 s |
+| 12 – 20 s | 4.0 s |
+| > 20 s | 5.0 s |
+
+A small bonus (up to 1.5 s) is added when the measured noise floor is significantly elevated, because background noise can mask the true end of speech.
 
   webhook:
     port: 8080

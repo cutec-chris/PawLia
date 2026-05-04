@@ -306,7 +306,37 @@ def _parse_sdp_candidates(sdp: str) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 class CallSession:
-    """Manages a single active VoIP call."""
+    """Manages a single active VoIP call.
+
+    Adaptive silence detection
+    --------------------------
+    Rather than using a fixed RMS threshold to distinguish speech from silence,
+    the pipeline maintains a rolling EMA of the background noise floor
+    (_noise_floor) during periods when no speech buffer is active.  The
+    frame-level gate (_is_speech_like_frame) then uses
+
+        effective_threshold = max(SILENCE_THRESHOLD, _noise_floor × 2.0)
+
+    so that steady background noise (e.g. road noise while cycling) falls
+    below the effective threshold and counts as silence.  This lets
+    silence_count accumulate even when the raw RMS never drops to zero,
+    preventing speech chunks from growing indefinitely.
+
+    Adaptive response delay
+    -----------------------
+    After a speech chunk is accepted and transcribed, the pipeline waits
+    _compute_response_delay() seconds before generating a reply.  The delay
+    scales with the duration of the last accepted chunk so that long monologues
+    get a longer pause window (the caller may just be thinking), while short
+    utterances get a quick response.  A small bonus is added when the noise
+    floor is elevated, since background noise can mask the true end of speech.
+
+        last_speech_duration  →  base delay
+        < 6 s                    RESPONSE_DELAY_SECONDS (default 1.2 s)
+        6 – 12 s                 max(base, 3.0 s)
+        12 – 20 s                max(base, 4.0 s)
+        > 20 s                   max(base, 5.0 s)
+    """
 
     # Silence detection: RMS below this (after AGC) → silence
     SILENCE_THRESHOLD = 0.018
