@@ -341,7 +341,7 @@ class CallSession:
     # Silence detection: RMS below this (after AGC) → silence
     SILENCE_THRESHOLD = 0.018
     # Seconds of silence that end a speech chunk
-    SILENCE_SECONDS = 2.2
+    SILENCE_SECONDS = 1.5
     # Minimum seconds of speech before we transcribe (filter short noise bursts)
     MIN_SPEECH_SECONDS = 0.4
     # Chunk-level guard: require enough active speech frames before STT

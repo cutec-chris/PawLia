@@ -158,7 +158,7 @@ Shared VoIP behavior is configured globally so the same settings can be reused b
 ```yaml
 voip:
   silence_threshold: 0.018
-  silence_seconds: 1.5
+  silence_seconds: 1.5  # default
   min_speech_seconds: 0.4
   min_active_speech_ratio: 0.12
   min_consecutive_speech_frames: 8
