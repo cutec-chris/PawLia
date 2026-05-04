@@ -647,7 +647,13 @@ async def test_preanswer_warmup_runs_stt_and_greeting_before_answer():
     client = SimpleNamespace(room_typing=AsyncMock())
     agent = MagicMock()
     agent.build_system_prompt.return_value = "CALL PROMPT"
-    agent.run_streamed = AsyncMock(return_value="Hallo, ich bin da.")
+
+    async def _fake_run_streamed(*args, on_sentence=None, **kwargs):
+        if on_sentence:
+            await on_sentence("Hallo, ich bin da.")
+        return "Hallo, ich bin da."
+
+    agent.run_streamed = AsyncMock(side_effect=_fake_run_streamed)
     send_cb = AsyncMock()
     session = CallSession(
         call_id="call-warmup",
