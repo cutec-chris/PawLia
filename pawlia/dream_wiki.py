@@ -368,12 +368,12 @@ class DreamWikiBackend:
                 continue
             lines.append(f"\n## {etype.title()}\n")
             for slug, title in entries:
-                lines.append(f"- [{title}](topics/{slug}.md)")
+                lines.append(f"- {self._index_link(slug, title)}")
         # Any unknown types
         for etype, entries in typed.items():
             lines.append(f"\n## {etype.title()}\n")
             for slug, title in entries:
-                lines.append(f"- [{title}](topics/{slug}.md)")
+                lines.append(f"- {self._index_link(slug, title)}")
         lines.append(f"\n> {len(catalog)} pages")
         path = os.path.join(self._wiki_dir, "index.md")
         os.makedirs(self._wiki_dir, exist_ok=True)
@@ -401,7 +401,9 @@ class DreamWikiBackend:
             logger.debug("DreamWikiBackend: input truncated to %d chars (ctx=%d tokens)",
                          max_chars, max_chars // _CHARS_PER_TOKEN + _RESERVED_TOKENS)
 
-        system_prompt = load_system_prompt("dream/analyze.md")
+        system_prompt = self._adapt_prompt_for_link_format(
+            load_system_prompt("dream/analyze.md")
+        )
         user_prompt = (
             f"## Aktueller Wiki-Index\n{wiki_index}\n\n"
             f"## Gesprächsprotokoll\n{text}"
@@ -417,15 +419,19 @@ class DreamWikiBackend:
                       "tags": [], "links": []}]
         return actions
 
-    # ── Page management ───────────────────────────────────────────────────────
+    # ── Link format helpers ───────────────────────────────────────────────────
+
+    @property
+    def _link_format(self) -> str:
+        """Return configured link format: 'wikilink' (default) or 'markdown'."""
+        return self._cfg.get("wiki_link_format", "wikilink")
 
     def _md_link(self, slug: str, catalog: dict[str, str] | None = None) -> str:
-        """Build a standard Markdown relative link for a slug."""
+        """Build a link for a slug using the configured format."""
         title = slug
         if catalog and slug in catalog:
             title = catalog[slug]
         else:
-            # Try reading the title from the file
             filepath = os.path.join(self._topics_dir, f"{slug}.md")
             if os.path.exists(filepath):
                 try:
@@ -435,7 +441,47 @@ class DreamWikiBackend:
                         title = fm["title"]
                 except Exception:
                     pass
+        if self._link_format == "wikilink":
+            return f"[[{slug}|{title}]]" if title != slug else f"[[{slug}]]"
         return f"[{title}]({slug}.md)"
+
+    def _index_link(self, slug: str, title: str) -> str:
+        """Build a link for use in index.md (one level above topics/)."""
+        if self._link_format == "wikilink":
+            return f"[[{slug}|{title}]]" if title != slug else f"[[{slug}]]"
+        return f"[{title}](topics/{slug}.md)"
+
+    def _has_link(self, text: str, slug: str) -> bool:
+        """Check whether text already contains a link to slug in any format."""
+        return (
+            f"]({slug}.md)" in text
+            or f"[[{slug}]]" in text
+            or f"[[{slug}|" in text
+        )
+
+    def _adapt_prompt_for_link_format(self, prompt: str) -> str:
+        """Replace markdown-link instructions with wikilink instructions when configured."""
+        if self._link_format != "wikilink":
+            return prompt
+        replacements = [
+            (
+                "using **standard Markdown links**: `[Page Title](slug.md)`",
+                "using **Obsidian wikilinks**: `[[slug]]` or `[[slug|Display Text]]`",
+            ),
+            (
+                "Use `[Display Text](slug.md)` links (NOT `[[wikilinks]]`) to connect related pages",
+                "Use `[[slug]]` or `[[slug|Display Text]]` wikilinks to connect related pages",
+            ),
+            (
+                "Links use standard Markdown format: `[Title](slug.md)`",
+                "Links use Obsidian wikilink format: `[[slug]]` or `[[slug|Display Text]]`",
+            ),
+        ]
+        for old, new in replacements:
+            prompt = prompt.replace(old, new)
+        return prompt
+
+    # ── Page management ───────────────────────────────────────────────────────
 
     async def _update_page(self, slug: str, title: str, content: str,
                            date_str: str, action: str,
@@ -471,7 +517,7 @@ class DreamWikiBackend:
             if link_section:
                 if "## Related" in existing:
                     for l in links:
-                        if l != slug and f"]({l}.md)" not in existing:
+                        if l != slug and not self._has_link(existing, l):
                             existing += f"\n- {self._md_link(l, catalog)}"
                 else:
                     existing += link_section
@@ -507,7 +553,9 @@ class DreamWikiBackend:
             except Exception:
                 continue
 
-        system_prompt = load_system_prompt("dream/consolidate.md")
+        system_prompt = self._adapt_prompt_for_link_format(
+            load_system_prompt("dream/consolidate.md")
+        )
         user_prompt = (
             f"## Wiki pages ({len(catalog)} total)\n\n"
             + "\n".join(page_summaries)
@@ -566,11 +614,12 @@ class DreamWikiBackend:
                     with open(keep_path, "a", encoding="utf-8") as f:
                         f.write(f"\n\n---\n*Merged from {self._md_link(m_slug, catalog)}*\n\n{body}")
 
-                    # Update links in all files (both old [[wikilink]] and md link formats)
+                    # Update links in all files (both wikilink and markdown formats)
                     m_slug_link_re = re.compile(
                         rf"\[\[[^\]]*{re.escape(m_slug)}[^\]]*\]\]"
                         rf"|\[[^\]]*\]\({re.escape(m_slug)}\.md\)"
                     )
+                    replacement = self._md_link(keep_slug, {keep_slug: keep_title})
                     for fname in os.listdir(self._topics_dir):
                         if not fname.endswith(".md"):
                             continue
@@ -578,9 +627,7 @@ class DreamWikiBackend:
                         try:
                             with open(fpath, encoding="utf-8") as f:
                                 fc = f.read()
-                            updated = m_slug_link_re.sub(
-                                f"[{keep_title}]({keep_slug}.md)", fc,
-                            )
+                            updated = m_slug_link_re.sub(replacement, fc)
                             if updated != fc:
                                 with open(fpath, "w", encoding="utf-8") as f:
                                     f.write(updated)
@@ -613,7 +660,7 @@ class DreamWikiBackend:
                 try:
                     with open(fpath, encoding="utf-8") as f:
                         fc = f.read()
-                    if f"]({to_slug}.md)" not in fc:
+                    if not self._has_link(fc, to_slug):
                         link = self._md_link(to_slug, catalog)
                         if "## Related" in fc:
                             fc += f"\n- {link}"

@@ -381,7 +381,7 @@ skill-config:
 
 | Backend | Default | Description |
 |---------|---------|-------------|
-| `markdown` | **yes** | **Dream Wiki** — LLM builds a structured, interlinked wiki from conversations. Pages have YAML frontmatter, `[[wikilinks]]`, and cross-references. Runs automatically overnight when idle. No embeddings required. |
+| `markdown` | **yes** | **Dream Wiki** — LLM builds a structured, interlinked wiki from conversations. Pages have YAML frontmatter, Obsidian wikilinks (configurable via `wiki_link_format`), and cross-references. Runs automatically overnight when idle. No embeddings required. |
 | `lightrag` | | Knowledge-graph RAG (powerful, slow). Requires `lightrag-hku`. |
 | `simple` | | Chunk + embed + cosine similarity. Fast, numpy only. |
 | `mem0` | | Fact extraction via mem0. Requires `mem0ai` + `chromadb`. |
@@ -423,6 +423,7 @@ Manual commands via the memory skill:
 | `rag_model` | markdown, lightrag, mem0 | LLM model for indexing / queries |
 | `rag_numctx` | markdown, lightrag | LLM context window (default: 4096) |
 | `rag_timeout` | all | LLM timeout in seconds (default: 600) |
+| `wiki_link_format` | markdown | Link format: `wikilink` (default, Obsidian-native) or `markdown` |
 
 ## Skill Installation
 

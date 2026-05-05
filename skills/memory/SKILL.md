@@ -67,5 +67,5 @@ python <scripts_dir>/memory.py status
 
 - The `index` command is also run automatically on every `search` to pick up new logs.
 - Search results contain relevant excerpts from past conversations — use them to answer the user's question.
-- The `dream` command processes unprocessed chat logs into a structured wiki with cross-references (`[[wikilinks]]`).
+- The `dream` command processes unprocessed chat logs into a structured wiki with cross-references (Obsidian wikilinks by default, configurable via `wiki_link_format`).
 - The Dream Wiki runs automatically when the user has been idle for 30 minutes (configurable via `dream_idle_minutes`).
