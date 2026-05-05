@@ -175,12 +175,19 @@ intended and flag any mismatch.
    that returns a pre-built wall of text locks out the LLM and makes the skill
    impossible to adjust conversationally.
 
-   **Example output in SKILL.md:** Every skill body must contain a
-   `## Example output` section with one realistic sample of what a *good LLM
-   response* looks like (the final text the user should see — not the JSON).
-   This anchors the LLM's formatting decisions and gives Pawlia a stable
-   output shape even when the underlying data varies. Keep the sample
-   representative but concise (5–20 lines).
+   **Exception:** skills whose output is explicitly required to be verbatim
+   (e.g. a pre-formatted report) MUST say so in the SKILL.md with a clear
+   "Return verbatim" rule AND provide a `## Example output` that shows the
+   exact expected format including any links or special elements. Without the
+   example, the sub-agent will helpfully reformat — and destroy links and structure.
+
+   **`## Example output` — MANDATORY in every SKILL.md body.** It must:
+   - Show one realistic sample of what the final user-facing text looks like
+   - Explicitly mark elements that must not be changed: links, special
+     formatting, exact phrases — annotate them with a `← keep` comment or bold
+   - Be 5–20 lines; representative but not exhaustive
+   - Be updated first whenever the user requests a change to output format —
+     agree on the new example, then change the script/instructions to match it
 
 5. **Validate.** `creator.py validate --name "<name>"` — fix all `issues`,
    review `warnings`.
@@ -230,8 +237,11 @@ a working signal.
 
 ### Phase 2 — Implement (≤5 tool calls)
 
-Edit the script. Update SKILL.md only if the external contract changed
-(endpoint path, payload shape, auth flow).
+Edit the script. Update SKILL.md when the external contract changed
+(endpoint path, payload shape, auth flow) **or when the user requested
+a change to the output format** — in that case update `## Example output`
+first to reflect the desired result, then adjust scripts and instructions
+to match it.
 
 **Rule:** in Phase 2, no new probes. Every tool call must be `write_file`,
 `edit_file`, or a single targeted re-read of a file you are editing. If you

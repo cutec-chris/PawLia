@@ -367,6 +367,16 @@ def cmd_validate(args):
             if files and res_type not in body.lower():
                 warnings.append(f"Has {res_type}/ but SKILL.md doesn't reference it")
 
+    # Example output section
+    if "## Example output" not in body:
+        issues.append(
+            "Missing '## Example output' section — the sub-agent needs a concrete sample "
+            "of the expected user-facing output to format responses correctly. "
+            "Add a ## Example output section with 5-20 lines showing exactly what good "
+            "output looks like, and annotate critical elements (links, exact phrases) "
+            "with '← keep' so the sub-agent knows not to change them."
+        )
+
     # Line count
     line_count = len(body.split("\n"))
     if line_count > 500:
