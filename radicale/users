@@ -1,0 +1,3 @@
+# htpasswd file — managed with: htpasswd -B -b radicale/users <login> <password>
+# <login> = CalDAV username + first URL path component (e.g. "chris" → /chris/calendar/)
+# Map <login> → picoclaw user_id in config.yaml under caldav.users

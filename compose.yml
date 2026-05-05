@@ -1,4 +1,21 @@
 services:
+  radicale:
+    build:
+      context: ./radicale
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5232:5232"
+    environment:
+      - PICOCLAW_SESSION_DIR=/session
+      - PICOCLAW_CONFIG=/config.yaml
+    volumes:
+      # Shared session dir (same mount point as pawlia uses for /app/session)
+      - ./session:/session
+      # Main config — read caldav.users mapping from here
+      - ./config.yaml:/config.yaml:ro
+      # htpasswd — add users with: htpasswd -B -b radicale/users <login> <password>
+      - ./radicale/users:/radicale/users:ro
+
   ollama:
     image: ollama/ollama
     restart: unless-stopped

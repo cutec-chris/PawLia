@@ -179,6 +179,14 @@ workspace:
     # weekly_squash_time: "23:30"  # squash all weekly commits into one (default: 23:30)
     # push: false                  # push to remote after squash (uses --force-with-lease)
 
+# CalDAV/CardDAV server — maps Radicale login names to picoclaw user_ids.
+# Login name = htpasswd username = first URL path component (e.g. /chris/calendar/).
+# Add users to radicale/users with: htpasswd -B -b radicale/users chris mypassword
+# caldav:
+#   users:
+#     chris: cli_user          # simple name → user_id
+#     anna: anna_user
+
 skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload
   allow_workspace: true    # load skills from session/<user>/workspace/skills/ (default: true)
