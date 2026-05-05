@@ -153,6 +153,7 @@ class ScriptExecutor:
         except asyncio.TimeoutError:
             if proc:
                 proc.kill()
+                await proc.wait()
             return {"success": False, "output": "", "error": f"Script timed out after {ScriptExecutor.TIMEOUT}s"}
         except Exception as e:
             return {"success": False, "output": "", "error": str(e)}
@@ -259,11 +260,11 @@ class ChecklistProcessor:
                 script_path = resolve_script(self.session_dir, user_id, script)
                 params = dict(item.get("params", {}))
                 params["event"] = event_info
-                # Collect previous results from state
+                # Collect previous results from state — only successful items
                 params["previous_results"] = {
                     iid: ist.get("result")
                     for iid, ist in file_state.items()
-                    if isinstance(ist, dict) and ist.get("result") is not None
+                    if isinstance(ist, dict) and ist.get("status") == "done" and ist.get("result") is not None
                 }
 
                 result = await ScriptExecutor.run(

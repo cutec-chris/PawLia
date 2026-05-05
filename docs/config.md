@@ -375,7 +375,7 @@ skill-config:
     embedding_model: bge-m3:latest
     embedding_dim: 1024
     embedding_host: http://localhost:11434
-    rag_backend: markdown          # markdown | lightrag | simple | mem0
+    rag_backend: markdown          # markdown | lightrag | simple
     rag_model: qwen3.5:latest      # LLM for topic extraction / RAG
 ```
 
@@ -384,7 +384,6 @@ skill-config:
 | `markdown` | **yes** | **Dream Wiki** — LLM builds a structured, interlinked wiki from conversations. Pages have YAML frontmatter, Obsidian wikilinks (configurable via `wiki_link_format`), and cross-references. Runs automatically overnight when idle. No embeddings required. |
 | `lightrag` | | Knowledge-graph RAG (powerful, slow). Requires `lightrag-hku`. |
 | `simple` | | Chunk + embed + cosine similarity. Fast, numpy only. |
-| `mem0` | | Fact extraction via mem0. Requires `mem0ai` + `chromadb`. |
 
 ### Dream Wiki (default `markdown` backend)
 
@@ -419,8 +418,8 @@ Manual commands via the memory skill:
 | `embedding_dim` | lightrag, simple | Embedding dimensions |
 | `embedding_host` | all | Ollama / API base URL |
 | `rag_backend` | all | Backend selection (default: `markdown`) |
-| `rag_provider` | markdown, lightrag, mem0 | LLM provider (defaults to `embedding_provider`) |
-| `rag_model` | markdown, lightrag, mem0 | LLM model for indexing / queries |
+| `rag_provider` | markdown, lightrag | LLM provider (defaults to `embedding_provider`) |
+| `rag_model` | markdown, lightrag | LLM model for indexing / queries |
 | `rag_numctx` | markdown, lightrag | LLM context window (default: 4096) |
 | `rag_timeout` | all | LLM timeout in seconds (default: 600) |
 | `wiki_link_format` | markdown | Link format: `wikilink` (default, Obsidian-native) or `markdown` |
