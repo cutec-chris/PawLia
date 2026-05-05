@@ -693,12 +693,18 @@ def cmd_delete_reminder(args) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_add_job(args) -> None:
+    if args.no_notify:
+        notify: bool | str = False
+    elif args.notify_on_error:
+        notify = "error"
+    else:
+        notify = True
     job = {
         "id": f"job-{uuid.uuid4().hex[:8]}",
         "name": args.name,
         "schedule": args.schedule,
         "instruction": args.instruction,
-        "notify": not args.no_notify,
+        "notify": notify,
         "enabled": True,
         "created_at": datetime.now().isoformat(),
         "last_run": "",
@@ -830,6 +836,7 @@ def main():
     p.add_argument("--instruction", required=True)
     p.add_argument("--schedule", required=True)
     p.add_argument("--no-notify", action="store_true")
+    p.add_argument("--notify-on-error", action="store_true")
 
     # list-jobs
     p = sub.add_parser("list-jobs")

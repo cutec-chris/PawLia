@@ -141,8 +141,11 @@ Jobs are stored in `automations/jobs.json` (outside the vault) since they are sc
 
 Add a job:
 ```
-python <scripts_dir>/organizer.py add-job --name "<name>" --instruction "<instruction>" --schedule "<schedule>" [--no-notify]
+python <scripts_dir>/organizer.py add-job --name "<name>" --instruction "<instruction>" --schedule "<schedule>" [--no-notify | --notify-on-error]
 ```
+
+- `--no-notify`: kein Output im Feed (stille Jobs)
+- `--notify-on-error`: Output nur bei Fehler im Feed (z. B. für git-Push-Jobs)
 
 **Schedule formats:**
 - `"16:00"` — daily at 16:00
