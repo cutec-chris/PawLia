@@ -32,6 +32,21 @@ Use this path for all commands below. Never scan other sessions.
 
 ## Workflow
 
+### Step 0 — Pull workspace (always first)
+
+Before any read or write operation on the workspace, pull the latest state
+from the remote (if one is configured):
+
+```
+git -C <session_dir>/<user_id>/workspace pull --ff-only 2>&1
+```
+
+- If the remote is not yet configured (exit code non-zero, message contains
+  "no remote"), continue to Step 1 — setup is needed first.
+- If there are local conflicts, report them and stop — never force-overwrite
+  local changes without user confirmation.
+- On success (or "Already up to date"), proceed normally.
+
 ### Step 1 — Check current state
 
 ```
@@ -82,18 +97,29 @@ python <scripts_dir>/setup.py test \
 
 Run a `git push --dry-run`. Report success or the full error output.
 
-### Step 5 — Create automation job
+### Step 5 — Create automation jobs
 
-After a successful test:
+After a successful test, register two jobs in `automations/jobs.json`.
+
+**Cyclic pull** (every 30 minutes):
 
 ```
 python <scripts_dir>/setup.py create-job \
   --workspace <session_dir>/<user_id>/workspace \
+  --type pull \
+  --schedule "*/15 * * * *"
+```
+
+**Daily push** (keeps remote up-to-date as backup):
+
+```
+python <scripts_dir>/setup.py create-job \
+  --workspace <session_dir>/<user_id>/workspace \
+  --type push \
   --schedule 03:00
 ```
 
-This registers a daily push job in the room's `automations/jobs.json`.
-If the job already exists, skip silently.
+If a job of the same type already exists, skip silently.
 
 ## Output format
 

@@ -109,8 +109,28 @@ def cmd_test(args):
           "returncode": r.returncode})
 
 
+_JOB_DEFAULTS = {
+    "push": {
+        "id": "job-workspace-git-push",
+        "name": "Workspace Git Push",
+        "schedule": "*/30 * * * *",
+        "instruction": "Führe einen git push für den Workspace durch",
+    },
+    "pull": {
+        "id": "job-workspace-git-pull",
+        "name": "Workspace Git Pull",
+        "schedule": "*/15 * * * *",
+        "instruction": "Führe einen git pull --ff-only für den Workspace durch",
+    },
+}
+
+
 def cmd_create_job(args):
-    """Register a push job in the room's automations/jobs.json."""
+    job_type = getattr(args, "type", "push") or "push"
+    if job_type not in _JOB_DEFAULTS:
+        _out({"success": False, "error": f"Unknown type '{job_type}'. Use: push, pull"})
+        return
+
     jobs_path = Path(args.workspace).parent / "automations" / "jobs.json"
     jobs_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -118,18 +138,19 @@ def cmd_create_job(args):
     except (json.JSONDecodeError, OSError):
         jobs = []
 
-    job_id = "job-workspace-git-push"
+    defaults = _JOB_DEFAULTS[job_type]
+    job_id = defaults["id"]
     existing = next((j for j in jobs if j.get("id") == job_id), None)
     if existing:
         _out({"success": True, "created": False,
-              "message": "Push job already exists.", "job": existing})
+              "message": f"{job_type.capitalize()} job already exists.", "job": existing})
         return
 
     job = {
         "id": job_id,
-        "name": "Workspace Git Push",
-        "schedule": args.schedule or "03:00",
-        "instruction": "Führe einen git push für den Workspace durch",
+        "name": defaults["name"],
+        "schedule": args.schedule or defaults["schedule"],
+        "instruction": defaults["instruction"],
         "notify": False,
         "enabled": True,
     }
@@ -161,7 +182,8 @@ p_test.add_argument("--workspace", required=True)
 
 p_job = sub.add_parser("create-job")
 p_job.add_argument("--workspace", required=True)
-p_job.add_argument("--schedule", default="03:00")
+p_job.add_argument("--type", default="push", choices=["push", "pull"])
+p_job.add_argument("--schedule")
 
 args = parser.parse_args()
 if not args.cmd or args.cmd not in COMMANDS:
