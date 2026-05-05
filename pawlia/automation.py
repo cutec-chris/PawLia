@@ -358,13 +358,13 @@ class JobRunner:
 
             try:
                 runner = self._app.run_instruction(instruction, user_id)
-                thread_id = f"automation_{job.get('id', 'job')}"
-                result = await runner.run(instruction, thread_id=thread_id)
+                result = await runner.run(instruction, thread_id=None)
                 job["last_run"] = now.isoformat()
                 job["last_result"] = "success"
                 changed = True
 
-                if job.get("notify", True):
+                notify = job.get("notify", True)
+                if notify is True:
                     output = result if result else "erledigt"
                     await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{output}")
 
@@ -374,7 +374,8 @@ class JobRunner:
                 job["last_result"] = "failed"
                 changed = True
 
-                if job.get("notify", True):
+                notify = job.get("notify", True)
+                if notify is True or notify == "error":
                     await self._notify(user_id,
                         f"\u26a0\ufe0f Job '{job_name}' fehlgeschlagen: {str(e)[:200]}")
 
@@ -562,8 +563,12 @@ def create_job(
     name: str,
     schedule: str,
     instruction: str,
-    notify: bool = True,
+    notify: bool | str = True,
 ) -> Dict[str, Any]:
+    """Create a job definition.
+
+    ``notify``: True = always deliver output, False = never, "error" = only on failure.
+    """
     return {
         "id": f"job-{uuid.uuid4().hex[:8]}",
         "name": name,
