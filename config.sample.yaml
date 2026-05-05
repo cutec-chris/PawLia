@@ -196,7 +196,7 @@ skill-config:
   #   embedding_model: bge-m3:latest
   #   embedding_dim: 1024
   #   embedding_host: http://localhost:11434
-  #   # rag_backend: markdown            # markdown (default) | lightrag | simple | mem0
+  #   # rag_backend: markdown            # markdown (default) | lightrag | simple
   #   # rag_provider: ollama             # defaults to embedding_provider
   #   # rag_model: qwen3.5:latest        # LLM for topic extraction / RAG (not used by simple)
   #   # rag_numctx: 4096                 # LLM context window (lightrag/markdown)
@@ -210,11 +210,10 @@ skill-config:
   #   embedding_model: bge-m3:latest
   #   embedding_dim: 1024
   #   embedding_host: http://localhost:11434
-  #   # rag_backend: markdown            # markdown (default) | lightrag | simple | mem0
+  #   # rag_backend: markdown            # markdown (default) | lightrag | simple
   #   #                                  #   markdown  — LLM extracts topics → one .md file per topic, keyword retrieval
   #   #                                  #   lightrag  — knowledge-graph RAG (powerful, slow, needs lightrag-hku)
   #   #                                  #   simple    — chunk + embed + cosine similarity (fast, no extra deps)
-  #   #                                  #   mem0      — fact extraction (needs mem0ai + chromadb)
   #   # rag_provider: ollama             # defaults to embedding_provider
   #   # rag_model: qwen3.5:latest        # LLM for topic extraction / RAG (not used by simple)
   #   # rag_numctx: 4096                 # LLM context window (lightrag/markdown)
