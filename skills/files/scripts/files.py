@@ -39,9 +39,36 @@ def _workdir(user_id: str, session_dir: str) -> str:
     return ensure_dir(path)
 
 
+def _ci_resolve(base: str, rel: str) -> str:
+    """Resolve rel within base using case-insensitive matching at each path component.
+    If a component exists with different casing, the on-disk name wins.
+    Components that don't exist yet keep their original casing.
+    """
+    parts = rel.replace("\\", "/").split("/")
+    current = base
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        exact = os.path.join(current, part)
+        if os.path.exists(exact):
+            current = exact
+        else:
+            try:
+                lower = part.lower()
+                match = next((e for e in os.listdir(current) if e.lower() == lower), None)
+            except OSError:
+                match = None
+            if match:
+                current = os.path.join(current, match)
+            else:
+                # Not found — keep original casing for this and remaining parts
+                current = os.path.join(current, *parts[i:])
+                break
+    return current
+
+
 def _safe_path(workdir: str, filename: str) -> str:
-    filename = filename.lower()
-    resolved = os.path.realpath(os.path.join(workdir, filename))
+    resolved = os.path.realpath(_ci_resolve(workdir, filename))
     root = os.path.realpath(workdir)
     if not resolved.startswith(root + os.sep) and resolved != root:
         raise ValueError(f"Access denied: '{filename}' is outside the workspace.")
@@ -355,7 +382,7 @@ def cmd_grep(args) -> None:
         if not os.path.isfile(filepath):
             _out({"success": False, "error": f"File '{args.filename}' not found."})
             return
-        targets = [(filepath, args.filename.lower().replace(os.sep, "/"))]
+        targets = [(filepath, os.path.relpath(filepath, workdir).replace(os.sep, "/"))]
     else:
         targets = list(_walk_files(workdir))
 

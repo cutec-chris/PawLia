@@ -1,6 +1,6 @@
 ---
 name: files
-description: Read, write, edit, list, grep, outline, read-section, and delete files in the user's personal workspace. Use for creating notes, saving text, reading previously saved files, making targeted edits to existing files, searching across the workspace, writing workspace config files like identity.md, soul.md, user.md, and deleting files like bootstrap.md. All filenames are automatically lowercased.
+description: Read, write, edit, list, grep, outline, read-section, and delete files in the user's personal workspace. Use for creating notes, saving text, reading previously saved files, making targeted edits to existing files, searching across the workspace, writing workspace config files like identity.md, soul.md, user.md, and deleting files like bootstrap.md. Filenames are resolved case-insensitively — if a file exists under a different casing it is used as-is; new files keep the casing you provide.
 license: MIT
 metadata:
   author: Christian Ulrich
