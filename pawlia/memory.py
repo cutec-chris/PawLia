@@ -73,9 +73,14 @@ class Session:
         self.private: bool = False            # CLI / session-level
         self.private_threads: Set[str] = set()  # per-thread
 
-        # Workspace context search: None = not yet run (triggers on first turn),
+        # Workspace context search: None = not yet run (triggers on first substantive turn),
         # [] = ran but found nothing, [...] = cached hits for this session.
+        # Cleared and re-run when a topic shift is detected.
         self.workspace_refs: Optional[list] = None
+
+        # Set by ChatAgent when a topic shift is detected; consumed by _persist()
+        # to prepend a section heading to the daily log entry.
+        self.pending_topic_heading: Optional[str] = None
 
 
 def _format_workspace_refs(hits: list) -> str:
@@ -355,6 +360,7 @@ class MemoryManager:
         *,
         tool_calls_info: Optional[List[Dict[str, Any]]] = None,
         timestamp: Optional[str] = None,
+        topic_heading: Optional[str] = None,
     ) -> str:
         stamp = timestamp or datetime.now().strftime("%H:%M:%S")
         entry = f"[{stamp}] User: {user_text}\nAssistant: {bot_text}"
@@ -362,6 +368,8 @@ class MemoryManager:
             for tc in tool_calls_info:
                 tool_json = json.dumps(tc, ensure_ascii=False)
                 entry += f"\n<!-- TOOL_CALL: {tool_json} -->"
+        if topic_heading:
+            entry = f"\n## {topic_heading}\n\n{entry}"
         return entry
 
     @classmethod
@@ -761,6 +769,7 @@ class MemoryManager:
         *,
         track_similarity: bool = True,
         tool_calls_info: Optional[List[Dict[str, Any]]] = None,
+        topic_heading: Optional[str] = None,
     ) -> None:
         """Append a user/assistant exchange to the daily log (RAM + disk).
 
@@ -770,11 +779,15 @@ class MemoryManager:
 
         ``tool_calls_info`` is a list of dicts with 'name', 'args', and 'result'
         keys representing tool calls made during this exchange.
+
+        ``topic_heading`` inserts a markdown section heading before the entry
+        in the daily log, marking a topic shift for Dream Wiki segmentation.
         """
         entry = self._format_exchange_entry(
             user_text,
             bot_text,
             tool_calls_info=tool_calls_info,
+            topic_heading=topic_heading,
         )
 
         session.exchanges.append((user_text, bot_text, tool_calls_info))

@@ -14,6 +14,20 @@ _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)$", re.MULTILINE)
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 _FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
 
+_SUBSTANTIVE_MIN_WORDS = 4
+_QUESTION_STARTERS = frozenset({
+    # German
+    "was", "wie", "warum", "weshalb", "wann", "wo", "wer", "welche", "welcher",
+    "welches", "erkläre", "erklaere", "beschreibe", "erkläre", "erkläre",
+    "erzähl", "zeig", "hilf", "kannst", "könntest", "könntest", "magst",
+    "schreib", "erstelle", "mach", "analysiere", "vergleiche", "erkläre",
+    # English
+    "what", "how", "why", "when", "where", "who", "which", "explain",
+    "describe", "tell", "show", "help", "can", "could", "would", "write",
+    "create", "make", "analyze", "compare",
+})
+_TOPIC_SHIFT_THRESHOLD = 0.15  # overlap fraction below which we treat it as a new topic
+
 _DEFAULT_TOP_K = 5
 _DEFAULT_MIN_SCORE = 0.5  # fraction of best hit (0–1 normalized)
 _DEFAULT_SNIPPET_CHARS = 150
@@ -205,6 +219,63 @@ class WorkspaceSearch:
             ))
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[: self.top_k]
+
+    # ------------------------------------------------------------------
+    # Public helpers (used by ChatAgent for trigger decisions)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def is_substantive(text: str) -> bool:
+        """Return True if *text* looks like a real question/topic rather than small talk.
+
+        Triggers workspace search and topic-shift detection.
+        """
+        words = text.split()
+        if len(words) >= _SUBSTANTIVE_MIN_WORDS:
+            return True
+        # Short but starts with a question/action word → still substantive
+        if words and words[0].lower().rstrip("?!.,") in _QUESTION_STARTERS:
+            return True
+        return False
+
+    @staticmethod
+    def is_topic_shift(new_text: str, recent_exchanges: list) -> bool:
+        """Return True if *new_text* introduces a significantly different topic.
+
+        Compares content-bearing tokens (length >= 4) in *new_text* against the
+        last few exchanges. Low overlap → topic shift.
+        """
+        if not recent_exchanges:
+            return True
+
+        def _content_tokens(text: str) -> set:
+            return {t for t in re.findall(r"\w+", text.lower()) if len(t) >= 4}
+
+        recent_tokens: set = set()
+        for exc in recent_exchanges[-3:]:
+            user_text = exc[0] if isinstance(exc, (list, tuple)) else ""
+            bot_text = exc[1] if isinstance(exc, (list, tuple)) and len(exc) > 1 else ""
+            recent_tokens |= _content_tokens(user_text + " " + bot_text)
+
+        new_tokens = _content_tokens(new_text)
+        if not new_tokens:
+            return False
+        overlap = len(new_tokens & recent_tokens) / len(new_tokens)
+        return overlap < _TOPIC_SHIFT_THRESHOLD
+
+    @staticmethod
+    def make_topic_heading(text: str, max_chars: int = 70) -> str:
+        """Generate a short heading from the first sentence of *text*."""
+        # Take first sentence or line
+        for sep in (".", "!", "?", "\n"):
+            idx = text.find(sep)
+            if 10 < idx < max_chars:
+                return text[: idx + 1].strip()
+        first = text.strip()
+        if len(first) > max_chars:
+            cut = first[:max_chars].rsplit(" ", 1)[0]
+            return cut + "…"
+        return first
 
     def _make_snippet(self, body: str) -> str:
         text = body.strip()

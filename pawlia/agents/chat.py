@@ -146,7 +146,7 @@ class ChatAgent(BaseAgent):
         self._skills_refresher: Optional[Callable[[], None]] = None
 
     def _run_workspace_search(self, query: str) -> None:
-        """Run BM25 search over workspace on the first turn and cache results on session."""
+        """Run BM25 search over workspace and cache results on session."""
         if not (self.memory and self.session):
             return
         try:
@@ -161,6 +161,33 @@ class ChatAgent(BaseAgent):
         except Exception as exc:
             self.logger.warning("Workspace search failed: %s", exc)
             self.session.workspace_refs = []  # prevent retry on next turn
+
+    def _handle_workspace_context(self, user_input: str) -> None:
+        """Decide whether to (re-)run workspace search based on message content.
+
+        - Skips short/small-talk messages ("hi", "ok", "danke", …).
+        - Runs on the first substantive message (workspace_refs is None).
+        - Re-runs and marks a topic heading when a significant topic shift is detected.
+        """
+        if not (self.memory and self.session):
+            return
+        try:
+            from pawlia.workspace_search import WorkspaceSearch
+        except ImportError:
+            return
+
+        if not WorkspaceSearch.is_substantive(user_input):
+            return  # small talk — skip entirely
+
+        if self.session.workspace_refs is None:
+            # First substantive turn
+            self._run_workspace_search(user_input)
+        elif WorkspaceSearch.is_topic_shift(user_input, self.session.exchanges):
+            # Topic changed — re-search and schedule a heading for the log
+            self.logger.debug("Topic shift detected, re-running workspace search")
+            self.session.workspace_refs = None
+            self._run_workspace_search(user_input)
+            self.session.pending_topic_heading = WorkspaceSearch.make_topic_heading(user_input)
 
     def build_system_prompt(
         self,
@@ -345,9 +372,8 @@ class ChatAgent(BaseAgent):
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
 
-        # First-turn workspace context search (cached for the rest of the session)
-        if self.session is not None and self.session.workspace_refs is None:
-            self._run_workspace_search(user_input)
+        # Workspace context: search on first substantive turn, re-search on topic shift
+        self._handle_workspace_context(user_input)
 
         prompt = self.build_system_prompt(system_prompt=system_prompt)
 
@@ -520,9 +546,8 @@ class ChatAgent(BaseAgent):
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
 
-        # First-turn workspace context search (cached for the rest of the session)
-        if self.session is not None and self.session.workspace_refs is None:
-            self._run_workspace_search(user_input)
+        # Workspace context: search on first substantive turn, re-search on topic shift
+        self._handle_workspace_context(user_input)
 
         prompt = self.build_system_prompt(system_prompt=system_prompt)
 
@@ -1036,10 +1061,16 @@ class ChatAgent(BaseAgent):
             )
             return
 
+        # Consume pending topic heading (set by _handle_workspace_context on topic shift)
+        topic_heading = self.session.pending_topic_heading
+        if topic_heading:
+            self.session.pending_topic_heading = None
+
         self.memory.append_exchange(
             self.session, user_input, response,
             track_similarity=track_similarity,
             tool_calls_info=tool_calls_info,
+            topic_heading=topic_heading,
         )
 
         # Summarization is handled by the Scheduler based on idle time.
