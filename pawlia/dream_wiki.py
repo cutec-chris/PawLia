@@ -413,10 +413,9 @@ class DreamWikiBackend:
         actions = _parse_json_array(content)
 
         if actions is _SENTINEL:
-            logger.warning("DreamWikiBackend: could not parse LLM JSON, using raw")
-            return [{"action": "create", "slug": "misc",
-                      "title": "Miscellaneous", "content": content,
-                      "tags": [], "links": []}]
+            logger.warning("DreamWikiBackend: could not parse LLM JSON, skipping. Response: %s",
+                           content[:300])
+            return []
         return actions
 
     # ── Link format helpers ───────────────────────────────────────────────────
