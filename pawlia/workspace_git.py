@@ -71,6 +71,7 @@ _GITIGNORE_PATTERNS = [
     "memory/private_session",
     "memory/private_thread_*",
     "memory/voice_override.txt",
+    "wiki/log.md",
 ]
 
 
