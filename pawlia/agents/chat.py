@@ -111,6 +111,7 @@ class ChatAgent(BaseAgent):
         session: Optional["Session"] = None,
         on_interim: Optional[InterimCallback] = None,
         vision_llm: Optional[ChatOpenAI] = None,
+        workspace_search_cfg: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(llm, logger)
         self.skills = skills
@@ -118,6 +119,7 @@ class ChatAgent(BaseAgent):
         self.memory = memory
         self.session = session
         self.on_interim = on_interim
+        self._workspace_search_cfg: Dict[str, Any] = workspace_search_cfg or {}
         self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self.on_skill_done: Optional[InterimCallback] = None      # (skill_name)
@@ -142,6 +144,23 @@ class ChatAgent(BaseAgent):
         # Called after each skill returns so that skills created at runtime
         # (e.g. by skill-creator) become available immediately.
         self._skills_refresher: Optional[Callable[[], None]] = None
+
+    def _run_workspace_search(self, query: str) -> None:
+        """Run BM25 search over workspace on the first turn and cache results on session."""
+        if not (self.memory and self.session):
+            return
+        try:
+            from pawlia.workspace_search import WorkspaceSearch
+            workspace = self.memory._workspace_dir(self.session.user_id)
+            hits = WorkspaceSearch(workspace, config=self._workspace_search_cfg).search(query)
+            self.session.workspace_refs = hits
+            if hits:
+                self.logger.debug(
+                    "Workspace search: %d hit(s) for %r", len(hits), query[:60]
+                )
+        except Exception as exc:
+            self.logger.warning("Workspace search failed: %s", exc)
+            self.session.workspace_refs = []  # prevent retry on next turn
 
     def build_system_prompt(
         self,
@@ -325,6 +344,11 @@ class ChatAgent(BaseAgent):
         _on_skill_start = on_skill_start or self.on_skill_start
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
+
+        # First-turn workspace context search (cached for the rest of the session)
+        if self.session is not None and self.session.workspace_refs is None:
+            self._run_workspace_search(user_input)
+
         prompt = self.build_system_prompt(system_prompt=system_prompt)
 
         messages: List[BaseMessage] = [SystemMessage(content=prompt)]
@@ -495,6 +519,10 @@ class ChatAgent(BaseAgent):
         _on_skill_start = on_skill_start or self.on_skill_start
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
+
+        # First-turn workspace context search (cached for the rest of the session)
+        if self.session is not None and self.session.workspace_refs is None:
+            self._run_workspace_search(user_input)
 
         prompt = self.build_system_prompt(system_prompt=system_prompt)
 

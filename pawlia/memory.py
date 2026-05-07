@@ -73,6 +73,32 @@ class Session:
         self.private: bool = False            # CLI / session-level
         self.private_threads: Set[str] = set()  # per-thread
 
+        # Workspace context search: None = not yet run (triggers on first turn),
+        # [] = ran but found nothing, [...] = cached hits for this session.
+        self.workspace_refs: Optional[list] = None
+
+
+def _format_workspace_refs(hits: list) -> str:
+    """Format workspace search hits for injection into the system prompt."""
+    lines = [
+        "## Workspace-Referenzen",
+        "Potenziell relevante Einträge in deinem Workspace. "
+        "Öffne mit `files read --filename \"<path>\"` oder folge Wikilinks weiter.",
+    ]
+    for hit in hits:
+        ref = hit.wikilink_ref
+        path = hit.path
+        entry = f"- {ref} ({path})"
+        if hit.heading:
+            entry += f" — **{hit.heading}**"
+        if hit.snippet:
+            entry += f"\n  > {hit.snippet}"
+        if hit.wikilinks:
+            linked = ", ".join(f"[[{w}]]" for w in hit.wikilinks[:3])
+            entry += f"\n  ↗ {linked}"
+        lines.append(entry)
+    return "\n".join(lines)
+
 
 class MemoryManager:
     def __init__(self, session_dir: str, logger: Optional[logging.Logger] = None):
@@ -678,6 +704,9 @@ class MemoryManager:
 
         if session.user_memory.strip():
             parts.append(f"## Memory\n{session.user_memory.strip()}")
+
+        if session.workspace_refs:
+            parts.append(_format_workspace_refs(session.workspace_refs))
 
         parts.append(
             f"Current date and time: {datetime.now().strftime('%A, %d. %B %Y %H:%M')}"

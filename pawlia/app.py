@@ -188,6 +188,7 @@ class App:
         def make_local_agent() -> ChatAgent:
             chat_llm = self.llm.get("chat")
             vision_llm = self.llm.get("vision")
+            ws_search_cfg = self.config.get("workspace-search", {})
             agent = ChatAgent(
                 llm=chat_llm,
                 skills=user_skills,
@@ -196,6 +197,7 @@ class App:
                 memory=self.memory,
                 session=session,
                 vision_llm=vision_llm,
+                workspace_search_cfg=ws_search_cfg,
                 **kwargs,
             )
             # Resolve session/thread-specific agent selectors at run() time.

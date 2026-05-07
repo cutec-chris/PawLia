@@ -95,6 +95,42 @@ def _walk_files(workdir: str):
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_WIKILINK_INPUT_RE = re.compile(r"^\[\[([^\]|]+)(?:\|[^\]]+)?\]\]$")
+
+
+def _resolve_wikilink(workdir: str, filename: str) -> str:
+    """If *filename* is a [[wikilink]], resolve it to a workspace-relative path.
+
+    Resolution order:
+    1. Contains a slash → treated as path (`.md` appended if missing).
+    2. Slug only → `wiki/topics/{slug}.md` if it exists.
+    3. Fallback: first `{slug}.md` found anywhere in the workspace.
+    4. If nothing found, return `wiki/topics/{slug}.md` as best guess.
+    """
+    m = _WIKILINK_INPUT_RE.match(filename.strip())
+    if not m:
+        return filename
+
+    ref = m.group(1).strip()
+
+    # Path-style reference (contains slash)
+    if "/" in ref:
+        return ref if ref.endswith(".md") else ref + ".md"
+
+    # Slug-style: wiki/topics first
+    wiki_candidate = f"wiki/topics/{ref}.md"
+    if os.path.isfile(os.path.join(workdir, wiki_candidate)):
+        return wiki_candidate
+
+    # Search entire workspace for {slug}.md
+    target = f"{ref}.md"
+    for dirpath, _dirs, files in os.walk(workdir):
+        if target in files:
+            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
+            return rel.replace(os.sep, "/")
+
+    # Nothing found — return wiki/topics guess (will produce "not found" naturally)
+    return wiki_candidate
 
 
 def _parse_headings(lines: list[str]) -> list[dict]:
@@ -143,6 +179,7 @@ def cmd_list(args) -> None:
 
 def cmd_read(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    args.filename = _resolve_wikilink(workdir, args.filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -179,6 +216,7 @@ def cmd_read(args) -> None:
 
 def cmd_outline(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    args.filename = _resolve_wikilink(workdir, args.filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -201,6 +239,7 @@ def cmd_outline(args) -> None:
 
 def cmd_read_section(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    args.filename = _resolve_wikilink(workdir, args.filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -257,6 +296,7 @@ def cmd_read_section(args) -> None:
 
 def cmd_delete(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    args.filename = _resolve_wikilink(workdir, args.filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:

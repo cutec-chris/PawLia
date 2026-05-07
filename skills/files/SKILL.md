@@ -33,6 +33,8 @@ Returns every file in the workspace **recursively**, with paths relative to the 
 python <scripts_dir>/files.py read --filename "<name>"
 ```
 
+`--filename` also accepts wikilink syntax — e.g. `[[ios-development]]` resolves to `wiki/topics/ios-development.md`, and `[[research/proj/abc]]` resolves as a workspace-relative path. The same wikilink syntax works for `outline`, `read-section`, and `delete`.
+
 Optional line-range arguments for large files:
 
 ```
