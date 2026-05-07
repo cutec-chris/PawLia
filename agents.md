@@ -53,15 +53,8 @@ The SkillRunner receives **no conversation history** — it's isolated to preven
 ### BaseAgent (`pawlia/agents/base.py`)
 
 - `_invoke(messages, llm)` — async LLM call via `asyncio.to_thread()`
-- `strip_thinking(text)` — removes ```
-
-/`<thinking>` blocks, handles unclosed tags, and strips chat-template tokens (e.g. `<|...|>`)
+- `strip_thinking(text)` — removes `<think>`/`<thinking>` blocks, handles unclosed tags, and strips chat-template tokens (e.g. `<|...|>`)
 - `extract_text(response)` — extracts clean text from AIMessage
-
-- `_invoke(messages, llm)` — async LLM call via `asyncio.to_thread()`
-- `strip_thinking(text)` — removes ```
-
-/`<thinking>` blocks, handles unclosed tags, and strips chat-template tokens (e.g. `<|...|>`)<think>`- `extract_text(response)` — extracts clean text from AIMessage
 
 ## App (`pawlia/app.py`)
 
@@ -149,6 +142,10 @@ session/{user_id}/
 │   │   ├── index.md                # catalog of all pages
 │   │   ├── log.md                  # chronological audit log
 │   │   └── topics/                 # one .md page per topic/entity
+│   ├── research/                   # researcher skill projects
+│   │   └── {project}/
+│   │       ├── README.md           # project metadata (name, description)
+│   │       └── {sha1}.md           # scraped document (SHA1 of URL as filename)
 │   ├── soul.md                     # agent personality (from template)
 │   ├── identity.md                 # agent identity (from template)
 │   ├── user.md                     # user context (from template)
@@ -164,10 +161,18 @@ session/{user_id}/
 
 **System prompt** is built from the workspace identity files actually used by the
 code (`bootstrap.md`, `identity.md`, `user.md`, `soul.md`, `memory.md`) plus
-the conversation summary, current time block, mode-specific instructions, and
-skill instructions.
+the conversation summary, current time block, mode-specific instructions, skill
+instructions, and — on the first turn of each session — a **Workspace-Referenzen**
+block with relevant workspace content (see Workspace Search below).
 
 Identity files (`soul.md`, `identity.md`, `user.md`) are copied as templates from `pawlia/prompts/` on first use. `bootstrap.md` is removed once all three identity files are filled and differ from their templates.
+
+**Workspace Search** (`pawlia/workspace_search.py`): On the **first user turn** of each session, `ChatAgent` runs a BM25 keyword search across all workspace markdown files and caches the results as `session.workspace_refs`. Subsequent turns reuse the cache — no re-scan. Results are injected into the system prompt as a `## Workspace-Referenzen` block so the model knows what's available and can navigate further via the files skill.
+
+- **Scope:** `workspace/wiki/topics/`, `workspace/research/`, loose `.md` files at workspace root. Excludes `workspace/memory/` (raw chat logs — the Dream Wiki is the distilled version) and all identity files.
+- **Algorithm:** BM25 via `rank_bm25`; falls back to simple term-frequency if the library is absent. Sections are split by ATX headings, scored individually.
+- **Injection format:** Each hit renders as `[[wikilink]] (path) — **Heading**\n  > snippet`. The files skill resolves `[[wikilink]]` syntax to workspace paths (slug → `wiki/topics/{slug}.md`, path-style `[[a/b]]` → `a/b.md`).
+- **Config** (`workspace-search:` in `config.yaml`): `enabled`, `top_k` (default 5), `min_score` (0–1, fraction of best hit), `snippet_chars`, `exclude_dirs`, `include_root_files`.
 
 **Summarization triggers:**
 
@@ -244,8 +249,21 @@ agents:
 
 ## Development Guidelines
 
-- **Always use the virtualenv:** `.venv/bin/python` (not `python` directly)
-- Run tests: `.venv/bin/python -m pytest tests/ -x -q`
+**Working directory:** Always run commands from the project root (the directory containing `pawlia/` and `requirements.txt`).
+
+**Virtualenv + PYTHONPATH:** `pawlia` is not installed as a package (no `pyproject.toml`), so `PYTHONPATH=.` is required for any command that imports it.
+
+```bash
+# Run tests
+PYTHONPATH=. .venv/bin/pytest tests/ -x -q
+
+# Start CLI
+PYTHONPATH=. .venv/bin/python -m pawlia
+
+# Start CLI with piped input (non-interactive, for scripted testing)
+printf 'Hello\nexit\n' | PYTHONPATH=. .venv/bin/python -m pawlia 2>/dev/null
+```
+
 - Keep it simple — PawLia targets small models on local hardware
 - Skills are isolated: own directory, own config, no shared state
 - Tools are pluggable: extend `Tool`, register in `App.__init__`

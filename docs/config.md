@@ -241,7 +241,7 @@ transcription:
   providers:
     - name: lan-whisper
       provider: local
-      base_url: http://192.168.177.120:8005/v1
+      base_url: http://localhost:8005/v1
       model: deepdml/faster-whisper-large-v3-turbo-ct2
       language: de
       timeout: 10
