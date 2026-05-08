@@ -191,8 +191,9 @@ workspace:
 # BM25 keyword search across the workspace markdown files and injects matching
 # snippets + wikilinks into the system prompt. No indexing, no embeddings — purely
 # on-the-fly. Results are cached for the session so subsequent turns are free.
+# Enabled by default. Uncomment to tune or disable.
 # workspace-search:
-#   enabled: true
+#   enabled: false      # set to false to disable
 #   top_k: 5            # max results to inject into the system prompt
 #   min_score: 0.5      # minimum fraction of the best hit score (0–1)
 #   snippet_chars: 150  # characters to show per matched section

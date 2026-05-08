@@ -89,9 +89,11 @@ class Session:
 def _format_workspace_refs(hits: list) -> str:
     """Format workspace search hits for injection into the system prompt."""
     lines = [
-        "## Workspace-Referenzen",
-        "Potenziell relevante Einträge in deinem Workspace. "
-        "Öffne mit `files read --filename \"<path>\"` oder folge Wikilinks weiter.",
+        "## Workspace Knowledge",
+        "These entries are from the user's personal knowledge store "
+        "and take precedence over your training knowledge. "
+        "If the snippet already answers the question, reply directly from it — "
+        "only read the full file if you need substantially more context.",
     ]
     for hit in hits:
         ref = hit.wikilink_ref

@@ -15,6 +15,7 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 _FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
 
 _SUBSTANTIVE_MIN_WORDS = 4
+_PARAGRAPH_SPLIT_THRESHOLD = 300  # split headingless sections longer than this into paragraphs
 _QUESTION_STARTERS = frozenset({
     # German
     "was", "wie", "warum", "weshalb", "wann", "wo", "wer", "welche", "welcher",
@@ -124,7 +125,11 @@ class WorkspaceSearch:
 
     @staticmethod
     def _split_sections(content: str, path: str) -> List["_Section"]:
-        """Split markdown content into heading-delimited sections."""
+        """Split markdown content into heading-delimited sections.
+
+        Headingless sections longer than _PARAGRAPH_SPLIT_THRESHOLD are further
+        split into paragraphs so individual facts rank well under BM25.
+        """
         lines = content.splitlines()
         sections: List[_Section] = []
         current_heading = ""
@@ -132,7 +137,15 @@ class WorkspaceSearch:
 
         def flush() -> None:
             body = "\n".join(current_lines).strip()
-            if body or current_heading:
+            if not body and not current_heading:
+                return
+            if not current_heading and len(body) > _PARAGRAPH_SPLIT_THRESHOLD:
+                # Flat file: split into paragraph chunks so BM25 scores individual facts
+                for para in re.split(r"\n{2,}", body):
+                    para = para.strip()
+                    if para:
+                        sections.append(_Section(path=path, heading="", body=para))
+            else:
                 sections.append(_Section(path=path, heading=current_heading, body=body))
 
         for line in lines:
@@ -170,13 +183,14 @@ class WorkspaceSearch:
         if max_raw <= 0:
             return []
 
+        query_tokens = set(self._tokenize(query))
         hits: List[SearchHit] = []
         for i, raw in enumerate(raw_scores):
             norm = raw / max_raw
             if norm < self.min_score:
                 continue
             s = sections[i]
-            snippet = self._make_snippet(s.body)
+            snippet = self._make_snippet(s.body, query_tokens)
             hits.append(SearchHit(
                 path=s.path,
                 heading=s.heading,
@@ -203,13 +217,14 @@ class WorkspaceSearch:
         if not scored:
             return []
 
+        query_tokens = set(self._tokenize(query))
         max_score = max(s for s, _ in scored)
         hits: List[SearchHit] = []
         for raw, s in scored:
             norm = raw / max_score
             if norm < self.min_score:
                 continue
-            snippet = self._make_snippet(s.body)
+            snippet = self._make_snippet(s.body, query_tokens)
             hits.append(SearchHit(
                 path=s.path,
                 heading=s.heading,
@@ -277,8 +292,21 @@ class WorkspaceSearch:
             return cut + "…"
         return first
 
-    def _make_snippet(self, body: str) -> str:
+    def _make_snippet(self, body: str, query_tokens: Optional[set] = None) -> str:
+        """Return the most query-relevant part of *body* up to snippet_chars.
+
+        If query_tokens are given, scores each line by token overlap and returns
+        the best-matching line (or falls back to the start of the body).
+        """
         text = body.strip()
         if len(text) <= self.snippet_chars:
             return text
+        if query_tokens:
+            lines = [l.strip() for l in text.splitlines() if l.strip()]
+            if lines:
+                best = max(lines, key=lambda l: len(query_tokens & set(re.findall(r"\w+", l.lower()))))
+                if any(t in re.findall(r"\w+", best.lower()) for t in query_tokens):
+                    if len(best) <= self.snippet_chars:
+                        return best
+                    return best[: self.snippet_chars].rstrip() + "…"
         return text[: self.snippet_chars].rstrip() + "…"

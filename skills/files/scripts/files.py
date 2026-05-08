@@ -177,6 +177,47 @@ def cmd_list(args) -> None:
     _out({"success": True, "files": entries, "count": len(entries)})
 
 
+_DEFAULT_READ_LIMIT = 150
+_QUERY_CONTEXT_LINES = 3
+
+
+def _filter_by_query(lines: list, query: str) -> tuple:
+    """Return (filtered_text, match_count) keeping only lines near query tokens.
+
+    Non-matching stretches are replaced with ``[... N lines skipped ...]``.
+    Returns (None, 0) if no matches found.
+    """
+    tokens = {t for t in re.findall(r"\w+", query.lower()) if len(t) >= 3}
+    if not tokens:
+        return None, 0
+
+    keep: set = set()
+    for i, line in enumerate(lines):
+        if tokens & set(re.findall(r"\w+", line.lower())):
+            for j in range(max(0, i - _QUERY_CONTEXT_LINES),
+                           min(len(lines), i + _QUERY_CONTEXT_LINES + 1)):
+                keep.add(j)
+
+    if not keep:
+        return None, 0
+
+    parts: list = []
+    skip_start: int | None = None
+    for i, line in enumerate(lines):
+        if i in keep:
+            if skip_start is not None:
+                parts.append(f"[... {i - skip_start} lines skipped, no matches ...]\n")
+                skip_start = None
+            parts.append(line)
+        else:
+            if skip_start is None:
+                skip_start = i
+    if skip_start is not None and skip_start < len(lines):
+        parts.append(f"[... {len(lines) - skip_start} lines skipped, no matches ...]\n")
+
+    return "".join(parts), len(keep)
+
+
 def cmd_read(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
     args.filename = _resolve_wikilink(workdir, args.filename)
@@ -194,24 +235,48 @@ def cmd_read(args) -> None:
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if args.offset is None and args.limit is None:
-        _out({"success": True, "filename": args.filename, "content": content, "size": len(content)})
-        return
-
     lines = content.splitlines(keepends=True)
     total = len(lines)
+
+    # Query-based filtering: return only relevant blocks, skip the rest
+    if args.query:
+        filtered, match_count = _filter_by_query(lines, args.query)
+        if filtered is None:
+            _out({
+                "success": True,
+                "filename": args.filename,
+                "content": "",
+                "total_lines": total,
+                "matches": 0,
+                "note": "No lines matched the query.",
+            })
+        else:
+            _out({
+                "success": True,
+                "filename": args.filename,
+                "content": filtered,
+                "total_lines": total,
+                "matches": match_count,
+            })
+        return
+
     offset = max(0, args.offset or 0)
-    limit = args.limit if args.limit is not None else total
+    limit = args.limit if args.limit is not None else _DEFAULT_READ_LIMIT
     sliced = "".join(lines[offset:offset + limit])
-    _out({
+    returned = max(0, min(total - offset, limit))
+    result = {
         "success": True,
         "filename": args.filename,
         "content": sliced,
         "offset": offset,
         "limit": limit,
-        "lines_returned": max(0, min(total - offset, limit)),
+        "lines_returned": returned,
         "total_lines": total,
-    })
+    }
+    if offset + returned < total:
+        result["has_more"] = True
+        result["next_offset"] = offset + returned
+    _out(result)
 
 
 def cmd_outline(args) -> None:
@@ -467,7 +532,8 @@ def main():
     _base(p)
     p.add_argument("--filename", required=True)
     p.add_argument("--offset", type=int, default=None, help="0-based line offset")
-    p.add_argument("--limit", type=int, default=None, help="max lines to return")
+    p.add_argument("--limit", type=int, default=None, help="max lines to return (default: 150)")
+    p.add_argument("--query", default=None, help="return only lines matching this query (skips replace irrelevant blocks)")
 
     p = sub.add_parser("write")
     _base(p)

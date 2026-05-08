@@ -42,6 +42,10 @@ _FAKE_TOOL_CALL_NUDGE = (
     "actual function-call mechanism. Do NOT write commands as text. "
     "Use a real tool call now."
 )
+_DISABLED_SKILL_NUDGE = (
+    "That skill is not available in this session. "
+    "Do NOT attempt to call it again. Answer directly from what you already know."
+)
 _MAX_FAKE_TOOL_RETRIES = 5
 _EMPTY_TURN2_NUDGE = (
     "You have reached the maximum number of tool calls. "
@@ -114,6 +118,7 @@ class ChatAgent(BaseAgent):
         workspace_search_cfg: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(llm, logger)
+        self._all_skills = dict(skills)  # unfiltered — kept for re-enable support
         self.skills = skills
         self.skill_runner_factory = skill_runner_factory
         self.memory = memory
@@ -144,6 +149,28 @@ class ChatAgent(BaseAgent):
         # Called after each skill returns so that skills created at runtime
         # (e.g. by skill-creator) become available immediately.
         self._skills_refresher: Optional[Callable[[], None]] = None
+
+    def _apply_disabled_skills(self) -> None:
+        """Filter self.skills against session.disabled_skills and rebind LLM tools."""
+        if not (self.memory and self.session):
+            return
+        disabled = set(self.session.disabled_skills or [])
+        self.skills = {k: v for k, v in self._all_skills.items() if k not in disabled}
+        self._skill_specs = [s.as_openai_spec() for s in self.skills.values()]
+        base_llm = self.llm
+        vision_llm = getattr(self, "vision_llm", None)
+        if self._skill_specs:
+            self.bound_llm = base_llm.bind_tools(self._skill_specs, tool_choice="auto")
+            self.vision_bound_llm = (vision_llm or base_llm).bind_tools(
+                self._skill_specs, tool_choice="auto"
+            )
+        else:
+            self.bound_llm = base_llm
+            self.vision_bound_llm = vision_llm or base_llm
+        self.logger.info(
+            "Skills rebound: %d active, %d disabled",
+            len(self.skills), len(disabled),
+        )
 
     def _run_workspace_search(self, query: str) -> None:
         """Run BM25 search over workspace and cache results on session."""
@@ -182,6 +209,9 @@ class ChatAgent(BaseAgent):
         if self.session.workspace_refs is None:
             # First substantive turn
             self._run_workspace_search(user_input)
+        elif self.session.workspace_refs == []:
+            # Previous search found nothing — retry on every substantive message
+            self._run_workspace_search(user_input)
         elif WorkspaceSearch.is_topic_shift(user_input, self.session.exchanges):
             # Topic changed — re-search and schedule a heading for the log
             self.logger.debug("Topic shift detected, re-running workspace search")
@@ -217,27 +247,15 @@ class ChatAgent(BaseAgent):
             return False
 
         prev_count = len(self._skill_specs)
-        self._skills_refresher()
+        self._skills_refresher()  # updates self.skills with ALL skills (no filter)
+
+        # Capture any new workspace skills into _all_skills, then re-apply disabled filter.
+        self._all_skills.update(self.skills)
+        self._apply_disabled_skills()
 
         if len(self.skills) == prev_count:
             return False
 
-        # New skills appeared — rebuild specs and rebind tools
-        old_names = {s["function"]["name"] for s in self._skill_specs}
-        self._skill_specs = [s.as_openai_spec() for s in self.skills.values()]
-        if self._skill_specs:
-            base_llm = self.llm  # underlying ChatOpenAI without tools
-            self.bound_llm = base_llm.bind_tools(self._skill_specs, tool_choice="auto")
-            self.vision_bound_llm = (
-                (self.vision_llm or base_llm).bind_tools(self._skill_specs, tool_choice="auto")
-                if hasattr(self, "vision_llm") else self.bound_llm
-            )
-        new_names = {s["function"]["name"] for s in self._skill_specs} - old_names
-        self.logger.info(
-            "Skills rebound (%d → %d), new: %s",
-            prev_count, len(self.skills),
-            ", ".join(new_names),
-        )
         return True
 
     def _resolve_skill_name(self, name: str) -> str:
@@ -851,6 +869,8 @@ class ChatAgent(BaseAgent):
                     )
                     if self.on_model_change:
                         self.on_model_change(str(value or ""))
+            elif directive == "reload_skills":
+                self._apply_disabled_skills()
             elif directive == "set_voice":
                 if self.memory and self.session:
                     voice = obj.get("voice")
@@ -966,10 +986,11 @@ class ChatAgent(BaseAgent):
         skill_names = set(self.skills.keys())
         for match in _RE_CODE_BLOCK.finditer(content):
             block = match.group(1).strip()
-            first_token = block.split()[0] if block else ""
+            raw_token = block.split()[0] if block else ""
+            first_token = raw_token.rstrip(":.,;")
             skill_name = self._resolve_skill_name(first_token)
             if skill_name in skill_names:
-                query = block[len(first_token):].strip()
+                query = block[len(raw_token):].strip()
                 if query:
                     calls.append({
                         "id": f"fake_{uuid.uuid4().hex[:8]}",
@@ -983,16 +1004,36 @@ class ChatAgent(BaseAgent):
         """Return True if the LLM wrote a skill call as text."""
         if self._extract_fake_skill_calls(response):
             return True
-        if not self._skill_specs or response.tool_calls:
+        if response.tool_calls:
             return False
         content = response.content if isinstance(response.content, str) else ""
         if "<tool_call>" in content:
             return True
-        skill_names = set(self.skills.keys())
+        all_skill_names = set(self._all_skills.keys())
         for match in _RE_CODE_BLOCK.finditer(content):
             block = match.group(1).strip()
-            first_token = block.split()[0] if block else ""
-            if self._resolve_skill_name(first_token) in skill_names:
+            first_token = (block.split()[0] if block else "").rstrip(":.,;")
+            if self._resolve_skill_name(first_token) in all_skill_names:
+                return True
+        return False
+
+    def _is_disabled_skill_call(self, response: AIMessage) -> bool:
+        """Return True if the model tried to call a disabled skill (real or text-form)."""
+        if not self.session:
+            return False
+        disabled = set(self.session.disabled_skills or [])
+        if not disabled:
+            return False
+        # Real tool call to a disabled skill
+        for tc in (response.tool_calls or []):
+            if self._resolve_skill_name(str(tc.get("name", ""))) in disabled:
+                return True
+        # Text-form call to a disabled skill
+        content = response.content if isinstance(response.content, str) else ""
+        for match in _RE_CODE_BLOCK.finditer(content):
+            block = match.group(1).strip()
+            first_token = (block.split()[0] if block else "").rstrip(":.,;")
+            if self._resolve_skill_name(first_token) in disabled:
                 return True
         return False
 
@@ -1027,6 +1068,13 @@ class ChatAgent(BaseAgent):
                 )
                 response.tool_calls = fake_calls
                 return response, retry_messages
+            if self._is_disabled_skill_call(response):
+                self.logger.warning("Model called disabled skill, nudging")
+                retry_messages = retry_messages + [
+                    response,
+                    HumanMessage(content=_DISABLED_SKILL_NUDGE),
+                ]
+                continue
             if not self._is_fake_tool_call(response):
                 return response, retry_messages
             self.logger.warning(

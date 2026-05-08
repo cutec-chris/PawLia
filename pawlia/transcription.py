@@ -37,8 +37,8 @@ _PROVIDER_BASE_URLS: Dict[str, str] = {
 _DEFAULT_MODEL = "whisper-large-v3-turbo"
 
 _NATIVE_AUDIO_PROMPT = (
-    "Transkribiere diese Audiodatei wörtlich. "
-    "Antworte NUR mit dem gesprochenen Text, ohne Erklärungen oder Formatierung."
+    "Transcribe this audio file verbatim. "
+    "Reply with ONLY the spoken text, no explanations or formatting."
 )
 
 _DEFAULT_PREPROCESS: Dict[str, float] = {

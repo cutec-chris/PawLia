@@ -649,23 +649,22 @@ class MarkdownTopicBackend(RagBackend):
                 f"- {slug}: {title}" for slug, title in sorted(existing_topics.items())
             )
             existing_hint = (
-                f"\nBestehende Themen (verwende diese Slugs wenn der Inhalt dazu passt):\n"
+                f"\nExisting topics (reuse these slugs if the content fits):\n"
                 f"{lines}\n"
             )
 
         system_prompt = (
-            "Du bist ein Assistent der Gesprächsprotokolle analysiert und nach "
-            "Themen sortiert. Antworte NUR mit validem JSON."
+            "You are an assistant that analyses conversation logs and organises them "
+            "by topic. Reply with valid JSON ONLY."
         )
         user_prompt = (
-            "Analysiere das folgende Gesprächsprotokoll und extrahiere die "
-            "besprochenen Themen.\nFür jedes Thema erstelle eine Zusammenfassung "
-            "mit den wichtigsten Informationen, Entscheidungen und Details.\n"
+            "Analyse the following conversation log and extract the topics discussed.\n"
+            "For each topic create a summary with the key information, decisions and details.\n"
             + existing_hint
-            + "\nAntworte NUR mit einem JSON-Array:\n"
-            '[{"topic": "bestehender-slug-oder-neuer-name", "title": "Titel", '
-            '"summary": "Markdown-Zusammenfassung"}]\n\n'
-            f"Gesprächsprotokoll:\n{text}"
+            + "\nReply with a JSON array ONLY:\n"
+            '[{"topic": "existing-slug-or-new-name", "title": "Title", '
+            '"summary": "Markdown summary"}]\n\n'
+            f"Conversation log:\n{text}"
         )
 
         content = await self._llm_call(system_prompt, user_prompt)
@@ -700,12 +699,12 @@ class MarkdownTopicBackend(RagBackend):
         lines = "\n".join(
             f"- {slug}: {title}" for slug, title in sorted(existing_topics.items())
         )
-        system_prompt = "Antworte NUR mit validem JSON."
+        system_prompt = "Reply with valid JSON ONLY."
         user_prompt = (
-            f"Bestehende Themen:\n{lines}\n\n"
-            f"Neues Thema: \"{new_slug}\" (Titel: \"{new_title}\")\n\n"
-            "Gehört das neue Thema inhaltlich zu einem der bestehenden? "
-            'Antworte mit JSON: {"match": "bestehender-slug"} oder {"match": null}'
+            f"Existing topics:\n{lines}\n\n"
+            f"New topic: \"{new_slug}\" (title: \"{new_title}\")\n\n"
+            "Does the new topic belong to one of the existing topics? "
+            'Reply with JSON: {"match": "existing-slug"} or {"match": null}'
         )
         content = await self._llm_call(system_prompt, user_prompt)
         for pattern in (r'\{[^}]*"match"[^}]*\}', r"\{.*\}"):
@@ -734,13 +733,12 @@ class MarkdownTopicBackend(RagBackend):
         lines = "\n".join(
             f"- {slug}: {title}" for slug, title in sorted(catalog.items())
         )
-        system_prompt = "Antworte NUR mit validem JSON."
+        system_prompt = "Reply with valid JSON ONLY."
         user_prompt = (
-            f"Hier sind alle gespeicherten Themen (slug: titel):\n{lines}\n\n"
-            "Welche Themen sind inhaltlich gleich oder stark überlappend und "
-            "sollten zusammengeführt werden?\n"
-            "Antworte mit einem JSON-Array von Merge-Operationen, oder [] wenn keine nötig:\n"
-            '[{"keep": "slug-behalten", "merge": ["slug-aufloesen1", "slug-aufloesen2"]}]'
+            f"All stored topics (slug: title):\n{lines}\n\n"
+            "Which topics are identical or strongly overlapping and should be merged?\n"
+            "Reply with a JSON array of merge operations, or [] if none are needed:\n"
+            '[{"keep": "slug-to-keep", "merge": ["slug-to-dissolve1", "slug-to-dissolve2"]}]'
         )
         content = await self._llm_call(system_prompt, user_prompt)
 

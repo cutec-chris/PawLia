@@ -35,13 +35,24 @@ python <scripts_dir>/files.py read --filename "<name>"
 
 `--filename` also accepts wikilink syntax — e.g. `[[ios-development]]` resolves to `wiki/topics/ios-development.md`, and `[[research/proj/abc]]` resolves as a workspace-relative path. The same wikilink syntax works for `outline`, `read-section`, and `delete`.
 
-Optional line-range arguments for large files:
+**Default behaviour**: returns the first 150 lines. If `has_more: true` appears in the response, use `--offset` to continue reading.
+
+Read in blocks:
 
 ```
-python <scripts_dir>/files.py read --filename "<name>" --offset 0 --limit 100
+python <scripts_dir>/files.py read --filename "<name>" --offset 0 --limit 150
+python <scripts_dir>/files.py read --filename "<name>" --offset 150 --limit 150
 ```
 
-`--offset` is 0-based and counts lines. The response includes `total_lines` so you can decide whether to fetch more.
+`--offset` is 0-based and counts lines. The response includes `total_lines` and `next_offset` when more lines exist.
+
+**Query-based reading** (preferred when looking for specific content): returns only the lines that match the query plus a few lines of context. Non-matching sections are replaced with `[... N lines skipped ...]` so the result stays compact.
+
+```
+python <scripts_dir>/files.py read --filename "<name>" --query "trauben wein flasche"
+```
+
+Use this instead of reading the whole file when you know what you're looking for.
 
 ## Write a file
 
