@@ -130,14 +130,14 @@ class App:
                 require_workflow=require_workflow,
             )
 
-    def _build_user_skills(self, user_id: str) -> Dict[str, AgentSkill]:
-        """Return bundled skills + this user's workspace skills.
-
-        Each user gets their own copy so workspace skills are isolated.
-        """
+    def _build_user_skills(self, user_id: str, disabled: Optional[List[str]] = None) -> Dict[str, AgentSkill]:
+        """Return bundled + workspace skills, minus any session-disabled ones."""
         skills = dict(self._bundled_skills)
         user_skills = self._discover_user_workspace_skills(user_id)
         skills.update(user_skills)
+        if disabled:
+            for name in disabled:
+                skills.pop(name, None)
         return skills
 
     def run_instruction(self, instruction: str, user_id: str = "default") -> RouterAgent:
@@ -159,8 +159,8 @@ class App:
         """
         session = self.memory.load_session(user_id)
 
-        # Build per-user skill set (bundled + user's own workspace skills)
-        user_skills = self._build_user_skills(user_id)
+        # Build per-user skill set (bundled + user's own workspace skills, minus disabled)
+        user_skills = self._build_user_skills(user_id, disabled=session.disabled_skills)
 
         def make_runner(skill: AgentSkill, thread_id: Optional[str] = None) -> SkillRunnerAgent:
             skill_config_root = self.config.get("skill-config") or {}

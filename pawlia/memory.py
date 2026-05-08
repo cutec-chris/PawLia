@@ -61,6 +61,9 @@ class Session:
         # Optional TTS voice override (piper voice name without .onnx)
         self.voice_override: Optional[str] = None
 
+        # Skills disabled for this session
+        self.disabled_skills: List[str] = []
+
         # Per-thread exchange lists (loaded/seeded lazily by get_thread_context)
         self.thread_contexts: Dict[str, List[Tuple[str, str]]] = {}
 
@@ -200,11 +203,32 @@ class MemoryManager:
     def _session_version_path(self, user_id: str) -> str:
         return os.path.join(self.session_dir, user_id, "session_version.txt")
 
+    def _session_config_path(self, user_id: str) -> str:
+        return os.path.join(self.session_dir, user_id, "config.yaml")
+
     def _agent_overrides_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "agent_overrides.yaml")
 
     def _voice_override_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "voice_override.txt")
+
+    def _read_session_config(self, user_id: str) -> Dict[str, Any]:
+        return self._read_yaml(self._session_config_path(user_id))
+
+    def _write_session_config(self, user_id: str, data: Dict[str, Any]) -> None:
+        path = self._session_config_path(user_id)
+        if data:
+            self._write_yaml(path, data)
+        elif os.path.exists(path):
+            os.remove(path)
+
+    def _update_session_config(self, user_id: str, key: str, value: Any) -> None:
+        data = self._read_session_config(user_id)
+        if value is None or value == {} or value == []:
+            data.pop(key, None)
+        else:
+            data[key] = value
+        self._write_session_config(user_id, data)
 
     def _private_session_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "private_session")
@@ -491,6 +515,34 @@ class MemoryManager:
             exchanges.append((user_text, bot_text, tool_calls_info))
         return exchanges
 
+    def _load_session_config_with_migration(self, user_id: str) -> Dict[str, Any]:
+        """Read session config, migrating legacy files on first access."""
+        data = self._read_session_config(user_id)
+        changed = False
+
+        legacy_agents = self._agent_overrides_path(user_id)
+        if "agents" not in data and os.path.isfile(legacy_agents):
+            agents = self._clean_agent_overrides(self._read_yaml(legacy_agents))
+            if agents:
+                data["agents"] = agents
+            os.remove(legacy_agents)
+            self.logger.info("Migrated agent_overrides.yaml → session config for '%s'", user_id)
+            changed = True
+
+        legacy_voice = self._voice_override_path(user_id)
+        if "tts" not in data and os.path.isfile(legacy_voice):
+            voice = self._read(legacy_voice).strip()
+            if voice:
+                data["tts"] = {"voice": voice}
+            os.remove(legacy_voice)
+            self.logger.info("Migrated voice_override.txt → session config for '%s'", user_id)
+            changed = True
+
+        if changed:
+            self._write_session_config(user_id, data)
+
+        return data
+
     def load_session(self, user_id: str) -> Session:
         """Load or return cached session for a user.
 
@@ -511,12 +563,15 @@ class MemoryManager:
         session.summary = self._read(self._summary_path(user_id))
         session.exchanges = self._parse_exchanges(session.daily_history)
         session.exchange_count = len(session.exchanges)
+        session_cfg = self._load_session_config_with_migration(user_id)
         session.agent_overrides = self._clean_agent_overrides(
-            self._read_yaml(self._agent_overrides_path(user_id))
+            session_cfg.get("agents") or {}
         )
         self._sync_legacy_model_fields(session)
-        voice = self._read(self._voice_override_path(user_id)).strip()
-        session.voice_override = voice or None
+        session.voice_override = (session_cfg.get("tts") or {}).get("voice") or None
+        session.disabled_skills = [
+            str(s) for s in (session_cfg.get("disabled_skills") or []) if s
+        ]
         session.private = os.path.isfile(self._private_session_path(user_id))
 
         self._sessions[user_id] = session
@@ -553,12 +608,7 @@ class MemoryManager:
     ) -> None:
         cleaned = self._clean_agent_overrides(overrides or {})
         session.agent_overrides = cleaned
-        path = self._agent_overrides_path(session.user_id)
-
-        if cleaned:
-            self._write_yaml(path, cleaned)
-        elif os.path.exists(path):
-            os.remove(path)
+        self._update_session_config(session.user_id, "agents", cleaned or None)
         self._sync_legacy_model_fields(session)
 
     def set_agent_override_value(
@@ -595,12 +645,31 @@ class MemoryManager:
     def set_voice_override(self, session: Session, voice: Optional[str]) -> None:
         """Persist a TTS voice override for this session.  Pass None to clear."""
         session.voice_override = voice
-        path = self._voice_override_path(session.user_id)
+        cfg = self._read_session_config(session.user_id)
+        tts = dict(cfg.get("tts") or {})
         if voice:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(voice)
-        elif os.path.exists(path):
-            os.remove(path)
+            tts["voice"] = voice
+        else:
+            tts.pop("voice", None)
+        cfg["tts"] = tts if tts else None
+        if not cfg.get("tts"):
+            cfg.pop("tts", None)
+        self._write_session_config(session.user_id, cfg)
+
+    def set_disabled_skills(self, session: Session, skills: List[str]) -> None:
+        """Persist the disabled_skills list for this session."""
+        cleaned = [str(s) for s in skills if s]
+        session.disabled_skills = cleaned
+        self._update_session_config(session.user_id, "disabled_skills", cleaned or None)
+
+    def add_disabled_skill(self, session: Session, skill: str) -> None:
+        """Add a skill to the disabled list (idempotent)."""
+        if skill not in session.disabled_skills:
+            self.set_disabled_skills(session, session.disabled_skills + [skill])
+
+    def remove_disabled_skill(self, session: Session, skill: str) -> None:
+        """Remove a skill from the disabled list."""
+        self.set_disabled_skills(session, [s for s in session.disabled_skills if s != skill])
 
     def get_thread_context(
         self, session: Session, thread_id: str,

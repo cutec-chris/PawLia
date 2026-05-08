@@ -22,6 +22,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 SETTABLE_SECTIONS = {"interfaces", "tts", "transcription", "skill-config", "agents"}
+SESSION_SETTABLE_SECTIONS = {"agents", "tts", "disabled_skills"}
 VALID_AGENT_PATHS = {"default", "defaults", "chat", "skill_runner", "vision", "compiler"}
 
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -353,6 +354,124 @@ def cmd_voice(args) -> None:
           "message": f"Voice auf '{args.name}' gesetzt."})
 
 
+def _session_config_path(user_id: str, session_dir: str) -> str:
+    return os.path.join(session_dir, user_id, "config.yaml")
+
+
+def _read_session_cfg(user_id: str, session_dir: str) -> dict:
+    path = _session_config_path(user_id, session_dir)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_session_cfg(user_id: str, session_dir: str, data: dict) -> None:
+    path = _session_config_path(user_id, session_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if data:
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+    elif os.path.isfile(path):
+        os.remove(path)
+
+
+def cmd_session(args) -> None:
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+
+    data = _read_session_cfg(user_id, session_dir)
+
+    if args.set_path:
+        top_key = args.set_path.split(".")[0]
+        if top_key not in SESSION_SETTABLE_SECTIONS:
+            _out({
+                "success": False,
+                "error": f"Section '{top_key}' is not settable in session config. "
+                         f"Settable: {', '.join(sorted(SESSION_SETTABLE_SECTIONS))}",
+            })
+            return
+        value = _coerce(args.set_value) if args.set_value is not None else None
+        if value is None:
+            keys = args.set_path.split(".")
+            current = data
+            for key in keys[:-1]:
+                if not isinstance(current.get(key), dict):
+                    current = None
+                    break
+                current = current[key]
+            if current is not None:
+                current.pop(keys[-1], None)
+        else:
+            _set_path(data, args.set_path, value)
+        _write_session_cfg(user_id, session_dir, data)
+        written = _get_path(_read_session_cfg(user_id, session_dir), args.set_path)
+        _out({"success": True, "path": args.set_path, "value_set": value, "value_read_back": written})
+        return
+
+    if args.get_path:
+        _out({"success": True, "path": args.get_path, "value": _get_path(data, args.get_path)})
+        return
+
+    section = args.section
+    if section:
+        if section not in SESSION_SETTABLE_SECTIONS:
+            _out({
+                "success": False,
+                "error": f"Unknown section '{section}'. "
+                         f"Available: {', '.join(sorted(SESSION_SETTABLE_SECTIONS))}",
+            })
+            return
+        _out({"success": True, "section": section, "value": data.get(section)})
+        return
+
+    _out({
+        "success": True,
+        "session_config": {s: data[s] for s in SESSION_SETTABLE_SECTIONS if s in data},
+        "config_path": _session_config_path(user_id, session_dir),
+    })
+
+
+def cmd_disabled_skills(args) -> None:
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+
+    data = _read_session_cfg(user_id, session_dir)
+    current: list = [str(s) for s in (data.get("disabled_skills") or []) if s]
+
+    if args.add:
+        if args.add not in current:
+            current.append(args.add)
+            data["disabled_skills"] = current
+            _write_session_cfg(user_id, session_dir, data)
+        _out({"__directive__": "reload_skills"})
+        _out({"success": True, "action": "added", "skill": args.add, "disabled_skills": current})
+        return
+
+    if args.remove:
+        current = [s for s in current if s != args.remove]
+        if current:
+            data["disabled_skills"] = current
+        else:
+            data.pop("disabled_skills", None)
+        _write_session_cfg(user_id, session_dir, data)
+        _out({"__directive__": "reload_skills"})
+        _out({"success": True, "action": "removed", "skill": args.remove, "disabled_skills": current})
+        return
+
+    _out({"success": True, "disabled_skills": current})
+
+
 def cmd_private(args) -> None:
     scope = f"Thread {args.thread}" if args.thread else "Session"
     private = not args.off
@@ -467,6 +586,20 @@ def main():
     p.add_argument("--thread", default=None, help="Thread ID (omit for session-level)")
     p.add_argument("--off", action="store_true", help="Disable private mode")
 
+    p = sub.add_parser("session", help="Read/write session-local config (agents, tts, disabled_skills)")
+    p.add_argument("--section", default=None, help="Show one section (agents, tts, disabled_skills)")
+    p.add_argument("--get-path", default=None, dest="get_path", help="Dot-notation path to read")
+    p.add_argument("--set-path", default=None, dest="set_path", help="Dot-notation path to write")
+    p.add_argument("--set-value", default=None, dest="set_value", help="Value to write (YAML scalar)")
+    p.add_argument("--user-id", default=None)
+    p.add_argument("--session-dir", default=None)
+
+    p = sub.add_parser("disabled-skills", help="List, add or remove disabled skills for this session")
+    p.add_argument("--add", default=None, metavar="SKILL", help="Disable a skill")
+    p.add_argument("--remove", default=None, metavar="SKILL", help="Re-enable a skill")
+    p.add_argument("--user-id", default=None)
+    p.add_argument("--session-dir", default=None)
+
     args = parser.parse_args()
     if not args.cmd:
         parser.print_help()
@@ -475,6 +608,7 @@ def main():
     dispatch = {
         "show": cmd_show, "get": cmd_get, "set": cmd_set,
         "model": cmd_model, "agent": cmd_agent, "voice": cmd_voice, "private": cmd_private,
+        "session": cmd_session, "disabled-skills": cmd_disabled_skills,
     }
     try:
         dispatch[args.cmd](args)
