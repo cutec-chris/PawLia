@@ -265,6 +265,14 @@ class ChatAgent(BaseAgent):
             candidate = skill_name.replace("_", "").replace("-", "").lower()
             if candidate == normalized:
                 return skill_name
+        # Try base before first dot — models sometimes use "files.read" notation
+        if "." in name:
+            base = name.split(".", 1)[0]
+            base_normalized = base.replace("_", "").replace("-", "").lower()
+            for skill_name in self.skills:
+                candidate = skill_name.replace("_", "").replace("-", "").lower()
+                if candidate == base_normalized:
+                    return skill_name
         return name
 
     @staticmethod
@@ -309,6 +317,14 @@ class ChatAgent(BaseAgent):
 
         if skill_name not in self.skills:
             return skill_name, args, f"Error: Unknown skill '{raw_name}'."
+
+        # Use dotted subcommand as query seed when args are otherwise empty
+        # e.g. files.list → query="list"; files.read → query="read <filename>"
+        if "query" not in args and "." in raw_name and skill_name != raw_name:
+            subcommand = raw_name.split(".", 1)[1]
+            if subcommand:
+                args["query"] = subcommand
+
         if "query" not in args:
             return skill_name, args, (
                 f"Error: Invalid arguments for skill '{skill_name}'. "
