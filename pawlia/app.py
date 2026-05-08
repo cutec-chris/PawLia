@@ -186,8 +186,9 @@ class App:
             user_skills.update(fresh)
 
         def make_local_agent() -> ChatAgent:
-            chat_llm = self.llm.get("chat")
-            vision_llm = self.llm.get("vision")
+            overrides = self.memory.effective_agent_overrides(session, None)
+            chat_llm = self.llm.get("chat", agent_overrides=overrides)
+            vision_llm = self.llm.get("vision", agent_overrides=overrides)
             ws_search_cfg = self.config.get("workspace-search", {})
             agent = ChatAgent(
                 llm=chat_llm,
