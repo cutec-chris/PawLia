@@ -516,7 +516,7 @@ class LLMFactory:
         if agent_type.startswith("skill."):
             return "skill_runner"
         if agent_type == "skill_runner":
-            return "default"
+            return "chat"
         if agent_type == "vision":
             return "chat"
         if agent_type == "chat":
