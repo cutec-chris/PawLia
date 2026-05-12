@@ -420,8 +420,20 @@ class TestBuildSystemPrompt:
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)
             session = mm.load_session("u1")
+            # Skill rules are suppressed during bootstrap to avoid
+            # conflicting with the bootstrap script. Simulate a fully
+            # bootstrapped workspace by removing bootstrap.md.
+            os.remove(os.path.join(mm._workspace_dir("u1"), "bootstrap.md"))
             prompt = mm.build_system_prompt(session)
             assert "MUST call the matching skill" in prompt
+
+    def test_bootstrap_suppresses_skill_rules(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u1")
+            prompt = mm.build_system_prompt(session)
+            assert "Bootstrap is active" in prompt
+            assert "MUST call the matching skill" not in prompt
 
     def test_includes_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:

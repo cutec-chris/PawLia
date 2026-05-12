@@ -9,6 +9,7 @@ incorporates the result into its final response.
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -179,6 +180,13 @@ class ChatAgent(BaseAgent):
         try:
             from pawlia.workspace_search import WorkspaceSearch
             workspace = self.memory._workspace_dir(self.session.user_id)
+            # Bootstrap mode: workspace only contains identity templates, which
+            # the system prompt already includes verbatim. Searching them
+            # injects duplicate snippets plus instructions ("reply from the
+            # snippet") that conflict with the bootstrap script.
+            if os.path.isfile(os.path.join(workspace, "bootstrap.md")):
+                self.session.workspace_refs = []
+                return
             hits = WorkspaceSearch(workspace, config=self._workspace_search_cfg).search(query)
             self.session.workspace_refs = hits
             if hits:

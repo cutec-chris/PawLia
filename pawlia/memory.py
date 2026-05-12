@@ -765,6 +765,7 @@ class MemoryManager:
         _IDENTITY_FILES = ("bootstrap.md", "identity.md", "user.md", "soul.md", "memory.md")
         ws_files = [f for f in _IDENTITY_FILES
                     if os.path.isfile(os.path.join(workspace, f))]
+        bootstrap_active = "bootstrap.md" in ws_files
 
         for filename in ws_files:
             content = self._strip_frontmatter(
@@ -796,7 +797,9 @@ class MemoryManager:
             parts.append(mode_block)
 
         # Skill instructions
-        skill_block = self._build_skill_instructions(skills or {})
+        skill_block = self._build_skill_instructions(
+            skills or {}, bootstrap_active=bootstrap_active,
+        )
         parts.append(skill_block)
 
         return "\n\n════════════════════\n\n".join(parts)
@@ -809,8 +812,16 @@ class MemoryManager:
         return ""
 
     @staticmethod
-    def _build_skill_instructions(skills: Dict[str, Any]) -> str:
-        """Build explicit skill usage instructions for the system prompt."""
+    def _build_skill_instructions(
+        skills: Dict[str, Any], *, bootstrap_active: bool = False,
+    ) -> str:
+        """Build explicit skill usage instructions for the system prompt.
+
+        During bootstrap, the skill rules ("only answer directly for
+        greetings") conflict with the bootstrap script ("first message must
+        be …"). We trim down to just the capability list so the bootstrap
+        instructions at the top of the prompt win.
+        """
         lines = load_system_prompt("chat/skill_capabilities_intro.md").splitlines()
         for name, skill in skills.items():
             desc = getattr(skill, "description", "")
@@ -819,9 +830,13 @@ class MemoryManager:
             else:
                 lines.append(f"- {name}")
 
-        has_search = any(
-            s in skills for s in ("perplexica", "searxng", "researcher")
-        )
+        if bootstrap_active:
+            lines.append("")
+            lines.append(
+                "Bootstrap is active — follow the script at the top of this "
+                "prompt before doing anything else."
+            )
+            return "\n".join(lines)
 
         has_memory = "memory" in skills
 
