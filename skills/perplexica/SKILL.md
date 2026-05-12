@@ -5,6 +5,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "1.0"
+  trust: external
   compatibility: Requires Perplexica instance configuration
   requires_config:
     - url

@@ -5,6 +5,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "1.3"
+  trust: internal
 ---
 
 # File Workspace

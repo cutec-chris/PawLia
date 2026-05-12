@@ -14,6 +14,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "2.0"
+  trust: internal
   requires_config:
     - rag_model              # LLM used for wiki analysis
     - embedding_host         # API host (used for LLM calls too)

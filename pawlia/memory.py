@@ -821,8 +821,9 @@ class MemoryManager:
         if session.user_memory.strip():
             parts.append(f"## Memory\n{session.user_memory.strip()}")
 
-        # workspace_refs are injected into the user message, not the system
-        # prompt, so the model sees them immediately before the question.
+        # workspace_refs are injected into the user message (see chat.py
+        # _augment_with_workspace_refs), not the system prompt — that's what
+        # actually triggers the model to call the files skill.
 
         parts.append(
             f"Current date and time: {datetime.now().strftime('%A, %d. %B %Y %H:%M')}"

@@ -29,6 +29,12 @@ class AgentSkill:
         self.scripts_dir = os.path.join(skill_path, "scripts")
         self.requires_credentials: list = metadata.get("requires_credentials", [])
         self.max_tool_turns: Optional[int] = self._load_max_tool_turns(metadata)
+        # Epistemic trust level: "internal" (user-curated, prefer over training),
+        # "external" (raw outside data, verify), "mixed" (depends on usage).
+        # Default "mixed" — neutral framing.
+        self.trust: str = str(
+            (metadata.get("metadata") or {}).get("trust", "mixed")
+        ).lower()
         self.instructions = self._load_instructions()
 
     @staticmethod
