@@ -37,6 +37,18 @@ if TYPE_CHECKING:
 _SENTENCE_RE = re.compile(r'[.!?…]\s')
 _RE_CODE_BLOCK = re.compile(r'```[^\n]*\n(.*?)(?:```|$)', re.DOTALL)
 _RE_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
+# Small local models like to print file content in markdown blocks with the
+# filename as a heading instead of calling the files skill. Match the first
+# heading like "# identity.md - …" and recover it as a files write call.
+_RE_FILENAME_HEADING = re.compile(
+    r"^\s*#+\s+(?P<name>[\w./\-]+\.(?:md|txt|json|yaml|yml))\b",
+    re.IGNORECASE,
+)
+# Same models also write bare "delete bootstrap.md" commands in code blocks.
+_RE_DELETE_COMMAND = re.compile(
+    r"^\s*(?:delete|rm)\s+(?P<name>[\w./\-]+\.(?:md|txt|json|yaml|yml))\s*$",
+    re.IGNORECASE,
+)
 
 _FAKE_TOOL_CALL_NUDGE = (
     "You wrote a tool call as plain text or a code block instead of using the "
@@ -76,6 +88,22 @@ _DEFERRED_PLACEHOLDER_RE = re.compile(
     r"(?:aufnahme|anfrage|nachricht)?))\b",
     re.IGNORECASE,
 )
+
+
+def _augment_with_workspace_refs(user_input: str, session: Any) -> str:
+    """Prepend workspace search results to the user message when available.
+
+    Injecting them here — immediately before the question — makes the model
+    treat them as direct context rather than background system instructions.
+    """
+    if not session or not session.workspace_refs:
+        return user_input
+    try:
+        from pawlia.memory import _format_workspace_refs
+        block = _format_workspace_refs(session.workspace_refs)
+        return f"{block}\n\n---\n\n{user_input}"
+    except Exception:
+        return user_input
 
 
 def _split_sentences(text: str) -> Tuple[List[str], str]:
@@ -445,15 +473,20 @@ class ChatAgent(BaseAgent):
         # A thread-specific model override takes priority over the session default.
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
 
+        # Augment the user message with workspace context (if any).
+        # Injected here — directly before the question — so the model treats it
+        # as immediately relevant context rather than background system config.
+        augmented_input = _augment_with_workspace_refs(user_input, self.session)
+
         # Build multimodal content when images are present
         if images:
             self.logger.debug("Sending %d image(s) to LLM", len(images))
-            content: List[Dict[str, Any]] = [{"type": "text", "text": user_input or "What's in this image?"}]
+            content: List[Dict[str, Any]] = [{"type": "text", "text": augmented_input or "What's in this image?"}]
             for data_uri in images:
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             messages.append(HumanMessage(content=content))
         else:
-            messages.append(HumanMessage(content=user_input))
+            messages.append(HumanMessage(content=augmented_input))
 
         # Turn 1: LLM decides whether to call a skill or answer directly
         active_llm = bound_llm
@@ -614,13 +647,15 @@ class ChatAgent(BaseAgent):
 
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
 
+        augmented_input = _augment_with_workspace_refs(user_input, self.session)
+
         if images:
-            content: List[Dict[str, Any]] = [{"type": "text", "text": user_input or "What's in this image?"}]
+            content: List[Dict[str, Any]] = [{"type": "text", "text": augmented_input or "What's in this image?"}]
             for data_uri in images:
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             messages.append(HumanMessage(content=content))
         else:
-            messages.append(HumanMessage(content=user_input))
+            messages.append(HumanMessage(content=augmented_input))
 
         # ---- Stream turn 1 ----
         # _partial_text tracks generated text for persist-on-cancel (barge-in during TTS
@@ -1021,6 +1056,34 @@ class ChatAgent(BaseAgent):
                         "name": skill_name,
                         "args": {"query": query},
                     })
+
+        if calls or "files" not in skill_names:
+            return calls
+
+        # Last-resort heuristics for small models during bootstrap:
+        # treat "# <filename>.md\n…" blocks as `files write` calls and
+        # bare "delete <filename>" commands as `files delete` calls.
+        for match in _RE_CODE_BLOCK.finditer(content):
+            block = match.group(1).strip()
+            if not block:
+                continue
+            first_line = block.split("\n", 1)[0]
+            delete_match = _RE_DELETE_COMMAND.match(first_line)
+            if delete_match:
+                calls.append({
+                    "id": f"fake_{uuid.uuid4().hex[:8]}",
+                    "name": "files",
+                    "args": {"query": f"delete --filename {delete_match.group('name')}"},
+                })
+                continue
+            heading_match = _RE_FILENAME_HEADING.match(first_line)
+            if heading_match:
+                filename = heading_match.group("name")
+                calls.append({
+                    "id": f"fake_{uuid.uuid4().hex[:8]}",
+                    "name": "files",
+                    "args": {"query": f"write --filename {filename}\n{block}"},
+                })
 
         return calls
 

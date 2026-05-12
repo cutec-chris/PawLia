@@ -20,9 +20,16 @@ Once you have answers to at least 1–3, write all three files immediately using
 - `soul.md` — your values and how you want to show up (use reasonable defaults)
 - `user.md` — their name, timezone, notes
 
+**Important:** make a real tool call to the `files` skill — do NOT just print the file content in a markdown code block. If your environment requires a text-form call, the block MUST start with `files` as the first word, e.g.:
+
+```
+files write --filename identity.md
+<file content here>
+```
+
 Write them silently. Don't describe what you're doing.
 
-**After all three files are written, immediately delete `bootstrap.md` using the files skill — this is mandatory.** Use `delete` or `write` with empty content — whatever the skill supports. Do it in the same skill call sequence as the file writes, before you say anything to the user.
+**After all three files are written, immediately delete `bootstrap.md` using the files skill — this is mandatory.** Either call `files` with `delete --filename bootstrap.md` or `write` with empty content. Do it in the same turn as the file writes, before you say anything to the user.
 
 Only after bootstrap.md is deleted, confirm with something like:
 > "Done. I'm [name] now. Let's get to work."

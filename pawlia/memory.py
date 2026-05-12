@@ -87,26 +87,62 @@ class Session:
 
 
 def _format_workspace_refs(hits: list) -> str:
-    """Format workspace search hits for injection into the system prompt."""
+    """Format workspace search hits as actionable read-commands.
+
+    Each content file shows the exact `files read --query` call the model
+    should make. research/*/README.md hits show their one-line description
+    so the model knows what the project covers. Content files are deduplicated
+    by path so the same file isn't listed multiple times for different sections.
+    """
     lines = [
         "## Workspace Knowledge",
-        "These entries are from the user's personal knowledge store "
-        "and take precedence over your training knowledge. "
-        "If the snippet already answers the question, reply directly from it — "
-        "only read the full file if you need substantially more context.",
+        "The user's workspace has files relevant to this topic. "
+        "Your training data may be outdated or wrong — **use the `files` skill "
+        "to read these before answering**. Each entry below shows the exact "
+        "call to make (replace `<keywords>` with the relevant terms):",
     ]
+
+    # Group hits: research project READMEs (provide description) paired with
+    # their first content-file hit (provides the actual read target).
+    # Non-research files are listed individually with their read call.
+    research_readmes: dict = {}   # project_dir -> (ref, snippet)
+    research_content: dict = {}   # project_dir -> ref of first content file
+    other_hits: list = []
+    seen_content: set = set()
+
     for hit in hits:
-        ref = hit.wikilink_ref
         path = hit.path
-        entry = f"- {ref} ({path})"
-        if hit.heading:
-            entry += f" — **{hit.heading}**"
-        if hit.snippet:
-            entry += f"\n  > {hit.snippet}"
-        if hit.wikilinks:
-            linked = ", ".join(f"[[{w}]]" for w in hit.wikilinks[:3])
-            entry += f"\n  ↗ {linked}"
+        ref = hit.wikilink_ref
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] == "research":
+            project_dir = parts[1]
+            if parts[-1] == "README.md":
+                research_readmes[project_dir] = (ref, hit.snippet or "")
+            else:
+                if project_dir not in research_content and path not in seen_content:
+                    research_content[project_dir] = ref
+                    seen_content.add(path)
+        else:
+            if path not in seen_content:
+                seen_content.add(path)
+                other_hits.append(hit)
+
+    # Render research projects: description + ready-to-use read call
+    for project_dir, (readme_ref, description) in research_readmes.items():
+        content_ref = research_content.get(project_dir, readme_ref)
+        entry = f"- {description or project_dir}"
+        entry += f"\n  → `files read --query \"<keywords>\" {content_ref}`"
         lines.append(entry)
+
+    # Render non-research hits
+    for hit in other_hits:
+        ref = hit.wikilink_ref
+        entry = f"- {ref}"
+        if hit.heading:
+            entry += f" (section: {hit.heading})"
+        entry += f"\n  → `files read --query \"<keywords>\" {ref}`"
+        lines.append(entry)
+
     return "\n".join(lines)
 
 
@@ -785,8 +821,8 @@ class MemoryManager:
         if session.user_memory.strip():
             parts.append(f"## Memory\n{session.user_memory.strip()}")
 
-        if session.workspace_refs:
-            parts.append(_format_workspace_refs(session.workspace_refs))
+        # workspace_refs are injected into the user message, not the system
+        # prompt, so the model sees them immediately before the question.
 
         parts.append(
             f"Current date and time: {datetime.now().strftime('%A, %d. %B %Y %H:%M')}"

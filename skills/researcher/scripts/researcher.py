@@ -50,6 +50,20 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 USER_AGENT = "pawlia-researcher/1.0"
 
+# Boilerplate filters for _scrape_and_save.
+# Pages matching these are not worth keeping: the LLM downstream just sees
+# noise and may draw wrong conclusions from incidental words.
+_MIN_CONTENT_CHARS = 300
+_CAPTCHA_MARKERS = (
+    "please wait for verification",
+    "checking your browser",
+    "verifying you are human",
+    "just a moment",
+    "enable javascript",
+    "are you a robot",
+    "cloudflare ray id",
+)
+
 
 def _load_skill_config() -> dict:
     raw = os.environ.get("PAWLIA_SKILL_CONFIG")
@@ -347,10 +361,24 @@ async def _scrape_and_save(project_path: pathlib.Path, url: str) -> dict:
                 include_tables=True, include_images=False,
                 output_format="html",
             )
+            if not extracted:
+                return {"status": "skipped", "reason": "no extractable content"}
             h2t = html2text.HTML2Text()
             h2t.ignore_links = False
             h2t.body_width = 0
-            markdown_text = h2t.handle(extracted) if extracted else resp.text
+            markdown_text = h2t.handle(extracted)
+
+            # Drop boilerplate pages: captchas, JS-walls, language pickers, etc.
+            lower = markdown_text.lower()
+            for marker in _CAPTCHA_MARKERS:
+                if marker in lower:
+                    return {"status": "skipped", "reason": f"blocked page ({marker})"}
+            plain_len = len(re.sub(r"\s+", " ", markdown_text).strip())
+            if plain_len < _MIN_CONTENT_CHARS:
+                return {
+                    "status": "skipped",
+                    "reason": f"content too short ({plain_len} chars)",
+                }
         else:
             return {"status": "error", "message": f"unsupported content type: {content_type}"}
 
