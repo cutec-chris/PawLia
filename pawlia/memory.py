@@ -124,7 +124,7 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
     ]
 
     research_readmes: dict = {}   # project_dir -> (ref, description)
-    research_content: dict = {}   # project_dir -> ref of first content file
+    research_content: dict = {}   # project_dir -> first content-file hit
     other_hits: list = []
     seen_content: set = set()
 
@@ -138,17 +138,33 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
                 research_readmes[project_dir] = (ref, hit.snippet or "")
             else:
                 if project_dir not in research_content and path not in seen_content:
-                    research_content[project_dir] = ref
+                    research_content[project_dir] = hit
                     seen_content.add(path)
         else:
             if path not in seen_content:
                 seen_content.add(path)
                 other_hits.append(hit)
 
+    rendered_projects: set = set()
+
     for project_dir, (readme_ref, description) in research_readmes.items():
-        content_ref = research_content.get(project_dir, readme_ref)
+        content_hit = research_content.get(project_dir)
+        content_ref = content_hit.wikilink_ref if content_hit else readme_ref
         entry = f"- **{readme_ref}** — {description or project_dir}"
+        if content_hit and content_hit.heading:
+            entry += f" *(matched section: {content_hit.heading})*"
         entry += f"\n  → `files read --query \"{read_query}\" {content_ref}`"
+        lines.append(entry)
+        rendered_projects.add(project_dir)
+
+    for project_dir, hit in research_content.items():
+        if project_dir in rendered_projects:
+            continue
+        ref = hit.wikilink_ref
+        entry = f"- **{ref}** *(research/{project_dir})*"
+        if hit.heading:
+            entry += f" *(section: {hit.heading})*"
+        entry += f"\n  → `files read --query \"{read_query}\" {ref}`"
         lines.append(entry)
 
     for hit in other_hits:
