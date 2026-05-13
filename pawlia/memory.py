@@ -92,26 +92,38 @@ class Session:
         self.pending_topic_heading: Optional[str] = None
 
 
-def _format_workspace_refs(hits: list) -> str:
-    """Format workspace search hits as actionable read-commands.
+_DEFAULT_READ_QUERY = "<keywords>"
 
-    Each content file shows the exact `files read --query` call the model
-    should make. research/*/README.md hits show their one-line description
-    so the model knows what the project covers. Content files are deduplicated
-    by path so the same file isn't listed multiple times for different sections.
+
+def _format_workspace_refs(hits: list, user_query: str = "") -> str:
+    """Format workspace hits as minimal pointers — model must call `files read`.
+
+    Only the wikilink and section heading are shown; snippet content is
+    intentionally NOT included. The model is expected to load the actual file
+    via `files read` before answering, so claims trace back to the file rather
+    than to a paraphrased preview that can drift.
+
+    research/*/README.md hits are deduped against their project's content files
+    so each project appears once with one ready-to-use read call.
     """
+    read_query = _read_query_for(user_query)
     lines = [
-        "## Workspace Knowledge",
-        "The user's workspace has files relevant to this topic. "
-        "Your training data may be outdated or wrong — **use the `files` skill "
-        "to read these before answering**. Each entry below shows the exact "
-        "call to make (replace `<keywords>` with the relevant terms):",
+        "## Workspace Notes Available",
+        "The user's workspace contains files relevant to this turn. Headings "
+        "below tell you what each file covers; **read the file with `files "
+        "read` before making any claim about its topic** — your training data "
+        "may be outdated or wrong for the user's domain.",
+        "",
+        "**Rules:**",
+        "- If a heading below matches what the user is asking about, call "
+        "`files read` on that file before answering. Do not answer from memory.",
+        "- Quote facts from the read result, not from these headings.",
+        "- Never invent a file path or heading that isn't listed here.",
+        "- If no heading matches the question, answer normally without reading.",
+        "",
     ]
 
-    # Group hits: research project READMEs (provide description) paired with
-    # their first content-file hit (provides the actual read target).
-    # Non-research files are listed individually with their read call.
-    research_readmes: dict = {}   # project_dir -> (ref, snippet)
+    research_readmes: dict = {}   # project_dir -> (ref, description)
     research_content: dict = {}   # project_dir -> ref of first content file
     other_hits: list = []
     seen_content: set = set()
@@ -133,23 +145,43 @@ def _format_workspace_refs(hits: list) -> str:
                 seen_content.add(path)
                 other_hits.append(hit)
 
-    # Render research projects: description + ready-to-use read call
     for project_dir, (readme_ref, description) in research_readmes.items():
         content_ref = research_content.get(project_dir, readme_ref)
-        entry = f"- {description or project_dir}"
-        entry += f"\n  → `files read --query \"<keywords>\" {content_ref}`"
+        entry = f"- **{readme_ref}** — {description or project_dir}"
+        entry += f"\n  → `files read --query \"{read_query}\" {content_ref}`"
         lines.append(entry)
 
-    # Render non-research hits
     for hit in other_hits:
         ref = hit.wikilink_ref
-        entry = f"- {ref}"
+        entry = f"- **{ref}**"
         if hit.heading:
-            entry += f" (section: {hit.heading})"
-        entry += f"\n  → `files read --query \"<keywords>\" {ref}`"
+            entry += f" *(section: {hit.heading})*"
+        entry += f"\n  → `files read --query \"{read_query}\" {ref}`"
         lines.append(entry)
 
     return "\n".join(lines)
+
+
+def _read_query_for(user_query: str) -> str:
+    """Distill the user message into a 3–6 word `files read` --query value.
+
+    Falls back to a placeholder if the message is too short to extract content
+    words. Keeps the call site simple — caller passes the raw user input.
+    """
+    text = (user_query or "").strip()
+    if not text:
+        return _DEFAULT_READ_QUERY
+    tokens = [t for t in re.findall(r"\w+", text.lower()) if len(t) >= 4]
+    seen: set = set()
+    distilled: list = []
+    for t in tokens:
+        if t in seen:
+            continue
+        seen.add(t)
+        distilled.append(t)
+        if len(distilled) >= 6:
+            break
+    return " ".join(distilled) if distilled else _DEFAULT_READ_QUERY
 
 
 class MemoryManager:

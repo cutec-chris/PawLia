@@ -103,7 +103,7 @@ def _augment_with_workspace_refs(user_input: str, session: Any) -> str:
         return user_input
     try:
         from pawlia.memory import _format_workspace_refs
-        block = _format_workspace_refs(session.workspace_refs)
+        block = _format_workspace_refs(session.workspace_refs, user_query=user_input)
         return f"{block}\n\n---\n\n{user_input}"
     except Exception:
         return user_input
@@ -229,11 +229,16 @@ class ChatAgent(BaseAgent):
             self.session.workspace_refs = []  # prevent retry on next turn
 
     def _handle_workspace_context(self, user_input: str) -> None:
-        """Decide whether to (re-)run workspace search based on message content.
+        """Re-run workspace search on every substantive message.
+
+        BM25 over the workspace is cheap, and caching hits from an earlier
+        question lets follow-ups about a different aspect of the same topic
+        run on stale snippets — which leads to hallucinations when the cached
+        hits don't cover the new sub-question. Always re-searching keeps the
+        injected context aligned with what the user is actually asking right now.
 
         - Skips short/small-talk messages ("hi", "ok", "danke", …).
-        - Runs on the first substantive message (workspace_refs is None).
-        - Re-runs and marks a topic heading when a significant topic shift is detected.
+        - Marks a topic heading in the daily log on significant shifts.
         """
         if not (self.memory and self.session):
             return
@@ -245,18 +250,14 @@ class ChatAgent(BaseAgent):
         if not WorkspaceSearch.is_substantive(user_input):
             return  # small talk — skip entirely
 
-        if self.session.workspace_refs is None:
-            # First substantive turn
-            self._run_workspace_search(user_input)
-        elif self.session.workspace_refs == []:
-            # Previous search found nothing — retry on every substantive message
-            self._run_workspace_search(user_input)
-        elif WorkspaceSearch.is_topic_shift(user_input, self.session.exchanges):
-            # Topic changed — re-search and schedule a heading for the log
-            self.logger.debug("Topic shift detected, re-running workspace search")
-            self.session.workspace_refs = None
-            self._run_workspace_search(user_input)
+        if (
+            self.session.workspace_refs is not None
+            and WorkspaceSearch.is_topic_shift(user_input, self.session.exchanges)
+        ):
             self.session.pending_topic_heading = WorkspaceSearch.make_topic_heading(user_input)
+
+        self.session.workspace_refs = None
+        self._run_workspace_search(user_input)
 
     def build_system_prompt(
         self,
