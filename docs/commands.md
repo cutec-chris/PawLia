@@ -44,66 +44,51 @@ Subsequent messages to that thread work exactly like any other thread: reply ins
 
 ---
 
-## `/model` — Show or switch the active chat model
+## `/model` — Show or switch a model (per agent role)
 
 ```
-/model                  # show current model
-/model <name>           # set agents.chat for this context
+/model                       # show all active model overrides for this context
+/model <name>                # shorthand for /model chat <name>
+/model <path> <name>         # override one agent role
+/model <path> off            # clear that override
 ```
 
-Matrix prefix: `//model` / `//model <name>`
+Matrix prefix: `//model …`.
 
-`/model` is shorthand for overriding `agents.chat` in the current session/thread.
-`<name>` accepts either a **model key** defined in `config.yaml` (e.g. `fast`, `smart`) or a **raw model name** (e.g. `qwen3.5:4b`).
+`<name>` accepts either a **model key** defined in `config.yaml` (e.g. `fast`, `smart`) or a **raw model name** (e.g. `qwen3.5:4b`). Comma-separated lists (e.g. `smart,fast`) are accepted and become a runtime failover chain. `off` clears the override.
+
+`<path>` selects which agent role to override:
+
+| Path | Used by |
+|------|---------|
+| `default` | Global fallback for every agent role |
+| `chat` | Main conversation agent |
+| `skill_runner` | Default model for all skill sub-agents |
+| `vision` | Vision agent (image messages) |
+| `compiler` | Skill workflow compiler |
+| `skills.<name>` | Per-skill override (e.g. `skills.browser`) |
 
 ### Scope
 
-| Interface | Scope of `/model <name>` |
-|-----------|--------------------------|
+| Interface | Scope of `/model …` |
+|-----------|---------------------|
 | Telegram  | Thread-local when sent inside a thread; session-wide otherwise |
 | Matrix    | Thread-local when sent as a thread reply; room-wide otherwise |
 | CLI       | Session-wide |
 
-Thread-local overrides do not affect the main conversation or other threads. All overrides are persisted to disk and survive restarts.
+Thread-local overrides do not affect the main conversation or other threads. All overrides are persisted to `workspace/memory/agent_overrides.yaml` and survive restarts.
 
 ### Examples
 
 ```
-/model                  # → "Aktives Modell: smart"
-/model fast             # switch to the "fast" model key from config
-/model qwen3:4b         # switch to a raw Ollama model name
-/model groq-fast        # switch to the "groq-fast" model key
+/model                            # → "chat=smart  skills.browser=fast"
+/model qwen3.5:4b                 # shorthand: agents.chat = qwen3.5:4b
+/model chat smart,fast            # explicit chat override with failover chain
+/model default smart,fast         # change the global fallback
+/model skills.browser fast        # override one skill's model
+/model skills.browser off         # clear that override
+/model chat off                   # back to the config default
 ```
-
-To reset to the default model, restart the session or (CLI) set the override to the default key.
-
----
-
-## `/agent` — Override session-local `agents:` config
-
-Lets you override the active `agents:` mapping for the current session/thread using the same structure as `config.yaml`, including fallback chains and per-skill selectors.
-
-```
-/agent                           # show all overrides for this context
-/agent chat                      # show one override path
-/agent chat smart,fast           # set agents.chat
-/agent default smart,fast        # set agents.default
-/agent skills.browser fast       # set agents.skills.browser
-/agent skills.browser off        # clear one override path
-```
-
-Matrix prefix: `//agent`
-
-Supported paths:
-
-- `default`
-- `chat`
-- `skill_runner`
-- `vision`
-- `compiler`
-- `skills.<name>`
-
-Overrides are stored per session, or per thread when the command is sent inside a thread. Thread overrides layer on top of session overrides.
 
 ---
 
@@ -162,13 +147,23 @@ Use this after editing providers, models, workflow settings, or bundled skills w
 
 ## `/background` — Run a message in the background
 
-Queues a message for deferred processing. The agent processes it when the system is idle (all users inactive for 20+ minutes and no active chat requests).
+Queues a message for deferred processing. The agent processes it when the active user has been idle for at least `IDLE_BACKGROUND_MIN` (default 10 minutes) and no chat request is currently using the LLM.
 
 ```
 /background <message>      # Telegram, CLI & Web
 //background <message>      # Matrix
 ```
 
-The task is stored in `session/<user>/background_tasks/` and processed through the normal agent pipeline (including skills). Once complete, the result is delivered as a notification.
+The task is stored under `session/<user>/automations/` and processed through the normal agent pipeline (including skills). Once complete, the result is delivered as a scheduler notification through whichever interface the user is on.
 
 Use this for long-running or low-priority tasks that don't need an immediate response — e.g. research, bulk operations, or anything that would block the LLM for other users.
+
+---
+
+## `//clear` — Clear the in-memory context (Matrix only)
+
+```
+//clear
+```
+
+Drops the in-memory conversation context (exchanges, recent bot responses) for the current room or thread without touching the daily log on disk. Useful to restart a stuck conversation without losing the persistent record.

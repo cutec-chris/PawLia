@@ -11,23 +11,24 @@
         ░▓▓█
 ```
 
-**A lightweight, open-source AI assistant built for small language models (e.g. Qwen 3.5 9b).**
+**A lightweight, open-source AI assistant built for small language models (e.g. Qwen 3.5 4b).**
 
-PawLia brings persistent memory, multi-user sessions, and extensible skills to (non only) local AI — no cloud API required.
+PawLia brings persistent memory, multi-user sessions, and extensible skills to (not only) local AI — no cloud API required.
 
 ## Why PawLia?
 
-- **Flexible backends** — use PawLia's built-in agent stack (`backend: pawlia`, default) or delegate chats to Hermes-Agent (`backend: hermes`)
-- **Meets you where you are** — Telegram, Matrix, Web UI, CLI, or HTTP webhook, all at once
-- **Talk to it** — voice messages are transcribed automatically; Matrix VoIP calls let you speak to PawLia directly
-- **Threads** — isolate side conversations in Telegram forum topics or Matrix threads, each with its own context and model
+- **Flexible backends** — use PawLia's built-in agent stack (`backend: pawlia`, default) or delegate chats to Hermes-Agent (`backend: hermes`), routed per-thread by `RouterAgent`
+- **Meets you where you are** — Telegram, Matrix, Web UI, CLI, HTTP webhook, or OpenAI-compatible API (`/v1/chat/completions`), all at once
+- **Talk to it** — voice messages are transcribed automatically; Matrix VoIP calls let you speak to PawLia directly; models with `audio_input: true` (e.g. `gemma4:e4b`) bypass STT and consume audio natively
+- **Threads** — isolate side conversations in Telegram forum topics or Matrix threads, each with its own context, model, and backend
 - **Multi-user** — every user gets their own session with separate memory, history, and model settings
-- **Remembers** — conversation history and user facts persisted as Markdown, with automatic summarization and a Dream Wiki that compiles conversations into a structured, interlinked knowledge base overnight
+- **Remembers** — conversation history and user facts persisted as Markdown, with token-aware automatic summarization (configurable per model) and a Dream Wiki that compiles conversations into a structured, interlinked knowledge base overnight
 - **Obsidian vault** — the workspace is a native Obsidian vault: events use [Full Calendar](https://github.com/obsidian-community/obsidian-full-calendar) frontmatter, tasks use [Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) emoji format, the Dream Wiki creates interlinked topic pages. Optional Git sync with auto-commit (max 1/5min), daily squash, and weekly squash keeps the repo compact
-- **Switch models on the fly** — `/model qwen3:4b` swaps the LLM at runtime, per-thread or session-wide
+- **Switch models on the fly** — `/model qwen3:4b` swaps the LLM at runtime, per-thread or session-wide. Use `/model <path> <name>` (e.g. `/model chat smart`) to override per agent role
 - **Reload runtime config** — `/reload` picks up changed model/provider config and bundled skills without a full process restart
 - **Extensible** — drop a `SKILL.md` in `skills/user/` and the agent picks it up automatically
-- **Proactive** — built-in scheduler delivers reminders and calendar alerts through your active interface
+- **Proactive** — built-in scheduler delivers reminders, calendar alerts, and scheduled jobs through your active interface
+- **Web-based setup** — when no models are configured, PawLia auto-launches a setup wizard at `http://localhost:8080`
 - **Private mode** — `/private` prevents messages from being written to disk
 
 ## Quick Start
@@ -50,6 +51,7 @@ See [docs/installation.md](docs/installation.md) for full setup instructions, in
 | **Web** | — | — | `/thread` | — |
 | **CLI** | — | — | `/thread` | — |
 | **Webhook** | — | base64 | via `thread_id` | — |
+| **OpenAI API** | — | — | model selector | — |
 
 All interfaces run simultaneously in server mode.
 
@@ -57,7 +59,7 @@ All interfaces run simultaneously in server mode.
 
 ## Skills
 
-Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and it loads automatically. Bundled: searxng · perplexica · browser · files · organizer.
+Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and it loads automatically. Bundled: `searxng` · `perplexica` · `browser` · `files` · `organizer` · `automation` · `memory` · `researcher` · `config` · `skill-creator` · `workspace-git`.
 
 → [docs/skills.md](docs/skills.md)
 
@@ -76,12 +78,14 @@ Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and
 ```
 pawlia/
 ├── pawlia/          # Python package
-│   ├── agents/      # ChatAgent (dispatcher), SkillRunnerAgent
-│   ├── interfaces/  # CLI, Telegram, Matrix, Web, Webhook
-│   ├── tools/       # Built-in tools (bash, reminders)
+│   ├── agents/      # RouterAgent (backend dispatcher), ChatAgent, SkillRunnerAgent
+│   ├── interfaces/  # CLI, Telegram, Matrix, Web, Webhook, openai_compat
+│   ├── backends/    # Hermes backend
+│   ├── tools/       # Built-in tools (bash)
 │   ├── dream_wiki.py # Dream Wiki backend (Karpathy's LLM Wiki pattern)
 │   └── memory.py    # Session & memory management
 ├── skills/          # Skill packages (user/ is gitignored)
-├── session/         # Per-user session data
+├── session/         # Per-user session data (workspace + memory + threads)
+├── radicale/        # Optional CalDAV server (Docker)
 └── config.yaml      # Your configuration
 ```

@@ -95,6 +95,8 @@ models:
 | `provider` | Key from `providers:` |
 | `temperature` | Sampling temperature |
 | `think` | Enable chain-of-thought / extended thinking (optional) |
+| `max_tokens` | Hard cap on the response length (optional, positive int). Passed through to the provider as `max_tokens`. |
+| `audio_input` | When `true`, the model is treated as natively audio-capable and PawLia skips Whisper STT for voice messages / VoIP turns (e.g. `gemma4:e4b`). |
 | `max_tool_turns` | Tool-call budget for SkillRunner loops (optional, positive int). Overrides the size-based heuristic. Skill-level `metadata.max_tool_turns` in a `SKILL.md` still wins over this. |
 | `context_size` | Context window in tokens (optional, positive int). For Ollama backends this becomes `num_ctx` — set explicitly to avoid the silent 2048-token default. Set to `0` to keep Ollama's own default. Alias: `num_ctx`. |
 | `summarize_at_tokens` | Absolute token threshold above which conversation history gets summarized (optional, positive int). Overrides `summarize_at_fraction`. |
@@ -185,11 +187,14 @@ If an agent value contains a comma-separated list, models are tried in order whe
 | Agent type | Resolution order |
 |------------|-----------------|
 | `chat` | `agents.chat` → `agents.default` |
-| `skill_runner` | `agents.skill_runner` → `agents.default` |
+| `skill_runner` | `agents.skill_runner` → `agents.chat` → `agents.default` |
 | `vision` | `agents.vision` → `agents.chat` → `agents.default` |
-| `skill.<name>` | `agents.skills.<name>` → `agents.skill_runner` → `agents.default` |
+| `compiler` | `agents.compiler` → `agents.skill_runner` → `agents.chat` → `agents.default` |
+| `skill.<name>` | `agents.skills.<name>` → `agents.skill_runner` → `agents.chat` → `agents.default` |
 
 LLMs with identical configuration are reused across agent types — no redundant connections.
+
+Per-session and per-thread overrides are written to `workspace/memory/agent_overrides.yaml` and merged on top of the static `agents:` block. Set or clear them at runtime with `/model <path> <name>` (paths: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`).
 
 If an agent resolves to a Hermes-backed model, PawLia routes that conversation through Hermes instead of its own chat/skill stack.
 
@@ -208,13 +213,33 @@ interfaces:
     password: YOUR_PASSWORD
     # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
     # always_thread: true                  # always reply in a new thread (default: false)
+    # allowed_users: ["@you:matrix.org"]   # optional allow-list
     # stun_servers:
-    #   - stun:stun.l.google.com:19302   # for VoIP calls
+    #   - stun:stun.l.google.com:19302    # for VoIP calls
+
+  web:
+    host: 0.0.0.0
+    port: 8888
+    # token: OPTIONAL_FIXED_TOKEN          # otherwise auto-generated and logged
+
+  webhook:
+    port: 8080
+    # token: OPTIONAL_BEARER_TOKEN         # enables Bearer auth on /chat
+
+  openai:
+    host: 127.0.0.1
+    port: 11435
+    # api_key: OPTIONAL_BEARER_TOKEN       # clients send Authorization: Bearer <key>
+```
 
 | Key | Description |
 |-----|-------------|
-| `always_thread` | When `true`, every message is answered in its own Matrix thread (default: `false`) |
-| `stun_servers` | STUN/TURN server URIs for VoIP calls |
+| `matrix.always_thread` | When `true`, every message is answered in its own Matrix thread (default: `false`) |
+| `matrix.allowed_users` | Optional Matrix-ID allow-list. When set, all other senders are ignored. |
+| `matrix.stun_servers` | STUN/TURN server URIs for VoIP calls |
+| `web.port` | Default `8888`. Auto-launched at `8080` on first run if no models are configured. |
+| `openai.api_key` | Optional bearer token clients must send to use `/v1/chat/completions` / `/api/chat`. |
+| `webhook.token` | Optional bearer token required on `/chat`. |
 
 ## VoIP
 
@@ -223,7 +248,8 @@ Shared VoIP behavior is configured globally so the same settings can be reused b
 ```yaml
 voip:
   silence_threshold: 0.018
-  silence_seconds: 1.5  # default
+  silence_seconds: 2.2  # default — silence that ends a chunk
+  bargein_rms_threshold: 0.05  # raw RMS that interrupts TTS playback
   min_speech_seconds: 0.4
   min_active_speech_ratio: 0.12
   min_consecutive_speech_frames: 8
@@ -289,11 +315,6 @@ After a speech chunk is accepted the pipeline waits at least `response_delay_sec
 | > 20 s | 5.0 s |
 
 A small bonus (up to 1.5 s) is added when the measured noise floor is significantly elevated, because background noise can mask the true end of speech.
-
-  webhook:
-    port: 8080
-    # token: OPTIONAL_BEARER_TOKEN       # enables Bearer auth on /chat
-```
 
 ## Transcription (Speech-to-Text)
 
@@ -449,6 +470,7 @@ skill-config:
 | `markdown` | **yes** | **Dream Wiki** — LLM builds a structured, interlinked wiki from conversations. Pages have YAML frontmatter, Obsidian wikilinks (configurable via `wiki_link_format`), and cross-references. Runs automatically overnight when idle. No embeddings required. |
 | `lightrag` | | Knowledge-graph RAG (powerful, slow). Requires `lightrag-hku`. |
 | `simple` | | Chunk + embed + cosine similarity. Fast, numpy only. |
+| `mem0` | | Hosted/local mem0 retrieval backend. Requires `mem0ai` and the appropriate API key / vector store. |
 
 ### Dream Wiki (default `markdown` backend)
 
@@ -488,10 +510,61 @@ Manual commands via the memory skill:
 | `rag_numctx` | markdown, lightrag | LLM context window (default: 4096) |
 | `rag_timeout` | all | LLM timeout in seconds (default: 600) |
 | `wiki_link_format` | markdown | Link format: `wikilink` (default, Obsidian-native) or `markdown` |
+| `idle_minutes` | all | Idle minutes before the scheduler runs memory indexing (default: 20, matches `IDLE_MEMORY_MIN`) |
 
 ## Skill Installation
 
 ```yaml
 skill-install:
-  allow_remote: false     # allow skill upload via Telegram/Matrix file message
+  allow_remote: false       # allow skill upload via Telegram/Matrix file message
+  allow_workspace: false    # also discover skills from session/<user>/workspace/skills/
 ```
+
+## Workspace Search
+
+BM25 search across the workspace's Markdown files, run once per session on the first user turn. Relevant hits are injected into the system prompt as a `## Workspace-Referenzen` block so the model knows what's available and can pull the full file via the `files` skill before answering.
+
+```yaml
+workspace-search:
+  enabled: true
+  top_k: 5
+  min_score: 0.5            # relative to the best hit (0–1)
+  snippet_chars: 200
+  exclude_dirs: [memory, .git, .obsidian]
+  include_root_files: true
+```
+
+| Key | Description |
+|-----|-------------|
+| `enabled` | Default `true`. Set `false` to skip the search entirely. |
+| `top_k` | Maximum number of hits injected into the prompt. |
+| `min_score` | Score floor as a fraction of the best hit's score. |
+| `snippet_chars` | Characters of context shown next to each hit. |
+| `exclude_dirs` | Directories under `workspace/` to skip (always includes `memory/`). |
+| `include_root_files` | Include loose `.md` files at the workspace root in addition to `wiki/topics/` and `research/`. |
+
+The search prefers `rank_bm25` when installed; otherwise it falls back to a simple term-frequency scorer. Identity files (`soul.md`, `identity.md`, `user.md`, `memory.md`, `bootstrap.md`) and raw chat logs (`workspace/memory/`) are always excluded — the Dream Wiki under `workspace/wiki/topics/` is the distilled, searchable layer.
+
+## CalDAV (Radicale / Nextcloud sync)
+
+Optional sync between `workspace/calendar/*.md` (Full Calendar Markdown) and a CalDAV server such as the bundled Radicale instance in `radicale/`.
+
+```yaml
+caldav:
+  enabled: true
+  url: http://radicale:5232
+  username: pawlia
+  password: ${RADICALE_PASSWORD}
+  user_calendars:
+    cli_user: /pawlia/cli_user/main/
+    "@you:matrix.org": /pawlia/you/main/
+```
+
+| Key | Description |
+|-----|-------------|
+| `enabled` | Master switch. Default `false`. |
+| `url` | CalDAV root URL. |
+| `username` / `password` | Server credentials. |
+| `user_calendars` | Map PawLia user IDs to per-user CalDAV calendar paths. Events created/edited in `workspace/calendar/` are pushed; remote changes are pulled into the workspace. |
+
+The bundled Radicale Docker setup (`radicale/`) and Docker Compose service make the whole loop self-hostable.

@@ -9,8 +9,8 @@ while Hermes handles the live agent/tool execution.
 - Hermes keeps the active runtime context via its own API conversation state
 - PawLia still writes daily logs and thread logs
 - Dream Wiki, summaries, and later local PawLia sessions still see the visible conversation history
-- `/model` can switch `agents.chat` between normal PawLia-backed models and Hermes-backed models
-- `/agent` can override any session-local `agents:` path, including `default` and `skills.<name>`
+- `RouterAgent` dispatches each turn to the appropriate backend per thread (`backend: pawlia` → `ChatAgent`, `backend: hermes` → `HermesBackend`), so the main room and a thread can run on different backends at the same time
+- `/model <name>` swaps the active chat model; `/model <path> <name>` overrides any agent role for the current session/thread (`default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`)
 
 The backend is selected on the provider, not on the model.
 
@@ -46,8 +46,8 @@ agents:
   default: fast
 ```
 
-Then switch at runtime with `/model hermes` or back with `/model fast`.
-For the generalized session override system you can also use `/agent chat hermes` or `/agent default fast,hermes`.
+Then switch at runtime with `/model hermes` (shorthand for `chat`) or back with `/model fast`.
+For role-specific overrides use `/model chat hermes` or `/model default fast,hermes` — comma-separated values become a runtime failover chain.
 
 ## Conversation State
 

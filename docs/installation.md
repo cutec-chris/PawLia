@@ -55,20 +55,28 @@ Use this if you want to develop PawLia or run it without Docker.
 
 ### Steps
 
+PawLia is not packaged for `pip` — there is no `pyproject.toml`. Install the deps into a virtualenv and run via `PYTHONPATH=.`:
+
 ```bash
 # 1. Clone and install
 git clone https://github.com/your-org/pawlia.git
 cd pawlia
-pip install -e ".[all]"
+python -m venv .venv
+.venv/bin/pip install -r requirements.txt -c constraints.txt
+# Optional extras (only what you need):
+#   - VoIP / voice input:    pip install -r requirements-voip.txt
+#   - Test suite:            pip install -r requirements-test.txt
+#   - End-to-end tests:      pip install -r requirements-e2e.txt
 
 # 2. Configure
 cp config.sample.yaml config.yaml
-# Edit config.yaml
+# Edit config.yaml (or skip — when no models are configured PawLia auto-launches
+# the Web UI setup wizard at http://localhost:8080)
 
 # 3. Run
-python -m pawlia                  # interactive CLI
-python -m pawlia --mode server    # all server interfaces (Telegram, Matrix, Webhook)
-python -m pawlia --debug          # verbose logging
+PYTHONPATH=. .venv/bin/python -m pawlia                  # interactive CLI
+PYTHONPATH=. .venv/bin/python -m pawlia --mode server    # all configured interfaces
+PYTHONPATH=. .venv/bin/python -m pawlia --debug          # verbose logging
 ```
 
 > **Note:** In manual mode the agent can execute shell commands with the permissions of the running user. For production deployments, prefer Docker.
@@ -146,8 +154,33 @@ interfaces:
     homeserver: https://matrix.org
     user_id: "@yourbot:matrix.org"
     password: YOUR_PASSWORD
-  webhook:
+    always_thread: false            # if true, every reply lives in a thread
+    allowed_users: ["@you:matrix.org"]   # optional allow-list
+  web:
+    host: 0.0.0.0
     port: 8080
+    api_key: optional-bearer-token
+  webhook:
+    port: 8081
+  openai:
+    host: 127.0.0.1
+    port: 11435
+    api_key: optional-bearer-token  # exposes /v1/chat/completions and /api/chat
 ```
 
-All enabled interfaces run simultaneously in server mode.
+All enabled interfaces run simultaneously in server mode. The OpenAI-compatible interface mirrors both the OpenAI Chat Completions API and the Ollama `/api/chat` endpoint so tools like Continue.dev, OpenWebUI, and Cursor can connect to PawLia as if it were a generic LLM provider.
+
+### Other optional sections
+
+`config.sample.yaml` also documents these sections that are not required for a minimal install:
+
+| Section | Purpose |
+|---------|---------|
+| `transcription` | Whisper STT for voice messages and VoIP |
+| `tts` | Text-to-speech (Piper or edge-tts) |
+| `voip` | Matrix VoIP call settings (silence detection, barge-in) |
+| `caldav` | Sync workspace `calendar/*.md` events to a Radicale/Nextcloud server |
+| `workspace` / `workspace-git` | Per-user workspace template + auto-commit/squash |
+| `workspace-search` | BM25 search across workspace files for system-prompt injection |
+| `skill-config` | Per-skill runtime config (e.g. `memory.rag_backend`, `perplexica.url`) |
+| `skill-install` | Allow workspace-local skills (`allow_workspace: true`) |

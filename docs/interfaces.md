@@ -5,10 +5,10 @@ All interfaces share the same agent, memory, and skills. In server mode they all
 ## CLI
 
 ```bash
-python -m pawlia
+PYTHONPATH=. python -m pawlia
 ```
 
-Interactive terminal session. One session per run, identified as `cli_user`. Supports the full command set (`/thread`, `/model`, `/agent`, `/private`, `/reload`) and receives proactive notifications from the scheduler inline.
+Interactive terminal session. One session per run, identified as `cli_user`. Supports the full command set (`/thread`, `/model`, `/status`, `/background`, `/private`, `/reload`) and receives proactive notifications from the scheduler inline.
 
 Interrupt a running response with `Ctrl+C` — the current generation is cancelled and the prompt returns immediately.
 
@@ -28,11 +28,11 @@ interfaces:
 |------|-------|
 | Text | Plain messages and commands |
 | Photos | Sent to the vision agent; caption is used as the prompt |
-| Voice messages | Transcribed via the configured STT provider, then sent to the agent |
+| Voice messages | Transcribed via the configured STT provider, then sent to the agent. If the active model has `audio_input: true` (e.g. `gemma4:e4b`), audio is consumed natively without transcription. |
 
 ### Threads (forum topics)
 
-Each forum topic gets its own isolated context window. The first message in a topic is seeded with the last 5 exchanges from the main conversation. Thread history is logged separately and does not appear in the main conversation log. Agent overrides can be set per-thread independently.
+Each forum topic gets its own isolated context window — a clean slate, no seeding from the main conversation. Thread history is logged separately and does not appear in the main conversation log. Model and agent overrides apply per-thread independently.
 
 ### Commands
 
@@ -42,7 +42,8 @@ See [commands.md](commands.md) for the full reference. Quick overview:
 |---------|--------|
 | `/thread <msg>` | Run message in a new isolated thread context, reply in-thread |
 | `/model [name]` | Show or switch the active chat model for this context |
-| `/agent [path] [value]` | Show or override session/thread-local `agents:` paths |
+| `/model <path> <name>` | Override a specific agent role (`chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`, `default`) |
+| `/status` | Show session status (active model, idle, exchange count, threads) |
 | `/private` | Toggle private mode (threads only) |
 | `/reload` | Reload config, models, bundled skills, and scheduler settings |
 | `/background <msg>` | Queue a message for deferred background processing |
@@ -62,6 +63,8 @@ interfaces:
     user_id: "@yourbot:matrix.org"
     password: YOUR_PASSWORD
     # access_token: OR_USE_THIS_INSTEAD_OF_PASSWORD
+    # allowed_users: ["@you:matrix.org"]   # optional allow-list
+    # always_thread: false                  # see below
 ```
 
 ### Supported input types
@@ -70,7 +73,7 @@ interfaces:
 |------|-------|
 | Text | Plain messages and `//`-prefixed commands |
 | Images | Sent to the vision agent; message body is used as caption |
-| Voice messages | Transcribed and forwarded to the agent |
+| Voice messages | Transcribed and forwarded to the agent (or consumed natively if the model has `audio_input: true`) |
 | VoIP calls | Full duplex voice calls (requires `aiortc`; see VoIP section) |
 
 ### Threads
@@ -95,10 +98,12 @@ Commands use `//` as prefix instead of `/`:
 |---------|--------|
 | `//thread <msg>` | Respond as a Matrix thread reply (proper `m.thread` relation) |
 | `//model [name]` | Show or switch the active chat model |
-| `//agent [path] [value]` | Show or override room/thread-local `agents:` paths |
+| `//model <path> <name>` | Override a specific agent role for the room/thread |
+| `//status` | Show session status |
 | `//private` | Toggle private mode (thread replies only) |
 | `//reload` | Reload config, models, bundled skills, and scheduler settings |
 | `//background <msg>` | Queue a message for deferred background processing |
+| `//clear` | Clear the in-memory conversation context (daily log on disk is kept) |
 
 ### VoIP (optional)
 
@@ -112,7 +117,9 @@ interfaces:
 
 voip:
   call_inactivity_seconds: 180
+  silence_seconds: 2.2
   silence_threshold: 0.018
+  bargein_rms_threshold: 0.05
   agc_window_seconds: 15.0
   agc_target_rms: 0.10
   agc_max_gain: 12.0
@@ -140,27 +147,29 @@ While the agent is processing (thinking / skill execution), a hold audio loop is
 
 ## Web Interface
 
-A browser-based UI with chat, provider/model management, and skill administration. Always active in server mode.
+A browser-based UI with chat, provider/model management, skill administration, and a memory graph viewer. Always launched when no models are configured (first-run setup wizard); otherwise opt-in via `interfaces.web`.
 
 ```yaml
 interfaces:
-  web:                    # optional — works without config
+  web:
     host: 0.0.0.0
     port: 8888
     # token: OPTIONAL_FIXED_TOKEN
 ```
 
-On startup a random access token is printed to the console. Enter it in the browser to authenticate. Sessions are cookie-based (7 days).
+On startup a random access token is printed to the console unless `token:` is set. Enter it in the browser to authenticate. Sessions are cookie-based (7 days).
 
 ### Features
 
 | Feature | Description |
 |---------|-------------|
 | Chat | Full chat with the agent, supports `/` commands |
+| Setup wizard | First-run: pick provider, pull model, configure interfaces |
 | Providers | View and edit provider config (API base, key, timeout) |
-| Models | View and edit model definitions |
-| Skills | List all skills, upload new ones (ZIP from ClawHub), configure skill settings, delete user skills |
-| Settings | Edit interface, TTS, and transcription config (e.g. `always_thread`, `hold_audio`, STT provider) |
+| Models | View and edit model definitions (incl. `context_size`, `max_tool_turns`, `summarize_at_tokens`) |
+| Skills | List all skills, upload new ones (ZIP), configure skill settings, delete user skills |
+| Settings | Edit interface, TTS, transcription, VoIP, workspace-git config |
+| Memory | Browse per-user memory state and the Dream Wiki graph |
 
 ### Commands
 
@@ -170,6 +179,7 @@ Commands use `/` as prefix (same as CLI/Telegram):
 |---------|--------|
 | `/status` | Show session status |
 | `/model [name]` | Show or switch the active model |
+| `/model <path> <name>` | Override a specific agent role |
 | `/private` | Toggle private mode |
 | `/reload` | Reload config, models, bundled skills, and scheduler settings |
 | `/thread <msg>` | Start a new isolated thread context |
@@ -180,19 +190,42 @@ Commands use `/` as prefix (same as CLI/Telegram):
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Web UI (single-page app) |
-| `POST` | `/api/auth` | Authenticate with token |
+| `GET` | `/health` | Health check |
+| `POST` | `/api/auth` | Authenticate with token, set session cookie |
+| `POST` | `/api/logout` | Drop the session cookie |
 | `POST` | `/api/chat` | Send a message |
 | `GET` | `/api/notifications` | Poll for scheduler notifications |
-| `GET/POST` | `/api/providers` | Read/write provider config |
-| `GET/POST` | `/api/models` | Read/write model config |
+| `GET` / `POST` | `/api/providers` | Read/write provider config |
+| `GET` / `POST` | `/api/models` | Read/write model config |
 | `GET` | `/api/skills` | List all skills |
 | `POST` | `/api/skills/upload` | Upload a skill ZIP |
 | `DELETE` | `/api/skills/{name}` | Delete a user skill |
-| `GET/POST` | `/api/skill-config` | Read/write skill configuration |
+| `GET` / `POST` | `/api/skill-config` | Read/write skill configuration |
+| `GET` / `POST` | `/api/settings` | Read/write interface / TTS / transcription / workspace-git config |
+| `GET` | `/api/setup-status` | Whether the bootstrap wizard still has work to do |
+| `POST` | `/api/setup/auto` | Auto-detect provider, pull a default model, write config |
+| `GET` | `/api/memory/users` | List users with persisted memory |
+| `GET` | `/api/memory/graph` | Memory / Dream Wiki graph data for the viewer |
 
 ### Skill Upload
 
 Upload a ZIP file containing a skill directory with a `SKILL.md`. The ZIP can have the skill files at the root or nested one level deep. After upload, dependencies declared in `requirements.txt` inside the skill are installed automatically. A restart is required for the skill to become active.
+
+## OpenAI-compatible API
+
+Exposes PawLia under the OpenAI Chat Completions schema (`POST /v1/chat/completions`, `GET /v1/models`) and the Ollama schema (`POST /api/chat`, `GET /api/tags`, `GET /api/version`). External tools like Continue.dev, OpenWebUI, and Cursor can connect to PawLia as if it were a generic LLM provider — every turn still goes through the local agent stack, so skills, memory, and the scheduler all stay active.
+
+```yaml
+interfaces:
+  openai:
+    host: 127.0.0.1
+    port: 11435
+    api_key: optional-bearer-token    # if set, clients must send Authorization: Bearer <key>
+```
+
+User identity is taken from the `X-User-Id` header. If absent, a single shared default user is used — usually fine for solo desktops, less appropriate for shared multi-tenant setups. Streaming is supported.
+
+This interface has no notification channel (the protocol is stateless), so scheduler-triggered messages are silently dropped while a client is connected only via the OpenAI API.
 
 ## Webhook
 
@@ -237,9 +270,11 @@ Optionally include `"thread_id"` to route the message into a thread context.
 Each user gets an isolated session:
 
 - **Telegram**: one session per Telegram user ID (`tg_<id>`)
-- **Matrix**: one session per room (`mx_<room_id>`)
+- **Matrix**: one session per Matrix sender (`mx_<sanitized_mxid>`), not per room — the same `@you:matrix.org` keeps one session across rooms
+- **Web**: one session per cookie-authenticated user
 - **CLI**: single session (`cli_user`)
 - **Webhook**: one session per `user_id` in the request body
+- **OpenAI-compatible**: one session per `X-User-Id` header value (or a single default user if absent)
 
 Sessions are persisted to disk as Markdown files under `session/<user_id>/` and expire from RAM after inactivity. Memory, identity files, skills, and workspace are shared across threads within a session.
 
@@ -249,11 +284,13 @@ A background task runs every 60 seconds and checks for due items. Work is split 
 
 ### High priority (every tick)
 
-- **Due reminders** set via the built-in reminder tool (supports daily / weekly / monthly recurrence)
-- **Upcoming calendar events** from the organizer skill (notified 15 minutes before start)
+- **Due reminders** from `workspace/tasks.md` (lines tagged 🔔 with ⏳ scheduled times; supports daily / weekly / monthly recurrence)
+- **Upcoming calendar events** from `workspace/calendar/*.md` (one file per event with Full Calendar frontmatter; notified 15 minutes before start)
 - **Event checklists** — script-based automation tied to events
 - **Task reminders** — reminders attached to tasks with due dates
-- **Scheduled jobs** — cron-like recurring automation scripts
+- **Scheduled jobs** — cron-like recurring automation scripts in `automations/jobs.json`
+- **Token-forced summarization** — when the conversation history exceeds 1.5× the per-model token threshold, summarize immediately (bypasses the idle gate)
+- **Exchange-count-forced summarization** — when `exchange_count ≥ 30`, summarize immediately
 
 ### Low priority (idle-based)
 
@@ -261,9 +298,11 @@ Low-priority tasks use per-user idle time as their priority. Each task type has 
 
 | Idle (min) | Task | Description |
 |------------|------|-------------|
-| 5 | **Summarization** | Summarize the conversation when exchange limit, repetition, or idle trigger fires |
+| 5 | **Summarization** | Soft trigger when token threshold reached, exchange limit hit, or repetition detected |
 | 10 | **Background tasks** | Deferred `agent.run()` calls queued via `/background` |
-| 20 | **Memory indexing** | LightRAG knowledge graph indexing of conversation logs |
+| 20 | **Memory indexing** | RAG backend (markdown / lightrag / simple / mem0) indexing of conversation logs |
+
+The token threshold per model resolves to `summarize_at_tokens` (absolute) or `summarize_at_fraction × context_size` (default fraction 0.6). See [config.md](config.md#auto-summarization-threshold).
 
 Tasks are processed per-user: if Alice is idle for 10 minutes but Bob just sent a message, Alice's background tasks will still run (as long as the LLM is free).
 
@@ -271,4 +310,4 @@ Tasks are processed per-user: if Alice is idle for 10 minutes but Bob just sent 
 
 Chat requests have priority over all background work. Each interface calls `acquire_llm()` / `release_llm()` around `agent.run()` calls. While any chat request is active, all low-priority tasks are deferred. Between each low-priority task, the scheduler re-checks `llm_busy` before proceeding.
 
-Notifications are delivered through the active interface. For Webhook, they are buffered and returned on the next `GET /notifications` poll.
+Notifications are delivered through the active interface. For Webhook, they are buffered and returned on the next `GET /notifications` poll. The OpenAI-compatible interface has no notification channel.

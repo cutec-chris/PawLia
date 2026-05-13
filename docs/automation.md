@@ -231,13 +231,17 @@ Suggested reminder defaults by priority:
 
 For recurring automated tasks the LLM registers a natural-language instruction as a job. Jobs are stored in `automations/jobs.json` (outside the workspace) since they are scheduler-internal automation config. When due, the instruction runs through the normal agent pipeline, including skills.
 
+Job CRUD lives in the dedicated **`automation`** skill (it used to be part of `organizer`).
+
 ### Workflow
 
 1. User: *"Erstelle mir jeden Tag um 16 Uhr eine Zusammenfassung"*
-2. LLM registers the instruction via organizer:
+2. LLM registers the instruction via the `automation` skill:
 
 ```bash
-python organizer.py add-job --name "Tagesbericht" --instruction "Erstelle eine kurze Tageszusammenfassung" --schedule "16:00"
+python <scripts_dir>/automation.py add-job --name "Tagesbericht" \
+    --instruction "Erstelle eine kurze Tageszusammenfassung" \
+    --schedule "16:00"
 ```
 
 3. Every day at 16:00, the scheduler runs the instruction through the normal agent/skill dispatcher and sends the output as notification.
@@ -409,26 +413,27 @@ The LLM receives the raw data and the user's context (memory, preferences) to pr
 
 ```
 session/<user>/
-├── workspace/                      # Obsidian vault
-│   ├── calendar/                   # Full Calendar plugin events
-│   │   ├── 2026-03-21 Meeting.md   # one .md per event
+├── workspace/                       # Obsidian vault
+│   ├── calendar/                    # Full Calendar plugin events
+│   │   ├── 2026-03-21 Meeting.md    # one .md per event
 │   │   └── 2026-03-22 Standup.md
-│   ├── tasks.md                    # Obsidian Tasks emoji format
-│   ├── wiki/                       # Dream Wiki knowledge base
+│   ├── tasks.md                     # Obsidian Tasks emoji format (incl. reminders)
+│   ├── wiki/                        # Dream Wiki knowledge base
 │   │   ├── index.md
 │   │   ├── log.md
 │   │   └── topics/
-│   ├── memory/                     # Daily chat logs
-│   ├── soul.md / IDENTITY.md / ... # Identity files
-│   └── skills/                     # Workspace skills
-├── scheduler_state.json            # Internal: notified/fired/checklist state
+│   ├── memory/                      # Daily chat logs + memory.md + context_summary.md
+│   ├── research/                    # Per-project document collections (researcher skill)
+│   ├── soul.md / identity.md / user.md / memory.md / bootstrap.md  # Identity files
+│   └── skills/                      # Optional workspace-local skills
+├── scheduler_state.json             # Internal: notified/fired/checklist state
 ├── automations/
-│   ├── jobs.json                   # Scheduled job definitions
-├── background_tasks/
-│   └── <task_id>.json
-└── memory_index/                   # RAG backend index
+│   └── jobs.json                    # Scheduled job definitions (automation skill)
+└── memory_index/                    # RAG backend index (outside the vault)
     └── dreamed_files.json
 ```
+
+`/background` tasks are kept inside `automations/` alongside the jobs file — there is no separate `background_tasks/` directory.
 
 ## Related modules
 
