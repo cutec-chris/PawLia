@@ -11,8 +11,11 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 _HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)$", re.MULTILINE)
+_HEADING_LINE_RE = re.compile(r"^#{1,6}\s+(.+?)$")
 _WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 _FRONTMATTER_RE = re.compile(r"^---\s*\n.*?\n---\s*\n", re.DOTALL)
+_PARAGRAPH_SPLIT_RE = re.compile(r"\n{2,}")
+_WORD_RE = re.compile(r"\w+")
 
 _SUBSTANTIVE_MIN_WORDS = 4
 _PARAGRAPH_SPLIT_THRESHOLD = 300  # split headingless sections longer than this into paragraphs
@@ -141,7 +144,7 @@ class WorkspaceSearch:
                 return
             if not current_heading and len(body) > _PARAGRAPH_SPLIT_THRESHOLD:
                 # Flat file: split into paragraph chunks so BM25 scores individual facts
-                for para in re.split(r"\n{2,}", body):
+                for para in _PARAGRAPH_SPLIT_RE.split(body):
                     para = para.strip()
                     if para:
                         sections.append(_Section(path=path, heading="", body=para))
@@ -149,7 +152,7 @@ class WorkspaceSearch:
                 sections.append(_Section(path=path, heading=current_heading, body=body))
 
         for line in lines:
-            m = re.match(r"^#{1,6}\s+(.+?)$", line)
+            m = _HEADING_LINE_RE.match(line)
             if m:
                 flush()
                 current_heading = m.group(1).strip()
@@ -165,7 +168,7 @@ class WorkspaceSearch:
 
     @staticmethod
     def _tokenize(text: str) -> List[str]:
-        return re.findall(r"\w+", text.lower())
+        return _WORD_RE.findall(text.lower())
 
     def _bm25_search(self, query: str, sections: List[_Section]) -> List[SearchHit]:
         try:
@@ -302,10 +305,15 @@ class WorkspaceSearch:
         if len(text) <= self.snippet_chars:
             return text
         if query_tokens:
-            lines = [l.strip() for l in text.splitlines() if l.strip()]
-            if lines:
-                best = max(lines, key=lambda l: len(query_tokens & set(re.findall(r"\w+", l.lower()))))
-                if any(t in re.findall(r"\w+", best.lower()) for t in query_tokens):
+            scored_lines = [
+                (l.strip(), set(_WORD_RE.findall(l.lower())))
+                for l in text.splitlines() if l.strip()
+            ]
+            if scored_lines:
+                best, best_tokens = max(
+                    scored_lines, key=lambda lt: len(query_tokens & lt[1])
+                )
+                if query_tokens & best_tokens:
                     if len(best) <= self.snippet_chars:
                         return best
                     return best[: self.snippet_chars].rstrip() + "…"

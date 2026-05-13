@@ -32,6 +32,12 @@ SIMILARITY_WINDOW = 4  # compare last N bot responses
 IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
 SESSION_FORMAT_VERSION = 2
 
+_EXCHANGE_PATTERN = re.compile(
+    r"\[[\d:]+\]\s*User:\s*(.*?)\nAssistant:\s*(.*?)(?=\n\[[\d:]+\]\s*User:|\Z)",
+    re.DOTALL,
+)
+_TOOL_CALL_PATTERN = re.compile(r'<!--\s*TOOL_CALL:\s*(\{.*?\})\s*-->', re.DOTALL)
+
 
 class Session:
     def __init__(self, user_id: str):
@@ -518,20 +524,13 @@ class MemoryManager:
             Assistant: ...
             <!-- TOOL_CALL: {"name": "...", "args": {...}, "result": "..."} -->
         """
-        pattern = re.compile(
-            r"\[[\d:]+\]\s*User:\s*(.*?)\nAssistant:\s*(.*?)(?=\n\[[\d:]+\]\s*User:|\Z)",
-            re.DOTALL,
-        )
-
         exchanges: List[Tuple[str, str, Optional[List[Dict[str, Any]]]]] = []
-        for m in pattern.finditer(history):
+        for m in _EXCHANGE_PATTERN.finditer(history):
             user_text = m.group(1).strip()
             bot_text = m.group(2).strip()
 
-            # Parse tool call comments from bot_text
             tool_calls_info = None
-            tool_pattern = re.compile(r'<!--\s*TOOL_CALL:\s*(\{.*?\})\s*-->', re.DOTALL)
-            tool_matches = tool_pattern.findall(bot_text)
+            tool_matches = _TOOL_CALL_PATTERN.findall(bot_text)
 
             if tool_matches:
                 tool_calls_info = []
@@ -745,7 +744,7 @@ class MemoryManager:
                 os.remove(path)
             return False
         session.private_threads.add(thread_id)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("")
         return True
 
@@ -754,7 +753,7 @@ class MemoryManager:
         session.private = not session.private
         path = self._private_session_path(session.user_id)
         if session.private:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write("")
         elif os.path.isfile(path):
             os.remove(path)
