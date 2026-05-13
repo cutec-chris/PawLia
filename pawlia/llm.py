@@ -112,6 +112,13 @@ def estimate_max_tool_turns(model_name: str) -> int:
 # which silently truncates prompts — picking a sane per-model default avoids
 # that footgun. Frontier APIs get their published windows; local models map
 # to the typical native context for that family.
+# Default fraction of the context window at which we trigger summarization.
+# Leaves headroom for the summary call itself (system prompt, prior summary
+# included as input, the conversation being summarized) and ~5 recent
+# exchanges that survive untouched.
+DEFAULT_SUMMARIZE_FRACTION = 0.6
+
+
 _CTX_BY_FAMILY: List[Tuple[Tuple[str, ...], int]] = [
     # Tested in order — first match wins.
     (("claude", "gpt-4", "gpt-5", "gemini-", "o1-", "o3-"), 200_000),
@@ -453,6 +460,33 @@ class LLMFactory:
                 return explicit
         model_id = str(cfg.get("model") or model_name)
         return estimate_context_size(model_id)
+
+    def summary_threshold_tokens(self, model_name: str) -> int:
+        """Return the token threshold above which the conversation should
+        be summarized.
+
+        Priority:
+        1. explicit ``summarize_at_tokens`` in the model config (absolute)
+        2. ``summarize_at_fraction`` × context_size (per-model fraction)
+        3. ``DEFAULT_SUMMARIZE_FRACTION`` × context_size
+
+        The fraction default leaves headroom for the summary call itself
+        plus a few user turns of recent exchanges.
+        """
+        cfg = self.get_model_config(model_name)
+
+        explicit = cfg.get("summarize_at_tokens")
+        if isinstance(explicit, int) and explicit > 0:
+            return explicit
+
+        fraction = cfg.get("summarize_at_fraction")
+        if not isinstance(fraction, (int, float)) or fraction <= 0:
+            fraction = DEFAULT_SUMMARIZE_FRACTION
+        # Cap fraction at 0.95 so we never bump right up against the window.
+        fraction = min(float(fraction), 0.95)
+
+        ctx = self.context_size_for_model(model_name)
+        return max(1, int(ctx * fraction))
 
     def default_model_name(
         self,

@@ -305,6 +305,21 @@ class Scheduler:
         last = self._last_activity.get(user_id, self._boot_time)
         return (now - last) / 60.0
 
+    def _summary_threshold_for(self, session: Any) -> int:
+        """Resolve the per-session token threshold for summarization.
+
+        Honors per-session model overrides so a `/model claude-opus`
+        switch immediately picks up that model's threshold.
+        """
+        if not self._app or not self._app.llm:
+            return 0
+        try:
+            overrides = self._app.memory.effective_agent_overrides(session, None)
+            model_name = self._app.llm.default_model_name("chat", agent_overrides=overrides)
+            return self._app.llm.summary_threshold_tokens(model_name)
+        except Exception:
+            return 0
+
     async def _check_all(self) -> None:
         if not os.path.isdir(self.session_dir):
             return
@@ -339,7 +354,7 @@ class Scheduler:
                 except Exception as e:
                     logger.error("Job processing failed for %s: %s", user_id, e)
 
-        # ── Force-summarize when exchange count exceeds hard limit ──
+        # ── Force-summarize when exchange count or token budget exceeded ──
         if self._app and self._app.memory:
             from pawlia.memory import FORCE_SUMMARY_EXCHANGES
             for user_id in user_ids:
@@ -349,6 +364,13 @@ class Scheduler:
                         await self._summarize_user(user_id)
                     except Exception as e:
                         logger.error("Forced summarization failed for %s: %s", user_id, e)
+                    continue
+                threshold = self._summary_threshold_for(session)
+                if threshold and self._app.memory.should_summarize(session, threshold) == "tokens_force":
+                    try:
+                        await self._summarize_user(user_id)
+                    except Exception as e:
+                        logger.error("Token-forced summarization failed for %s: %s", user_id, e)
 
         # ── Low priority (idle-based) ──
         for user_id in user_ids:
@@ -443,7 +465,8 @@ class Scheduler:
         memory = self._app.memory
         session = memory.load_session(user_id)
 
-        reason = memory.should_summarize(session)
+        threshold = self._summary_threshold_for(session)
+        reason = memory.should_summarize(session, threshold)
         if not reason:
             return
 

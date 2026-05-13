@@ -431,3 +431,58 @@ def test_context_size_in_cache_key_triggers_rebuild():
     key_default = factory._cache_key(config["models"]["m1"])
     key_explicit = factory._cache_key({**config["models"]["m1"], "context_size": 16384})
     assert key_default != key_explicit
+
+
+# ---------------------------------------------------------------------------
+# summary_threshold_tokens
+# ---------------------------------------------------------------------------
+
+def test_summary_threshold_default_fraction():
+    config = _base_config()
+    config["models"]["m1"] = {"model": "qwen3:14b", "provider": "test"}
+    factory = LLMFactory(config)
+    # qwen3:14b → ctx 32768, default 0.6 → 19660
+    assert factory.summary_threshold_tokens("m1") == int(32_768 * 0.6)
+
+
+def test_summary_threshold_explicit_tokens_overrides_fraction():
+    config = _base_config()
+    config["models"]["m1"] = {
+        "model": "claude-opus-4-7", "provider": "test",
+        "summarize_at_tokens": 8000,
+        "summarize_at_fraction": 0.9,  # would imply 180K — absolute wins
+    }
+    factory = LLMFactory(config)
+    assert factory.summary_threshold_tokens("m1") == 8000
+
+
+def test_summary_threshold_custom_fraction():
+    config = _base_config()
+    config["models"]["m1"] = {
+        "model": "qwen3.5:latest", "provider": "test",
+        "summarize_at_fraction": 0.4,
+    }
+    factory = LLMFactory(config)
+    # qwen3.5 → ctx 32768, 0.4 → 13107
+    assert factory.summary_threshold_tokens("m1") == int(32_768 * 0.4)
+
+
+def test_summary_threshold_caps_fraction_at_0_95():
+    config = _base_config()
+    config["models"]["m1"] = {
+        "model": "unknown-model:7b", "provider": "test",
+        "summarize_at_fraction": 1.5,
+    }
+    factory = LLMFactory(config)
+    # unknown-model:7b → size fallback ctx 8192; 1.5 capped to 0.95 → 7782
+    assert factory.summary_threshold_tokens("m1") == int(8192 * 0.95)
+
+
+def test_summary_threshold_invalid_fraction_falls_back_to_default():
+    config = _base_config()
+    config["models"]["m1"] = {
+        "model": "unknown-model:7b", "provider": "test",
+        "summarize_at_fraction": -0.5,
+    }
+    factory = LLMFactory(config)
+    assert factory.summary_threshold_tokens("m1") == int(8192 * 0.6)

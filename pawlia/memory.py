@@ -32,6 +32,30 @@ SIMILARITY_WINDOW = 4  # compare last N bot responses
 IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
 SESSION_FORMAT_VERSION = 2
 
+# Cheap token estimate — 1 token ≈ 4 chars for mixed German/English text.
+# Avoids loading tiktoken on every scheduler tick.
+_CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text: str) -> int:
+    """Approximate token count for *text* using a char-based heuristic.
+
+    Coarse but fast — good enough for trigger thresholds. Real tokenizers
+    are 10-20× slower and would dominate the scheduler tick.
+    """
+    if not text:
+        return 0
+    return (len(text) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+
+
+def estimate_session_tokens(session: "Session") -> int:
+    """Rough token footprint of the model context built from a Session."""
+    return (
+        estimate_tokens(session.summary)
+        + estimate_tokens(session.daily_history)
+        + estimate_tokens(session.user_memory)
+    )
+
 _EXCHANGE_PATTERN = re.compile(
     r"\[[\d:]+\]\s*User:\s*(.*?)\nAssistant:\s*(.*?)(?=\n\[[\d:]+\]\s*User:|\Z)",
     re.DOTALL,
@@ -982,15 +1006,31 @@ class MemoryManager:
     # Summarization
     # ------------------------------------------------------------------
 
-    def should_summarize(self, session: Session) -> str:
+    def should_summarize(
+        self,
+        session: Session,
+        summary_threshold_tokens: Optional[int] = None,
+    ) -> str:
         """Check whether conversation should be summarized.
 
         Returns the trigger reason (empty string = no summary needed).
-        The scheduler gates most triggers behind its own idle check
-        (IDLE_SUMMARIZE_MIN); only "force" bypasses that gate.
+        The scheduler gates most "soft" triggers behind its own idle check
+        (IDLE_SUMMARIZE_MIN); "force" / "tokens_force" bypass that gate.
+
+        ``summary_threshold_tokens`` (if provided) enables token-based
+        triggering against the model's context window:
+        - reaching the threshold returns "tokens"
+        - reaching 1.5× the threshold returns "tokens_force" (bypasses idle)
         """
         if session.exchange_count >= FORCE_SUMMARY_EXCHANGES:
             return "force"
+
+        if summary_threshold_tokens and summary_threshold_tokens > 0:
+            tokens = estimate_session_tokens(session)
+            if tokens >= summary_threshold_tokens * 3 // 2:
+                return "tokens_force"
+            if tokens >= summary_threshold_tokens:
+                return "tokens"
 
         if session.exchange_count >= MAX_EXCHANGES_BEFORE_SUMMARY:
             return "exchange_limit"

@@ -97,6 +97,8 @@ models:
 | `think` | Enable chain-of-thought / extended thinking (optional) |
 | `max_tool_turns` | Tool-call budget for SkillRunner loops (optional, positive int). Overrides the size-based heuristic. Skill-level `metadata.max_tool_turns` in a `SKILL.md` still wins over this. |
 | `context_size` | Context window in tokens (optional, positive int). For Ollama backends this becomes `num_ctx` — set explicitly to avoid the silent 2048-token default. Set to `0` to keep Ollama's own default. Alias: `num_ctx`. |
+| `summarize_at_tokens` | Absolute token threshold above which conversation history gets summarized (optional, positive int). Overrides `summarize_at_fraction`. |
+| `summarize_at_fraction` | Fraction of `context_size` at which to summarize (optional, 0 < x ≤ 0.95). Default: 0.6 — leaves headroom for the summary call plus the recent exchanges that survive untouched. |
 
 The model itself does not choose the backend. The backend comes from the referenced provider.
 
@@ -132,6 +134,33 @@ models:
     model: phi3:mini
     provider: ollama
     context_size: 0              # explicitly keep Ollama's own default
+```
+
+### Auto-summarization threshold
+
+PawLia summarizes the conversation when the daily history grows large enough that the next system-prompt build would blow the context budget. The threshold is per-model:
+
+- `summarize_at_tokens: <n>` — absolute trigger. Wins over the fraction.
+- `summarize_at_fraction: <0…0.95>` — fraction of `context_size`. Default `0.6`.
+
+Two trigger strengths:
+- **soft** (`tokens`): summarizes during the regular idle window — same as the exchange-count limit today.
+- **force** (`tokens_force`): at 1.5× the threshold the scheduler summarizes immediately, bypassing the idle gate.
+
+Why the absolute knob matters: with `claude-opus` (200K context) the default `0.6` fraction means ~120K tokens accumulate before a summary fires. That can get expensive on metered APIs. Set `summarize_at_tokens: 8000` to fold the conversation early and keep prompt cost predictable:
+
+```yaml
+models:
+  cheap-claude:
+    model: claude-opus-4-7
+    provider: anthropic
+    context_size: 200000
+    summarize_at_tokens: 8000    # never let the prompt grow past ~8K tokens
+  local-big:
+    model: qwen3.5:latest
+    provider: ollama
+    context_size: 32768
+    summarize_at_fraction: 0.4   # ~13K tokens — earlier than the 0.6 default
 ```
 
 ## Agents
