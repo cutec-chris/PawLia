@@ -166,8 +166,11 @@ class App:
             skill_config_root = self.config.get("skill-config") or {}
             skill_cfg = skill_config_root.get(skill.name, {})
             agent_overrides = self.memory.effective_agent_overrides(session, thread_id)
+            agent_type = f"skill.{skill.name}"
+            model_name = self.llm.default_model_name(agent_type, agent_overrides=agent_overrides)
+            max_tool_turns = self.llm.max_tool_turns_for_model(model_name)
             return SkillRunnerAgent(
-                llm=self.llm.get(f"skill.{skill.name}", agent_overrides=agent_overrides),
+                llm=self.llm.get(agent_type, agent_overrides=agent_overrides),
                 skill=skill,
                 tool_registry=self.tools,
                 context={
@@ -177,6 +180,7 @@ class App:
                     "session": session,
                     "config_path": self.config_path,
                 },
+                max_tool_turns=max_tool_turns,
             )
 
         def refresh_user_skills() -> None:

@@ -95,8 +95,44 @@ models:
 | `provider` | Key from `providers:` |
 | `temperature` | Sampling temperature |
 | `think` | Enable chain-of-thought / extended thinking (optional) |
+| `max_tool_turns` | Tool-call budget for SkillRunner loops (optional, positive int). Overrides the size-based heuristic. Skill-level `metadata.max_tool_turns` in a `SKILL.md` still wins over this. |
+| `context_size` | Context window in tokens (optional, positive int). For Ollama backends this becomes `num_ctx` — set explicitly to avoid the silent 2048-token default. Set to `0` to keep Ollama's own default. Alias: `num_ctx`. |
 
 The model itself does not choose the backend. The backend comes from the referenced provider.
+
+### SkillRunner tool-call budget
+
+When a skill spawns the SkillRunner, the agent loops up to `max_tool_turns` times calling tools before it must produce a final answer. Without an explicit value PawLia estimates one from the model identifier — frontier APIs (`gpt-oss`, `claude`, `gpt-4/5`, `gemini`, `deepseek-r1/v3`) get 40 turns, large local models (`:120b`, `:70b`) also 40, smaller models scale down (`:14b` → 22, `:7b` → 16, `:4b` → 12, `:2b` → 8). Override per model with `max_tool_turns: <n>` in the `models:` block when the heuristic misses (e.g. a small model fine-tuned for tool use).
+
+### Context window (`context_size` / `num_ctx`)
+
+Ollama defaults `num_ctx` to **2048 tokens** for every model regardless of native capability — long prompts get silently truncated. PawLia picks a per-model default from a name-based heuristic:
+
+| Family / hint | Default context |
+|---|---|
+| `claude`, `gpt-4`, `gpt-5`, `gemini-`, `o1-`, `o3-` | 200 000 |
+| `gpt-oss`, `deepseek-r1`, `deepseek-v3`, `llama-3.3` | 128 000 |
+| `llama-4` | 1 000 000 |
+| `qwen3.5*`, `qwen3:*`, `qwen3-*` | 32 768 |
+| `gemma3*`, `gemma4*` | 8 192 |
+| `llama3.1`, `llama3.2`, `llama3:*` | 8 192 |
+| `phi3`, `phi4` | 16 384 |
+| Size-based fallback (`:70b` → 32 768, `:14b` → 16 384, `:7b` → 8 192, `:3b` → 4 096, `<3b` → 2 048) | — |
+| Unknown | 8 192 |
+
+Override per model:
+
+```yaml
+models:
+  big-context-qwen:
+    model: qwen3.5:latest
+    provider: ollama
+    context_size: 65536          # bump beyond the heuristic
+  legacy:
+    model: phi3:mini
+    provider: ollama
+    context_size: 0              # explicitly keep Ollama's own default
+```
 
 ## Agents
 
