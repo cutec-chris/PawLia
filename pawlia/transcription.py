@@ -428,7 +428,6 @@ async def transcribe_pcm(
 
     import numpy as np
 
-    pcm_float32 = _preprocess_pcm_for_stt(pcm_float32, sample_rate, config)
     pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)
 
     buf = io.BytesIO()
@@ -585,8 +584,6 @@ async def transcribe_pcm_via_model(
     import wave
 
     import numpy as np
-
-    pcm_float32 = _preprocess_pcm_for_stt(pcm_float32, sample_rate)
 
     # Resample to 16 kHz if needed — Ollama audio models require it
     if sample_rate != _MODEL_AUDIO_RATE:
