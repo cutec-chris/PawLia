@@ -35,7 +35,7 @@ _TOPIC_SHIFT_THRESHOLD = 0.15  # overlap fraction below which we treat it as a n
 _DEFAULT_TOP_K = 5
 _DEFAULT_MIN_SCORE = 0.5  # fraction of best hit (0–1 normalized)
 _DEFAULT_SNIPPET_CHARS = 150
-_DEFAULT_EXCLUDE_DIRS = {"memory"}
+_DEFAULT_EXCLUDE_DIRS = {"memory", "skills"}
 _IDENTITY_FILES = frozenset(
     {"bootstrap.md", "identity.md", "user.md", "soul.md", "memory.md"}
 )
