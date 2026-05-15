@@ -133,17 +133,22 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
     read_query = _read_query_for(user_query)
     lines = [
         "## Workspace Notes Available",
-        "The user's workspace contains files relevant to this turn. Headings "
-        "below tell you what each file covers; **read the file with `files "
-        "read` before making any claim about its topic** — your training data "
-        "may be outdated or wrong for the user's domain.",
+        "These wiki files were keyword-matched against the user's recent "
+        "message. They are *suggestions*, not proof of relevance: the match "
+        "may be coincidental (shared words, similar topic name) without "
+        "actually answering the user's question.",
         "",
         "**Rules:**",
-        "- If a heading below matches what the user is asking about, call "
-        "`files read` on that file before answering. Do not answer from memory.",
-        "- Quote facts from the read result, not from these headings.",
+        "- First decide whether the user is actually asking about one of these "
+        "topics. If the conversation is heading somewhere else (small talk, "
+        "follow-up, clarification, correction of an earlier mistake), ignore "
+        "these refs entirely.",
+        "- Only call `files read` if a heading clearly matches the user's "
+        "current question. When in doubt, ask the user before reading.",
+        "- Never weave content from these files into a reply unless you "
+        "actually read the file *and* it answers what was asked. Do not "
+        "invent a topic the user did not bring up.",
         "- Never invent a file path or heading that isn't listed here.",
-        "- If no heading matches the question, answer normally without reading.",
         "",
     ]
 

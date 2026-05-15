@@ -34,8 +34,45 @@ _TOPIC_SHIFT_THRESHOLD = 0.15  # overlap fraction below which we treat it as a n
 
 _DEFAULT_TOP_K = 5
 _DEFAULT_MIN_SCORE = 0.5  # fraction of best hit (0–1 normalized)
+_DEFAULT_MIN_RAW_SCORE = 1.5  # absolute BM25 score below which a "best hit" isn't a real match
 _DEFAULT_SNIPPET_CHARS = 150
 _DEFAULT_EXCLUDE_DIRS = {"memory", "skills"}
+
+# Stopwords stripped from BM25 queries. Without this, German filler words like
+# "warum", "vielen", "ja", "hast", "du", "die" can BM25-match unrelated wiki
+# entries that happen to contain those tokens, producing context-relevant hits
+# for what is actually small talk or follow-up speech. Stripped from queries
+# only — the corpus is left intact so explicit topic searches still work.
+_QUERY_STOPWORDS = frozenset({
+    # German function words / fillers
+    "der", "die", "das", "den", "dem", "des", "ein", "eine", "einen", "einem",
+    "einer", "eines", "und", "oder", "aber", "doch", "nicht", "nichts", "kein",
+    "keine", "keinen", "keinem", "keiner", "ist", "sind", "war", "waren",
+    "sein", "seine", "seinen", "habe", "hat", "hast", "haben", "hatte",
+    "hatten", "wird", "werden", "wurde", "wurden", "ich", "du", "er", "sie",
+    "es", "wir", "ihr", "mich", "mir", "dich", "dir", "uns", "euch", "ihn",
+    "ihm", "ihnen", "mein", "meine", "dein", "deine", "ihre", "ihrer", "ihres",
+    "auf", "in", "im", "an", "am", "zu", "zum", "zur", "von", "vom", "mit",
+    "bei", "nach", "vor", "über", "ueber", "unter", "durch", "für", "fuer",
+    "ohne", "gegen", "aus", "bis", "ab", "als", "wie", "wenn", "weil",
+    "dass", "ob", "so", "noch", "auch", "nur", "schon", "mal", "ja", "nein",
+    "doch", "wirklich", "echt", "vielen", "dank", "danke", "bitte", "okay",
+    "ok", "hä", "hae", "hmm", "naja", "halt", "eben", "sehr", "ganz", "viel",
+    "viele", "mehr", "weniger", "etwas", "irgendwas", "irgendwie", "irgendwo",
+    "warum", "weshalb", "wieso", "wer", "was", "wo", "wann", "welcher",
+    "welche", "welches", "wem", "wen",
+    # English function words
+    "the", "a", "an", "and", "or", "but", "not", "no", "is", "are", "was",
+    "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
+    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us",
+    "them", "my", "your", "his", "its", "our", "their", "of", "to", "in",
+    "on", "at", "by", "with", "from", "as", "if", "then", "so", "than",
+    "that", "this", "these", "those", "for", "about", "into", "through",
+    "during", "before", "after", "above", "below", "between", "yes", "thanks",
+    "thank", "please", "okay", "what", "where", "when", "why", "how", "who",
+    "which", "whom", "really", "very", "much", "many", "some", "any",
+})
+_MIN_QUERY_CONTENT_TOKENS = 1  # need ≥1 non-stopword token after filtering
 _IDENTITY_FILES = frozenset(
     {"bootstrap.md", "identity.md", "user.md", "soul.md", "memory.md"}
 )
@@ -72,6 +109,7 @@ class WorkspaceSearch:
         self.enabled: bool = bool(cfg.get("enabled", True))
         self.top_k: int = int(cfg.get("top_k", _DEFAULT_TOP_K))
         self.min_score: float = float(cfg.get("min_score", _DEFAULT_MIN_SCORE))
+        self.min_raw_score: float = float(cfg.get("min_raw_score", _DEFAULT_MIN_RAW_SCORE))
         self.snippet_chars: int = int(cfg.get("snippet_chars", _DEFAULT_SNIPPET_CHARS))
         self.exclude_dirs: frozenset = frozenset(
             cfg.get("exclude_dirs", _DEFAULT_EXCLUDE_DIRS)
@@ -170,23 +208,40 @@ class WorkspaceSearch:
     def _tokenize(text: str) -> List[str]:
         return _WORD_RE.findall(text.lower())
 
+    @classmethod
+    def _tokenize_query(cls, text: str) -> List[str]:
+        """Tokenize a query, stripping stopwords and 1-2 character tokens.
+
+        Single letters and very short tokens contribute pure noise to BM25
+        because they appear in almost every document, so we drop them along
+        with explicit stopwords.
+        """
+        return [
+            t for t in cls._tokenize(text)
+            if len(t) >= 3 and t not in _QUERY_STOPWORDS
+        ]
+
     def _bm25_search(self, query: str, sections: List[_Section]) -> List[SearchHit]:
         try:
             from rank_bm25 import BM25Okapi
         except ImportError:
             return self._fallback_tf_search(query, sections)
 
+        query_tokens_list = self._tokenize_query(query)
+        if len(query_tokens_list) < _MIN_QUERY_CONTENT_TOKENS:
+            return []
+
         corpus = [
             self._tokenize(f"{s.heading} {s.body}") for s in sections
         ]
         bm25 = BM25Okapi(corpus)
-        raw_scores = bm25.get_scores(self._tokenize(query))
+        raw_scores = bm25.get_scores(query_tokens_list)
         max_raw = max(raw_scores) if len(raw_scores) else 0.0
 
-        if max_raw <= 0:
+        if max_raw < self.min_raw_score:
             return []
 
-        query_tokens = set(self._tokenize(query))
+        query_tokens = set(query_tokens_list)
         hits: List[SearchHit] = []
         for i, raw in enumerate(raw_scores):
             norm = raw / max_raw
@@ -207,7 +262,9 @@ class WorkspaceSearch:
 
     def _fallback_tf_search(self, query: str, sections: List[_Section]) -> List[SearchHit]:
         """Simple term-frequency fallback when rank_bm25 is unavailable."""
-        query_tokens = set(self._tokenize(query))
+        query_tokens = set(self._tokenize_query(query))
+        if len(query_tokens) < _MIN_QUERY_CONTENT_TOKENS:
+            return []
         scored: List[tuple] = []
         for s in sections:
             tokens = self._tokenize(f"{s.heading} {s.body}")
@@ -219,8 +276,6 @@ class WorkspaceSearch:
 
         if not scored:
             return []
-
-        query_tokens = set(self._tokenize(query))
         max_score = max(s for s, _ in scored)
         hits: List[SearchHit] = []
         for raw, s in scored:
