@@ -20,6 +20,24 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
 import yaml
 
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # pragma: no cover — Python <3.9
+    ZoneInfo = None  # type: ignore
+    ZoneInfoNotFoundError = Exception  # type: ignore
+
+
+def _local_now(tz_name: Optional[str]) -> datetime:
+    """Return now() in the given IANA timezone, falling back to server local."""
+    if tz_name and ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo(tz_name))
+        except ZoneInfoNotFoundError:
+            pass
+        except Exception:
+            pass
+    return datetime.now()
+
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import ensure_dir
 
@@ -90,6 +108,11 @@ class Session:
 
         # Optional TTS voice override (piper voice name without .onnx)
         self.voice_override: Optional[str] = None
+
+        # IANA timezone name (e.g. "Europe/Berlin") for time strings shown to
+        # the model. None = fall back to the server's local time, which is
+        # almost always wrong in containerized deployments (UTC).
+        self.timezone: Optional[str] = None
 
         # Skills disabled for this session
         self.disabled_skills: List[str] = []
@@ -506,8 +529,9 @@ class MemoryManager:
         tool_calls_info: Optional[List[Dict[str, Any]]] = None,
         timestamp: Optional[str] = None,
         topic_heading: Optional[str] = None,
+        tz_name: Optional[str] = None,
     ) -> str:
-        stamp = timestamp or datetime.now().strftime("%H:%M:%S")
+        stamp = timestamp or _local_now(tz_name).strftime("%H:%M:%S")
         entry = f"[{stamp}] User: {user_text}\nAssistant: {bot_text}"
         if tool_calls_info:
             for tc in tool_calls_info:
@@ -686,6 +710,7 @@ class MemoryManager:
         session.disabled_skills = [
             str(s) for s in (session_cfg.get("disabled_skills") or []) if s
         ]
+        session.timezone = (session_cfg.get("user") or {}).get("timezone") or None
         session.private = os.path.isfile(self._private_session_path(user_id))
 
         self._sessions[user_id] = session
@@ -853,6 +878,7 @@ class MemoryManager:
             user_text,
             bot_text,
             tool_calls_info=tool_calls_info,
+            tz_name=session.timezone,
         )
         self._append_thread_block_to_daily(session.user_id, session.current_date_str, thread_id, entry)
 
@@ -901,9 +927,20 @@ class MemoryManager:
         # _augment_with_workspace_refs), not the system prompt — that's what
         # actually triggers the model to call the files skill.
 
-        parts.append(
-            f"Current date and time: {datetime.now().strftime('%A, %d. %B %Y %H:%M')}"
-        )
+        if session.timezone:
+            now_str = _local_now(session.timezone).strftime("%A, %d. %B %Y %H:%M")
+            parts.append(
+                f"Current date and time: {now_str} ({session.timezone}). "
+                "This is the user's local time — always use it directly; "
+                "do not convert or apply offsets."
+            )
+        else:
+            now_str = datetime.now().strftime("%A, %d. %B %Y %H:%M")
+            parts.append(
+                f"Current date and time: {now_str} (server local time — user "
+                "has not configured a timezone in session config; ask the user "
+                "or set it via the `config` skill if precise local time matters)."
+            )
 
         mode_block = self._build_mode_instructions(mode)
         if mode_block:
@@ -987,6 +1024,7 @@ class MemoryManager:
             bot_text,
             tool_calls_info=tool_calls_info,
             topic_heading=topic_heading,
+            tz_name=session.timezone,
         )
 
         session.exchanges.append((user_text, bot_text, tool_calls_info))

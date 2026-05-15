@@ -22,8 +22,26 @@ import yaml
 # ---------------------------------------------------------------------------
 
 SETTABLE_SECTIONS = {"interfaces", "tts", "transcription", "skill-config", "agents"}
-SESSION_SETTABLE_SECTIONS = {"agents", "tts", "disabled_skills"}
+SESSION_SETTABLE_SECTIONS = {"agents", "tts", "disabled_skills", "user"}
 VALID_AGENT_PATHS = {"default", "defaults", "chat", "skill_runner", "vision", "compiler"}
+USER_SECTION_FIELDS = {"timezone"}
+
+
+def _validate_timezone(name: str) -> Optional[str]:
+    """Return an error message if *name* is not a valid IANA timezone, else None."""
+    try:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    except ImportError:
+        return None  # Python <3.9 — skip validation
+    try:
+        ZoneInfo(name)
+        return None
+    except ZoneInfoNotFoundError:
+        return (f"Unknown timezone '{name}'. Use an IANA zone name like "
+                f"'Europe/Berlin', 'America/New_York', or 'UTC'. See "
+                f"https://en.wikipedia.org/wiki/List_of_tz_database_time_zones")
+    except Exception as exc:
+        return f"Timezone '{name}' rejected: {exc}"
 
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -398,6 +416,20 @@ def cmd_session(args) -> None:
                          f"Settable: {', '.join(sorted(SESSION_SETTABLE_SECTIONS))}",
             })
             return
+        if top_key == "user":
+            field = args.set_path.split(".", 1)[1] if "." in args.set_path else ""
+            if field not in USER_SECTION_FIELDS:
+                _out({
+                    "success": False,
+                    "error": f"Field 'user.{field}' is not supported. "
+                             f"Supported: {', '.join('user.' + f for f in sorted(USER_SECTION_FIELDS))}",
+                })
+                return
+            if field == "timezone" and args.set_value is not None:
+                err = _validate_timezone(str(args.set_value))
+                if err:
+                    _out({"success": False, "error": err})
+                    return
         value = _coerce(args.set_value) if args.set_value is not None else None
         if value is None:
             keys = args.set_path.split(".")
