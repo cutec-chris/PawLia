@@ -130,14 +130,14 @@ class App:
                 require_workflow=require_workflow,
             )
 
-    def _build_user_skills(self, user_id: str) -> Dict[str, AgentSkill]:
-        """Return bundled skills + this user's workspace skills.
-
-        Each user gets their own copy so workspace skills are isolated.
-        """
+    def _build_user_skills(self, user_id: str, disabled: Optional[List[str]] = None) -> Dict[str, AgentSkill]:
+        """Return bundled + workspace skills, minus any session-disabled ones."""
         skills = dict(self._bundled_skills)
         user_skills = self._discover_user_workspace_skills(user_id)
         skills.update(user_skills)
+        if disabled:
+            for name in disabled:
+                skills.pop(name, None)
         return skills
 
     def run_instruction(self, instruction: str, user_id: str = "default") -> RouterAgent:
@@ -159,15 +159,18 @@ class App:
         """
         session = self.memory.load_session(user_id)
 
-        # Build per-user skill set (bundled + user's own workspace skills)
-        user_skills = self._build_user_skills(user_id)
+        # Build per-user skill set (bundled + user's own workspace skills, minus disabled)
+        user_skills = self._build_user_skills(user_id, disabled=session.disabled_skills)
 
         def make_runner(skill: AgentSkill, thread_id: Optional[str] = None) -> SkillRunnerAgent:
             skill_config_root = self.config.get("skill-config") or {}
             skill_cfg = skill_config_root.get(skill.name, {})
             agent_overrides = self.memory.effective_agent_overrides(session, thread_id)
+            agent_type = f"skill.{skill.name}"
+            model_name = self.llm.default_model_name(agent_type, agent_overrides=agent_overrides)
+            max_tool_turns = self.llm.max_tool_turns_for_model(model_name)
             return SkillRunnerAgent(
-                llm=self.llm.get(f"skill.{skill.name}", agent_overrides=agent_overrides),
+                llm=self.llm.get(agent_type, agent_overrides=agent_overrides),
                 skill=skill,
                 tool_registry=self.tools,
                 context={
@@ -177,6 +180,7 @@ class App:
                     "session": session,
                     "config_path": self.config_path,
                 },
+                max_tool_turns=max_tool_turns,
             )
 
         def refresh_user_skills() -> None:
@@ -186,8 +190,10 @@ class App:
             user_skills.update(fresh)
 
         def make_local_agent() -> ChatAgent:
-            chat_llm = self.llm.get("chat")
-            vision_llm = self.llm.get("vision")
+            overrides = self.memory.effective_agent_overrides(session, None)
+            chat_llm = self.llm.get("chat", agent_overrides=overrides)
+            vision_llm = self.llm.get("vision", agent_overrides=overrides)
+            ws_search_cfg = self.config.get("workspace-search", {})
             agent = ChatAgent(
                 llm=chat_llm,
                 skills=user_skills,
@@ -196,6 +202,7 @@ class App:
                 memory=self.memory,
                 session=session,
                 vision_llm=vision_llm,
+                workspace_search_cfg=ws_search_cfg,
                 **kwargs,
             )
             # Resolve session/thread-specific agent selectors at run() time.

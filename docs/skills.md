@@ -10,14 +10,17 @@ When the user sends a message, the dispatcher (ChatAgent) decides whether to cal
 
 | Skill | Description | Requires |
 |-------|-------------|---------|
-| `memory` | Long-term conversation memory — indexes daily chat logs by topic | none (markdown backend); `skill-config.memory` for other backends |
-| `researcher` | Per-project research knowledge bases (index URLs, PDFs, query) | `skill-config.researcher` (embedding settings) |
+| `memory` | Long-term conversation memory — search past chat logs and trigger the Dream Wiki | `skill-config.memory.rag_model` + `embedding_host`; other settings depend on `rag_backend` |
+| `researcher` | Per-project document collections in `workspace/research/<project>/`. Scrapes URLs and runs keyword / embedding search over the saved Markdown. The Dream Wiki is *not* fed by research projects — only by conversations. | `skill-config.researcher` (embedding settings optional — falls back to keyword search) |
 | `searxng` | Web search via a SearXNG instance | `skill-config.searxng.url` |
 | `perplexica` | AI-powered search via Perplexica | `skill-config.perplexica.url` |
 | `browser` | Browse and extract content from web pages | — |
-| `files` | Read, write, and manage files in the workspace | — |
-| `organizer` | Calendar events (Full Calendar), tasks (Obsidian Tasks), reminders, scheduled jobs — Obsidian vault native | — |
+| `files` | Read, write, edit, grep, outline, and delete files in the workspace | — |
+| `organizer` | Calendar events (Full Calendar), tasks (Obsidian Tasks), reminders — Obsidian vault native | — |
+| `automation` | Scheduled jobs (cron-like recurring tasks) and event-bound checklists | — |
+| `config` | Read/write config files in the workspace | — |
 | `skill-creator` | Create, scaffold, validate, and package new skills; manage centralized credentials | — |
+| `workspace-git` | Commit, squash, push, and pull the workspace git repo on demand | — |
 
 ## Custom skills
 
@@ -66,7 +69,13 @@ Describe step by step what the sub-agent should do...
 | `name` | yes | Skill identifier (matches directory name) |
 | `description` | yes | Used by the dispatcher to decide when to invoke the skill |
 | `license` | no | License identifier |
-| `metadata.requires_config` | no | List of `skill-config.<name>.*` keys that must exist |
+| `metadata.author` | no | Free-form author label, surfaced in the Web UI skill list |
+| `metadata.version` | no | Free-form version label |
+| `metadata.trust` | no | `internal` for bundled skills; affects how skill output is framed in the prompt |
+| `metadata.requires_config` | no | List of `skill-config.<name>.*` keys that must exist; the skill is skipped if any are missing |
+| `metadata.optional_config` | no | List of recognised but optional `skill-config.<name>.*` keys (documentation only) |
+| `metadata.max_tool_turns` | no | Override the SkillRunner tool-call budget for this skill (wins over the model heuristic and the `models.<name>.max_tool_turns` override) |
+| `metadata.openclaw.cwd` | no | `"skill"` (default) or `"workspace"` — what directory `BashTool` runs in |
 | `requires_credentials` | no | List of credential key names (see [Credentials](#credentials)) |
 
 ### Per-skill model assignment

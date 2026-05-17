@@ -41,9 +41,8 @@ Each page has:
 
 ## Output format
 
-Respond with ONLY a valid JSON array. No markdown, no code fences, just JSON:
+Respond with ONLY a raw JSON array — no markdown, no code fences, no explanation, just the array:
 
-```json
 [
   {
     "action": "create",
@@ -64,7 +63,6 @@ Respond with ONLY a valid JSON array. No markdown, no code fences, just JSON:
     "links": ["max-mustermann"]
   }
 ]
-```
 
 - `action: "create"` — new wiki page
 - `action: "update"` — append content to existing page

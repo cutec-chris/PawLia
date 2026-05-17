@@ -95,6 +95,42 @@ def _walk_files(workdir: str):
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_WIKILINK_INPUT_RE = re.compile(r"^\[\[([^\]|]+)(?:\|[^\]]+)?\]\]$")
+
+
+def _resolve_wikilink(workdir: str, filename: str) -> str:
+    """If *filename* is a [[wikilink]], resolve it to a workspace-relative path.
+
+    Resolution order:
+    1. Contains a slash → treated as path (`.md` appended if missing).
+    2. Slug only → `wiki/topics/{slug}.md` if it exists.
+    3. Fallback: first `{slug}.md` found anywhere in the workspace.
+    4. If nothing found, return `wiki/topics/{slug}.md` as best guess.
+    """
+    m = _WIKILINK_INPUT_RE.match(filename.strip())
+    if not m:
+        return filename
+
+    ref = m.group(1).strip()
+
+    # Path-style reference (contains slash)
+    if "/" in ref:
+        return ref if ref.endswith(".md") else ref + ".md"
+
+    # Slug-style: wiki/topics first
+    wiki_candidate = f"wiki/topics/{ref}.md"
+    if os.path.isfile(os.path.join(workdir, wiki_candidate)):
+        return wiki_candidate
+
+    # Search entire workspace for {slug}.md
+    target = f"{ref}.md"
+    for dirpath, _dirs, files in os.walk(workdir):
+        if target in files:
+            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
+            return rel.replace(os.sep, "/")
+
+    # Nothing found — return wiki/topics guess (will produce "not found" naturally)
+    return wiki_candidate
 
 
 def _parse_headings(lines: list[str]) -> list[dict]:
@@ -141,8 +177,50 @@ def cmd_list(args) -> None:
     _out({"success": True, "files": entries, "count": len(entries)})
 
 
+_DEFAULT_READ_LIMIT = 150
+_QUERY_CONTEXT_LINES = 3
+
+
+def _filter_by_query(lines: list, query: str) -> tuple:
+    """Return (filtered_text, match_count) keeping only lines near query tokens.
+
+    Non-matching stretches are replaced with ``[... N lines skipped ...]``.
+    Returns (None, 0) if no matches found.
+    """
+    tokens = {t for t in re.findall(r"\w+", query.lower()) if len(t) >= 3}
+    if not tokens:
+        return None, 0
+
+    keep: set = set()
+    for i, line in enumerate(lines):
+        if tokens & set(re.findall(r"\w+", line.lower())):
+            for j in range(max(0, i - _QUERY_CONTEXT_LINES),
+                           min(len(lines), i + _QUERY_CONTEXT_LINES + 1)):
+                keep.add(j)
+
+    if not keep:
+        return None, 0
+
+    parts: list = []
+    skip_start: int | None = None
+    for i, line in enumerate(lines):
+        if i in keep:
+            if skip_start is not None:
+                parts.append(f"[... {i - skip_start} lines skipped, no matches ...]\n")
+                skip_start = None
+            parts.append(line)
+        else:
+            if skip_start is None:
+                skip_start = i
+    if skip_start is not None and skip_start < len(lines):
+        parts.append(f"[... {len(lines) - skip_start} lines skipped, no matches ...]\n")
+
+    return "".join(parts), len(keep)
+
+
 def cmd_read(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    args.filename = _resolve_wikilink(workdir, args.filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -157,28 +235,53 @@ def cmd_read(args) -> None:
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
-    if args.offset is None and args.limit is None:
-        _out({"success": True, "filename": args.filename, "content": content, "size": len(content)})
-        return
-
     lines = content.splitlines(keepends=True)
     total = len(lines)
+
+    # Query-based filtering: return only relevant blocks, skip the rest
+    if args.query:
+        filtered, match_count = _filter_by_query(lines, args.query)
+        if filtered is None:
+            _out({
+                "success": True,
+                "filename": args.filename,
+                "content": "",
+                "total_lines": total,
+                "matches": 0,
+                "note": "No lines matched the query.",
+            })
+        else:
+            _out({
+                "success": True,
+                "filename": args.filename,
+                "content": filtered,
+                "total_lines": total,
+                "matches": match_count,
+            })
+        return
+
     offset = max(0, args.offset or 0)
-    limit = args.limit if args.limit is not None else total
+    limit = args.limit if args.limit is not None else _DEFAULT_READ_LIMIT
     sliced = "".join(lines[offset:offset + limit])
-    _out({
+    returned = max(0, min(total - offset, limit))
+    result = {
         "success": True,
         "filename": args.filename,
         "content": sliced,
         "offset": offset,
         "limit": limit,
-        "lines_returned": max(0, min(total - offset, limit)),
+        "lines_returned": returned,
         "total_lines": total,
-    })
+    }
+    if offset + returned < total:
+        result["has_more"] = True
+        result["next_offset"] = offset + returned
+    _out(result)
 
 
 def cmd_outline(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    args.filename = _resolve_wikilink(workdir, args.filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -201,6 +304,7 @@ def cmd_outline(args) -> None:
 
 def cmd_read_section(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    args.filename = _resolve_wikilink(workdir, args.filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -257,6 +361,7 @@ def cmd_read_section(args) -> None:
 
 def cmd_delete(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    args.filename = _resolve_wikilink(workdir, args.filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -427,7 +532,8 @@ def main():
     _base(p)
     p.add_argument("--filename", required=True)
     p.add_argument("--offset", type=int, default=None, help="0-based line offset")
-    p.add_argument("--limit", type=int, default=None, help="max lines to return")
+    p.add_argument("--limit", type=int, default=None, help="max lines to return (default: 150)")
+    p.add_argument("--query", default=None, help="return only lines matching this query (skips replace irrelevant blocks)")
 
     p = sub.add_parser("write")
     _base(p)

@@ -64,20 +64,42 @@ def _ensure_identity(workspace: str) -> None:
         _git(workspace, "config", "user.email", "pawlia@localhost")
 
 
+_GITIGNORE_PATTERNS = [
+    ".obsidian/workspace.json",
+    ".obsidian/workspace-mobile.json",
+    "memory/context_summary.md",
+    "memory/private_session",
+    "memory/private_thread_*",
+    "memory/voice_override.txt",
+    "wiki/log.md",
+]
+
+
+def _ensure_gitignore(workspace: str) -> None:
+    """Ensure all required patterns are present in the workspace .gitignore."""
+    gitignore = os.path.join(workspace, ".gitignore")
+    existing = set()
+    if os.path.exists(gitignore):
+        with open(gitignore, encoding="utf-8") as f:
+            existing = {line.rstrip("\n") for line in f}
+    missing = [p for p in _GITIGNORE_PATTERNS if p not in existing]
+    if missing:
+        with open(gitignore, "a", encoding="utf-8") as f:
+            for p in missing:
+                f.write(p + "\n")
+
+
 def ensure_repo(workspace: str) -> bool:
     """Initialize a git repo in workspace if not already one. Returns True if repo exists."""
     if os.path.isdir(os.path.join(workspace, ".git")):
         _ensure_identity(workspace)
+        _ensure_gitignore(workspace)
         return True
     rc, _ = _git(workspace, "init")
     if rc != 0:
         return False
     _ensure_identity(workspace)
-    # Write .gitignore for internal files
-    gitignore = os.path.join(workspace, ".gitignore")
-    if not os.path.exists(gitignore):
-        with open(gitignore, "w") as f:
-            f.write(".obsidian/workspace.json\n.obsidian/workspace-mobile.json\n")
+    _ensure_gitignore(workspace)
     _git(workspace, "add", "-A")
     _git(workspace, "commit", "-m", "Initial commit")
     logger.info("Initialized git repo in %s", workspace)

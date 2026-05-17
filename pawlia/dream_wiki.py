@@ -257,6 +257,8 @@ class DreamWikiBackend:
         self._tracker_path = os.path.join(index_path, "dreamed_files.json")
         self._indexed: set[str] = set()
         self._tracker: Optional[dict] = None
+        self._catalog_cache: Optional[dict[str, str]] = None
+        self._catalog_cache_mtime: float = 0.0
 
     # ── Tracking ──────────────────────────────────────────────────────────────
 
@@ -282,10 +284,20 @@ class DreamWikiBackend:
     # ── Wiki catalog ──────────────────────────────────────────────────────────
 
     def _get_wiki_catalog(self) -> dict[str, str]:
-        """Return {slug: title} for all existing wiki pages."""
-        catalog: dict[str, str] = {}
+        """Return {slug: title} for all existing wiki pages.
+
+        Cached by topics-directory mtime: changes to page contents that update
+        the title still invalidate via os.utime on rewrite (rewriting a file
+        also bumps the parent dir mtime on POSIX when entries are
+        added/removed). For in-place title edits, callers can drop the cache
+        via _invalidate_catalog_cache().
+        """
         if not os.path.isdir(self._topics_dir):
-            return catalog
+            return {}
+        dir_mtime = os.path.getmtime(self._topics_dir)
+        if self._catalog_cache is not None and dir_mtime == self._catalog_cache_mtime:
+            return self._catalog_cache
+        catalog: dict[str, str] = {}
         for fname in os.listdir(self._topics_dir):
             if not fname.endswith(".md"):
                 continue
@@ -306,7 +318,13 @@ class DreamWikiBackend:
             except Exception:
                 title = slug
             catalog[slug] = title
+        self._catalog_cache = catalog
+        self._catalog_cache_mtime = dir_mtime
         return catalog
+
+    def _invalidate_catalog_cache(self) -> None:
+        self._catalog_cache = None
+        self._catalog_cache_mtime = 0.0
 
     @staticmethod
     def _parse_frontmatter(text: str) -> Optional[dict]:
@@ -413,10 +431,9 @@ class DreamWikiBackend:
         actions = _parse_json_array(content)
 
         if actions is _SENTINEL:
-            logger.warning("DreamWikiBackend: could not parse LLM JSON, using raw")
-            return [{"action": "create", "slug": "misc",
-                      "title": "Miscellaneous", "content": content,
-                      "tags": [], "links": []}]
+            logger.warning("DreamWikiBackend: could not parse LLM JSON, skipping. Response: %s",
+                           content[:300])
+            return []
         return actions
 
     # ── Link format helpers ───────────────────────────────────────────────────

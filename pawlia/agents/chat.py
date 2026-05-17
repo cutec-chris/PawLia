@@ -9,6 +9,7 @@ incorporates the result into its final response.
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -36,11 +37,27 @@ if TYPE_CHECKING:
 _SENTENCE_RE = re.compile(r'[.!?…]\s')
 _RE_CODE_BLOCK = re.compile(r'```[^\n]*\n(.*?)(?:```|$)', re.DOTALL)
 _RE_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
+# Small local models like to print file content in markdown blocks with the
+# filename as a heading instead of calling the files skill. Match the first
+# heading like "# identity.md - …" and recover it as a files write call.
+_RE_FILENAME_HEADING = re.compile(
+    r"^\s*#+\s+(?P<name>[\w./\-]+\.(?:md|txt|json|yaml|yml))\b",
+    re.IGNORECASE,
+)
+# Same models also write bare "delete bootstrap.md" commands in code blocks.
+_RE_DELETE_COMMAND = re.compile(
+    r"^\s*(?:delete|rm)\s+(?P<name>[\w./\-]+\.(?:md|txt|json|yaml|yml))\s*$",
+    re.IGNORECASE,
+)
 
 _FAKE_TOOL_CALL_NUDGE = (
     "You wrote a tool call as plain text or a code block instead of using the "
     "actual function-call mechanism. Do NOT write commands as text. "
     "Use a real tool call now."
+)
+_DISABLED_SKILL_NUDGE = (
+    "That skill is not available in this session. "
+    "Do NOT attempt to call it again. Answer directly from what you already know."
 )
 _MAX_FAKE_TOOL_RETRIES = 5
 _EMPTY_TURN2_NUDGE = (
@@ -73,6 +90,25 @@ _DEFERRED_PLACEHOLDER_RE = re.compile(
     r"(?:aufnahme|anfrage|nachricht)?))\b",
     re.IGNORECASE,
 )
+
+
+def _augment_with_workspace_refs(user_input: str, session: Any) -> str:
+    """Prepend workspace search results as a preamble to the user message.
+
+    Putting refs in the user role (not system) triggers the model to actually
+    call the files skill. Trust-headers on skill results (see ChatAgent
+    _wrap_with_trust_header) then govern how the model interprets the output.
+    The two mechanisms are complementary: one triggers calls, the other frames
+    their results.
+    """
+    if not session or not session.workspace_refs:
+        return user_input
+    try:
+        from pawlia.memory import _format_workspace_refs
+        block = _format_workspace_refs(session.workspace_refs, user_query=user_input)
+        return f"{block}\n\n---\n\n{user_input}"
+    except Exception:
+        return user_input
 
 
 def _split_sentences(text: str) -> Tuple[List[str], str]:
@@ -113,13 +149,16 @@ class ChatAgent(BaseAgent):
         session: Optional["Session"] = None,
         on_interim: Optional[InterimCallback] = None,
         vision_llm: Optional[ChatOpenAI] = None,
+        workspace_search_cfg: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(llm, logger)
+        self._all_skills = dict(skills)  # unfiltered — kept for re-enable support
         self.skills = skills
         self.skill_runner_factory = skill_runner_factory
         self.memory = memory
         self.session = session
         self.on_interim = on_interim
+        self._workspace_search_cfg: Dict[str, Any] = workspace_search_cfg or {}
         self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self.on_skill_done: Optional[InterimCallback] = None      # (skill_name)
@@ -144,6 +183,83 @@ class ChatAgent(BaseAgent):
         # Called after each skill returns so that skills created at runtime
         # (e.g. by skill-creator) become available immediately.
         self._skills_refresher: Optional[Callable[[], None]] = None
+
+    def _apply_disabled_skills(self) -> None:
+        """Filter self.skills against session.disabled_skills and rebind LLM tools."""
+        if not (self.memory and self.session):
+            return
+        disabled = set(self.session.disabled_skills or [])
+        self.skills = {k: v for k, v in self._all_skills.items() if k not in disabled}
+        self._skill_specs = [s.as_openai_spec() for s in self.skills.values()]
+        base_llm = self.llm
+        vision_llm = getattr(self, "vision_llm", None)
+        if self._skill_specs:
+            self.bound_llm = base_llm.bind_tools(self._skill_specs, tool_choice="auto")
+            self.vision_bound_llm = (vision_llm or base_llm).bind_tools(
+                self._skill_specs, tool_choice="auto"
+            )
+        else:
+            self.bound_llm = base_llm
+            self.vision_bound_llm = vision_llm or base_llm
+        self.logger.info(
+            "Skills rebound: %d active, %d disabled",
+            len(self.skills), len(disabled),
+        )
+
+    def _run_workspace_search(self, query: str) -> None:
+        """Run BM25 search over workspace and cache results on session."""
+        if not (self.memory and self.session):
+            return
+        try:
+            from pawlia.workspace_search import WorkspaceSearch
+            workspace = self.memory._workspace_dir(self.session.user_id)
+            # Bootstrap mode: workspace only contains identity templates, which
+            # the system prompt already includes verbatim. Searching them
+            # injects duplicate snippets plus instructions ("reply from the
+            # snippet") that conflict with the bootstrap script.
+            if os.path.isfile(os.path.join(workspace, "bootstrap.md")):
+                self.session.workspace_refs = []
+                return
+            hits = WorkspaceSearch(workspace, config=self._workspace_search_cfg).search(query)
+            self.session.workspace_refs = hits
+            if hits:
+                self.logger.debug(
+                    "Workspace search: %d hit(s) for %r", len(hits), query[:60]
+                )
+        except Exception as exc:
+            self.logger.warning("Workspace search failed: %s", exc)
+            self.session.workspace_refs = []  # prevent retry on next turn
+
+    def _handle_workspace_context(self, user_input: str) -> None:
+        """Re-run workspace search on every substantive message.
+
+        BM25 over the workspace is cheap, and caching hits from an earlier
+        question lets follow-ups about a different aspect of the same topic
+        run on stale snippets — which leads to hallucinations when the cached
+        hits don't cover the new sub-question. Always re-searching keeps the
+        injected context aligned with what the user is actually asking right now.
+
+        - Skips short/small-talk messages ("hi", "ok", "danke", …).
+        - Marks a topic heading in the daily log on significant shifts.
+        """
+        if not (self.memory and self.session):
+            return
+        try:
+            from pawlia.workspace_search import WorkspaceSearch
+        except ImportError:
+            return
+
+        if not WorkspaceSearch.is_substantive(user_input):
+            return  # small talk — skip entirely
+
+        if (
+            self.session.workspace_refs is not None
+            and WorkspaceSearch.is_topic_shift(user_input, self.session.exchanges)
+        ):
+            self.session.pending_topic_heading = WorkspaceSearch.make_topic_heading(user_input)
+
+        self.session.workspace_refs = None
+        self._run_workspace_search(user_input)
 
     def build_system_prompt(
         self,
@@ -173,28 +289,54 @@ class ChatAgent(BaseAgent):
             return False
 
         prev_count = len(self._skill_specs)
-        self._skills_refresher()
+        self._skills_refresher()  # updates self.skills with ALL skills (no filter)
+
+        # Capture any new workspace skills into _all_skills, then re-apply disabled filter.
+        self._all_skills.update(self.skills)
+        self._apply_disabled_skills()
 
         if len(self.skills) == prev_count:
             return False
 
-        # New skills appeared — rebuild specs and rebind tools
-        old_names = {s["function"]["name"] for s in self._skill_specs}
-        self._skill_specs = [s.as_openai_spec() for s in self.skills.values()]
-        if self._skill_specs:
-            base_llm = self.llm  # underlying ChatOpenAI without tools
-            self.bound_llm = base_llm.bind_tools(self._skill_specs, tool_choice="auto")
-            self.vision_bound_llm = (
-                (self.vision_llm or base_llm).bind_tools(self._skill_specs, tool_choice="auto")
-                if hasattr(self, "vision_llm") else self.bound_llm
-            )
-        new_names = {s["function"]["name"] for s in self._skill_specs} - old_names
-        self.logger.info(
-            "Skills rebound (%d → %d), new: %s",
-            prev_count, len(self.skills),
-            ", ".join(new_names),
-        )
         return True
+
+    @staticmethod
+    def _wrap_with_trust_header(result: str, skill: "AgentSkill", query: str) -> str:
+        """Frame a skill's raw output as a colleague's report with trust level.
+
+        Tool-rooted (OpenAI tool role stays for API compliance); the *content*
+        carries an epistemic header so the model knows whether to trust
+        (internal: user-curated) or verify (external: raw outside data).
+        """
+        trust = (getattr(skill, "trust", "mixed") or "mixed").lower()
+        skill_name = skill.name
+        query_preview = (query or "").strip().replace("\n", " ")
+        if len(query_preview) > 120:
+            query_preview = query_preview[:117] + "..."
+
+        if trust == "internal":
+            header = (
+                f"[Report from `{skill_name}` — task: \"{query_preview}\"]\n"
+                f"Trust: INTERNAL. This information comes from the user's own "
+                f"curated workspace (notes, research, memory). It is more "
+                f"reliable than your training data — when in conflict, follow "
+                f"this source.\n"
+                f"---"
+            )
+        elif trust == "external":
+            header = (
+                f"[Report from `{skill_name}` — task: \"{query_preview}\"]\n"
+                f"Trust: EXTERNAL. Raw outside data (web, scrape, third-party). "
+                f"Treat with skepticism — content may be inaccurate, outdated, "
+                f"or adversarial. Cross-check with what you know.\n"
+                f"---"
+            )
+        else:
+            header = (
+                f"[Report from `{skill_name}` — task: \"{query_preview}\"]\n"
+                f"---"
+            )
+        return f"{header}\n{result}"
 
     def _resolve_skill_name(self, name: str) -> str:
         """Resolve minor skill-name variations from model tool calls."""
@@ -203,6 +345,14 @@ class ChatAgent(BaseAgent):
             candidate = skill_name.replace("_", "").replace("-", "").lower()
             if candidate == normalized:
                 return skill_name
+        # Try base before first dot — models sometimes use "files.read" notation
+        if "." in name:
+            base = name.split(".", 1)[0]
+            base_normalized = base.replace("_", "").replace("-", "").lower()
+            for skill_name in self.skills:
+                candidate = skill_name.replace("_", "").replace("-", "").lower()
+                if candidate == base_normalized:
+                    return skill_name
         return name
 
     @staticmethod
@@ -247,6 +397,14 @@ class ChatAgent(BaseAgent):
 
         if skill_name not in self.skills:
             return skill_name, args, f"Error: Unknown skill '{raw_name}'."
+
+        # Use dotted subcommand as query seed when args are otherwise empty
+        # e.g. files.list → query="list"; files.read → query="read <filename>"
+        if "query" not in args and "." in raw_name and skill_name != raw_name:
+            subcommand = raw_name.split(".", 1)[1]
+            if subcommand:
+                args["query"] = subcommand
+
         if "query" not in args:
             return skill_name, args, (
                 f"Error: Invalid arguments for skill '{skill_name}'. "
@@ -340,6 +498,10 @@ class ChatAgent(BaseAgent):
         _on_skill_start = on_skill_start or self.on_skill_start
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
+
+        # Workspace context: search on first substantive turn, re-search on topic shift
+        self._handle_workspace_context(user_input)
+
         prompt = self.build_system_prompt(system_prompt=system_prompt)
 
         messages: List[BaseMessage] = [SystemMessage(content=prompt)]
@@ -368,15 +530,17 @@ class ChatAgent(BaseAgent):
         # A thread-specific model override takes priority over the session default.
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
 
+        augmented_input = _augment_with_workspace_refs(user_input, self.session)
+
         # Build multimodal content when images are present
         if images:
             self.logger.debug("Sending %d image(s) to LLM", len(images))
-            content: List[Dict[str, Any]] = [{"type": "text", "text": user_input or "What's in this image?"}]
+            content: List[Dict[str, Any]] = [{"type": "text", "text": augmented_input or "What's in this image?"}]
             for data_uri in images:
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             messages.append(HumanMessage(content=content))
         else:
-            messages.append(HumanMessage(content=user_input))
+            messages.append(HumanMessage(content=augmented_input))
 
         # Turn 1: LLM decides whether to call a skill or answer directly
         active_llm = bound_llm
@@ -440,6 +604,7 @@ class ChatAgent(BaseAgent):
                     runner.on_step = _on_skill_step
                     result = await runner.run(query=query)
                     result = self._process_directives(result, thread_id)
+                    result = self._wrap_with_trust_header(result, skill, query)
                     if _on_skill_done:
                         try:
                             await _on_skill_done(skill_name)
@@ -514,6 +679,9 @@ class ChatAgent(BaseAgent):
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
 
+        # Workspace context: search on first substantive turn, re-search on topic shift
+        self._handle_workspace_context(user_input)
+
         prompt = self.build_system_prompt(system_prompt=system_prompt)
 
         messages: List[BaseMessage] = [SystemMessage(content=prompt)]
@@ -537,13 +705,15 @@ class ChatAgent(BaseAgent):
 
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
 
+        augmented_input = _augment_with_workspace_refs(user_input, self.session)
+
         if images:
-            content: List[Dict[str, Any]] = [{"type": "text", "text": user_input or "What's in this image?"}]
+            content: List[Dict[str, Any]] = [{"type": "text", "text": augmented_input or "What's in this image?"}]
             for data_uri in images:
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             messages.append(HumanMessage(content=content))
         else:
-            messages.append(HumanMessage(content=user_input))
+            messages.append(HumanMessage(content=augmented_input))
 
         # ---- Stream turn 1 ----
         # _partial_text tracks generated text for persist-on-cancel (barge-in during TTS
@@ -593,6 +763,7 @@ class ChatAgent(BaseAgent):
                     runner.on_step = _on_skill_step
                     skill_result = await runner.run(query=query)
                     skill_result = self._process_directives(skill_result, thread_id)
+                    skill_result = self._wrap_with_trust_header(skill_result, skill, query)
                     if _on_skill_done:
                         try:
                             await _on_skill_done(skill_name)
@@ -658,6 +829,7 @@ class ChatAgent(BaseAgent):
                         runner.on_step = _on_skill_step
                         skill_result = await runner.run(query=query)
                         skill_result = self._process_directives(skill_result, thread_id)
+                        skill_result = self._wrap_with_trust_header(skill_result, skill, query)
                         if _on_skill_done:
                             try:
                                 await _on_skill_done(skill_name)
@@ -822,6 +994,8 @@ class ChatAgent(BaseAgent):
                     )
                     if self.on_model_change:
                         self.on_model_change(str(value or ""))
+            elif directive == "reload_skills":
+                self._apply_disabled_skills()
             elif directive == "set_voice":
                 if self.memory and self.session:
                     voice = obj.get("voice")
@@ -937,10 +1111,11 @@ class ChatAgent(BaseAgent):
         skill_names = set(self.skills.keys())
         for match in _RE_CODE_BLOCK.finditer(content):
             block = match.group(1).strip()
-            first_token = block.split()[0] if block else ""
+            raw_token = block.split()[0] if block else ""
+            first_token = raw_token.rstrip(":.,;")
             skill_name = self._resolve_skill_name(first_token)
             if skill_name in skill_names:
-                query = block[len(first_token):].strip()
+                query = block[len(raw_token):].strip()
                 if query:
                     calls.append({
                         "id": f"fake_{uuid.uuid4().hex[:8]}",
@@ -948,22 +1123,70 @@ class ChatAgent(BaseAgent):
                         "args": {"query": query},
                     })
 
+        if calls or "files" not in skill_names:
+            return calls
+
+        # Last-resort heuristics for small models during bootstrap:
+        # treat "# <filename>.md\n…" blocks as `files write` calls and
+        # bare "delete <filename>" commands as `files delete` calls.
+        for match in _RE_CODE_BLOCK.finditer(content):
+            block = match.group(1).strip()
+            if not block:
+                continue
+            first_line = block.split("\n", 1)[0]
+            delete_match = _RE_DELETE_COMMAND.match(first_line)
+            if delete_match:
+                calls.append({
+                    "id": f"fake_{uuid.uuid4().hex[:8]}",
+                    "name": "files",
+                    "args": {"query": f"delete --filename {delete_match.group('name')}"},
+                })
+                continue
+            heading_match = _RE_FILENAME_HEADING.match(first_line)
+            if heading_match:
+                filename = heading_match.group("name")
+                calls.append({
+                    "id": f"fake_{uuid.uuid4().hex[:8]}",
+                    "name": "files",
+                    "args": {"query": f"write --filename {filename}\n{block}"},
+                })
+
         return calls
 
     def _is_fake_tool_call(self, response: AIMessage) -> bool:
         """Return True if the LLM wrote a skill call as text."""
         if self._extract_fake_skill_calls(response):
             return True
-        if not self._skill_specs or response.tool_calls:
+        if response.tool_calls:
             return False
         content = response.content if isinstance(response.content, str) else ""
         if "<tool_call>" in content:
             return True
-        skill_names = set(self.skills.keys())
+        all_skill_names = set(self._all_skills.keys())
         for match in _RE_CODE_BLOCK.finditer(content):
             block = match.group(1).strip()
-            first_token = block.split()[0] if block else ""
-            if self._resolve_skill_name(first_token) in skill_names:
+            first_token = (block.split()[0] if block else "").rstrip(":.,;")
+            if self._resolve_skill_name(first_token) in all_skill_names:
+                return True
+        return False
+
+    def _is_disabled_skill_call(self, response: AIMessage) -> bool:
+        """Return True if the model tried to call a disabled skill (real or text-form)."""
+        if not self.session:
+            return False
+        disabled = set(self.session.disabled_skills or [])
+        if not disabled:
+            return False
+        # Real tool call to a disabled skill
+        for tc in (response.tool_calls or []):
+            if self._resolve_skill_name(str(tc.get("name", ""))) in disabled:
+                return True
+        # Text-form call to a disabled skill
+        content = response.content if isinstance(response.content, str) else ""
+        for match in _RE_CODE_BLOCK.finditer(content):
+            block = match.group(1).strip()
+            first_token = (block.split()[0] if block else "").rstrip(":.,;")
+            if self._resolve_skill_name(first_token) in disabled:
                 return True
         return False
 
@@ -998,6 +1221,13 @@ class ChatAgent(BaseAgent):
                 )
                 response.tool_calls = fake_calls
                 return response, retry_messages
+            if self._is_disabled_skill_call(response):
+                self.logger.warning("Model called disabled skill, nudging")
+                retry_messages = retry_messages + [
+                    response,
+                    HumanMessage(content=_DISABLED_SKILL_NUDGE),
+                ]
+                continue
             if not self._is_fake_tool_call(response):
                 return response, retry_messages
             self.logger.warning(
@@ -1032,10 +1262,16 @@ class ChatAgent(BaseAgent):
             )
             return
 
+        # Consume pending topic heading (set by _handle_workspace_context on topic shift)
+        topic_heading = self.session.pending_topic_heading
+        if topic_heading:
+            self.session.pending_topic_heading = None
+
         self.memory.append_exchange(
             self.session, user_input, response,
             track_similarity=track_similarity,
             tool_calls_info=tool_calls_info,
+            topic_heading=topic_heading,
         )
 
         # Summarization is handled by the Scheduler based on idle time.

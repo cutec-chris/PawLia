@@ -17,6 +17,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "2.0"
+  trust: internal
   optional_config:
     - embedding_provider        # enables semantic search (ollama or openai-compat)
     - embedding_model           # e.g. bge-m3:latest

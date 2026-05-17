@@ -20,6 +20,24 @@ from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
 import yaml
 
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # pragma: no cover — Python <3.9
+    ZoneInfo = None  # type: ignore
+    ZoneInfoNotFoundError = Exception  # type: ignore
+
+
+def _local_now(tz_name: Optional[str]) -> datetime:
+    """Return now() in the given IANA timezone, falling back to server local."""
+    if tz_name and ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo(tz_name))
+        except ZoneInfoNotFoundError:
+            pass
+        except Exception:
+            pass
+    return datetime.now()
+
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import ensure_dir
 
@@ -31,6 +49,36 @@ SIMILARITY_THRESHOLD = 0.6  # 0-1, how similar two bot responses must be
 SIMILARITY_WINDOW = 4  # compare last N bot responses
 IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
 SESSION_FORMAT_VERSION = 2
+
+# Cheap token estimate — 1 token ≈ 4 chars for mixed German/English text.
+# Avoids loading tiktoken on every scheduler tick.
+_CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text: str) -> int:
+    """Approximate token count for *text* using a char-based heuristic.
+
+    Coarse but fast — good enough for trigger thresholds. Real tokenizers
+    are 10-20× slower and would dominate the scheduler tick.
+    """
+    if not text:
+        return 0
+    return (len(text) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+
+
+def estimate_session_tokens(session: "Session") -> int:
+    """Rough token footprint of the model context built from a Session."""
+    return (
+        estimate_tokens(session.summary)
+        + estimate_tokens(session.daily_history)
+        + estimate_tokens(session.user_memory)
+    )
+
+_EXCHANGE_PATTERN = re.compile(
+    r"\[[\d:]+\]\s*User:\s*(.*?)\nAssistant:\s*(.*?)(?=\n\[[\d:]+\]\s*User:|\Z)",
+    re.DOTALL,
+)
+_TOOL_CALL_PATTERN = re.compile(r'<!--\s*TOOL_CALL:\s*(\{.*?\})\s*-->', re.DOTALL)
 
 
 class Session:
@@ -61,6 +109,14 @@ class Session:
         # Optional TTS voice override (piper voice name without .onnx)
         self.voice_override: Optional[str] = None
 
+        # IANA timezone name (e.g. "Europe/Berlin") for time strings shown to
+        # the model. None = fall back to the server's local time, which is
+        # almost always wrong in containerized deployments (UTC).
+        self.timezone: Optional[str] = None
+
+        # Skills disabled for this session
+        self.disabled_skills: List[str] = []
+
         # Per-thread exchange lists (loaded/seeded lazily by get_thread_context)
         self.thread_contexts: Dict[str, List[Tuple[str, str]]] = {}
 
@@ -72,6 +128,128 @@ class Session:
         # Resets on restart (intentional).
         self.private: bool = False            # CLI / session-level
         self.private_threads: Set[str] = set()  # per-thread
+
+        # Workspace context search: None = not yet run (triggers on first substantive turn),
+        # [] = ran but found nothing, [...] = cached hits for this session.
+        # Cleared and re-run when a topic shift is detected.
+        self.workspace_refs: Optional[list] = None
+
+        # Set by ChatAgent when a topic shift is detected; consumed by _persist()
+        # to prepend a section heading to the daily log entry.
+        self.pending_topic_heading: Optional[str] = None
+
+
+_DEFAULT_READ_QUERY = "<keywords>"
+
+
+def _format_workspace_refs(hits: list, user_query: str = "") -> str:
+    """Format workspace hits as minimal pointers — model must call `files read`.
+
+    Only the wikilink and section heading are shown; snippet content is
+    intentionally NOT included. The model is expected to load the actual file
+    via `files read` before answering, so claims trace back to the file rather
+    than to a paraphrased preview that can drift.
+
+    research/*/README.md hits are deduped against their project's content files
+    so each project appears once with one ready-to-use read call.
+    """
+    read_query = _read_query_for(user_query)
+    lines = [
+        "## Workspace Notes Available",
+        "These wiki files were keyword-matched against the user's recent "
+        "message. They are *suggestions*, not proof of relevance: the match "
+        "may be coincidental (shared words, similar topic name) without "
+        "actually answering the user's question.",
+        "",
+        "**Rules:**",
+        "- First decide whether the user is actually asking about one of these "
+        "topics. If the conversation is heading somewhere else (small talk, "
+        "follow-up, clarification, correction of an earlier mistake), ignore "
+        "these refs entirely.",
+        "- Only call `files read` if a heading clearly matches the user's "
+        "current question. When in doubt, ask the user before reading.",
+        "- Never weave content from these files into a reply unless you "
+        "actually read the file *and* it answers what was asked. Do not "
+        "invent a topic the user did not bring up.",
+        "- Never invent a file path or heading that isn't listed here.",
+        "",
+    ]
+
+    research_readmes: dict = {}   # project_dir -> (ref, description)
+    research_content: dict = {}   # project_dir -> first content-file hit
+    other_hits: list = []
+    seen_content: set = set()
+
+    for hit in hits:
+        path = hit.path
+        ref = hit.wikilink_ref
+        parts = path.split("/")
+        if len(parts) >= 3 and parts[0] == "research":
+            project_dir = parts[1]
+            if parts[-1] == "README.md":
+                research_readmes[project_dir] = (ref, hit.snippet or "")
+            else:
+                if project_dir not in research_content and path not in seen_content:
+                    research_content[project_dir] = hit
+                    seen_content.add(path)
+        else:
+            if path not in seen_content:
+                seen_content.add(path)
+                other_hits.append(hit)
+
+    rendered_projects: set = set()
+
+    for project_dir, (readme_ref, description) in research_readmes.items():
+        content_hit = research_content.get(project_dir)
+        content_ref = content_hit.wikilink_ref if content_hit else readme_ref
+        entry = f"- **{readme_ref}** — {description or project_dir}"
+        if content_hit and content_hit.heading:
+            entry += f" *(matched section: {content_hit.heading})*"
+        entry += f"\n  → `files read --query \"{read_query}\" {content_ref}`"
+        lines.append(entry)
+        rendered_projects.add(project_dir)
+
+    for project_dir, hit in research_content.items():
+        if project_dir in rendered_projects:
+            continue
+        ref = hit.wikilink_ref
+        entry = f"- **{ref}** *(research/{project_dir})*"
+        if hit.heading:
+            entry += f" *(section: {hit.heading})*"
+        entry += f"\n  → `files read --query \"{read_query}\" {ref}`"
+        lines.append(entry)
+
+    for hit in other_hits:
+        ref = hit.wikilink_ref
+        entry = f"- **{ref}**"
+        if hit.heading:
+            entry += f" *(section: {hit.heading})*"
+        entry += f"\n  → `files read --query \"{read_query}\" {ref}`"
+        lines.append(entry)
+
+    return "\n".join(lines)
+
+
+def _read_query_for(user_query: str) -> str:
+    """Distill the user message into a 3–6 word `files read` --query value.
+
+    Falls back to a placeholder if the message is too short to extract content
+    words. Keeps the call site simple — caller passes the raw user input.
+    """
+    text = (user_query or "").strip()
+    if not text:
+        return _DEFAULT_READ_QUERY
+    tokens = [t for t in re.findall(r"\w+", text.lower()) if len(t) >= 4]
+    seen: set = set()
+    distilled: list = []
+    for t in tokens:
+        if t in seen:
+            continue
+        seen.add(t)
+        distilled.append(t)
+        if len(distilled) >= 6:
+            break
+    return " ".join(distilled) if distilled else _DEFAULT_READ_QUERY
 
 
 class MemoryManager:
@@ -169,11 +347,32 @@ class MemoryManager:
     def _session_version_path(self, user_id: str) -> str:
         return os.path.join(self.session_dir, user_id, "session_version.txt")
 
+    def _session_config_path(self, user_id: str) -> str:
+        return os.path.join(self.session_dir, user_id, "config.yaml")
+
     def _agent_overrides_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "agent_overrides.yaml")
 
     def _voice_override_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "voice_override.txt")
+
+    def _read_session_config(self, user_id: str) -> Dict[str, Any]:
+        return self._read_yaml(self._session_config_path(user_id))
+
+    def _write_session_config(self, user_id: str, data: Dict[str, Any]) -> None:
+        path = self._session_config_path(user_id)
+        if data:
+            self._write_yaml(path, data)
+        elif os.path.exists(path):
+            os.remove(path)
+
+    def _update_session_config(self, user_id: str, key: str, value: Any) -> None:
+        data = self._read_session_config(user_id)
+        if value is None or value == {} or value == []:
+            data.pop(key, None)
+        else:
+            data[key] = value
+        self._write_session_config(user_id, data)
 
     def _private_session_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "private_session")
@@ -329,13 +528,17 @@ class MemoryManager:
         *,
         tool_calls_info: Optional[List[Dict[str, Any]]] = None,
         timestamp: Optional[str] = None,
+        topic_heading: Optional[str] = None,
+        tz_name: Optional[str] = None,
     ) -> str:
-        stamp = timestamp or datetime.now().strftime("%H:%M:%S")
+        stamp = timestamp or _local_now(tz_name).strftime("%H:%M:%S")
         entry = f"[{stamp}] User: {user_text}\nAssistant: {bot_text}"
         if tool_calls_info:
             for tc in tool_calls_info:
                 tool_json = json.dumps(tc, ensure_ascii=False)
                 entry += f"\n<!-- TOOL_CALL: {tool_json} -->"
+        if topic_heading:
+            entry = f"\n## {topic_heading}\n\n{entry}"
         return entry
 
     @classmethod
@@ -422,20 +625,13 @@ class MemoryManager:
             Assistant: ...
             <!-- TOOL_CALL: {"name": "...", "args": {...}, "result": "..."} -->
         """
-        pattern = re.compile(
-            r"\[[\d:]+\]\s*User:\s*(.*?)\nAssistant:\s*(.*?)(?=\n\[[\d:]+\]\s*User:|\Z)",
-            re.DOTALL,
-        )
-
         exchanges: List[Tuple[str, str, Optional[List[Dict[str, Any]]]]] = []
-        for m in pattern.finditer(history):
+        for m in _EXCHANGE_PATTERN.finditer(history):
             user_text = m.group(1).strip()
             bot_text = m.group(2).strip()
 
-            # Parse tool call comments from bot_text
             tool_calls_info = None
-            tool_pattern = re.compile(r'<!--\s*TOOL_CALL:\s*(\{.*?\})\s*-->', re.DOTALL)
-            tool_matches = tool_pattern.findall(bot_text)
+            tool_matches = _TOOL_CALL_PATTERN.findall(bot_text)
 
             if tool_matches:
                 tool_calls_info = []
@@ -457,6 +653,34 @@ class MemoryManager:
             exchanges.append((user_text, bot_text, tool_calls_info))
         return exchanges
 
+    def _load_session_config_with_migration(self, user_id: str) -> Dict[str, Any]:
+        """Read session config, migrating legacy files on first access."""
+        data = self._read_session_config(user_id)
+        changed = False
+
+        legacy_agents = self._agent_overrides_path(user_id)
+        if "agents" not in data and os.path.isfile(legacy_agents):
+            agents = self._clean_agent_overrides(self._read_yaml(legacy_agents))
+            if agents:
+                data["agents"] = agents
+            os.remove(legacy_agents)
+            self.logger.info("Migrated agent_overrides.yaml → session config for '%s'", user_id)
+            changed = True
+
+        legacy_voice = self._voice_override_path(user_id)
+        if "tts" not in data and os.path.isfile(legacy_voice):
+            voice = self._read(legacy_voice).strip()
+            if voice:
+                data["tts"] = {"voice": voice}
+            os.remove(legacy_voice)
+            self.logger.info("Migrated voice_override.txt → session config for '%s'", user_id)
+            changed = True
+
+        if changed:
+            self._write_session_config(user_id, data)
+
+        return data
+
     def load_session(self, user_id: str) -> Session:
         """Load or return cached session for a user.
 
@@ -477,12 +701,16 @@ class MemoryManager:
         session.summary = self._read(self._summary_path(user_id))
         session.exchanges = self._parse_exchanges(session.daily_history)
         session.exchange_count = len(session.exchanges)
+        session_cfg = self._load_session_config_with_migration(user_id)
         session.agent_overrides = self._clean_agent_overrides(
-            self._read_yaml(self._agent_overrides_path(user_id))
+            session_cfg.get("agents") or {}
         )
         self._sync_legacy_model_fields(session)
-        voice = self._read(self._voice_override_path(user_id)).strip()
-        session.voice_override = voice or None
+        session.voice_override = (session_cfg.get("tts") or {}).get("voice") or None
+        session.disabled_skills = [
+            str(s) for s in (session_cfg.get("disabled_skills") or []) if s
+        ]
+        session.timezone = (session_cfg.get("user") or {}).get("timezone") or None
         session.private = os.path.isfile(self._private_session_path(user_id))
 
         self._sessions[user_id] = session
@@ -519,12 +747,7 @@ class MemoryManager:
     ) -> None:
         cleaned = self._clean_agent_overrides(overrides or {})
         session.agent_overrides = cleaned
-        path = self._agent_overrides_path(session.user_id)
-
-        if cleaned:
-            self._write_yaml(path, cleaned)
-        elif os.path.exists(path):
-            os.remove(path)
+        self._update_session_config(session.user_id, "agents", cleaned or None)
         self._sync_legacy_model_fields(session)
 
     def set_agent_override_value(
@@ -561,12 +784,31 @@ class MemoryManager:
     def set_voice_override(self, session: Session, voice: Optional[str]) -> None:
         """Persist a TTS voice override for this session.  Pass None to clear."""
         session.voice_override = voice
-        path = self._voice_override_path(session.user_id)
+        cfg = self._read_session_config(session.user_id)
+        tts = dict(cfg.get("tts") or {})
         if voice:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(voice)
-        elif os.path.exists(path):
-            os.remove(path)
+            tts["voice"] = voice
+        else:
+            tts.pop("voice", None)
+        cfg["tts"] = tts if tts else None
+        if not cfg.get("tts"):
+            cfg.pop("tts", None)
+        self._write_session_config(session.user_id, cfg)
+
+    def set_disabled_skills(self, session: Session, skills: List[str]) -> None:
+        """Persist the disabled_skills list for this session."""
+        cleaned = [str(s) for s in skills if s]
+        session.disabled_skills = cleaned
+        self._update_session_config(session.user_id, "disabled_skills", cleaned or None)
+
+    def add_disabled_skill(self, session: Session, skill: str) -> None:
+        """Add a skill to the disabled list (idempotent)."""
+        if skill not in session.disabled_skills:
+            self.set_disabled_skills(session, session.disabled_skills + [skill])
+
+    def remove_disabled_skill(self, session: Session, skill: str) -> None:
+        """Remove a skill from the disabled list."""
+        self.set_disabled_skills(session, [s for s in session.disabled_skills if s != skill])
 
     def get_thread_context(
         self, session: Session, thread_id: str,
@@ -604,7 +846,7 @@ class MemoryManager:
                 os.remove(path)
             return False
         session.private_threads.add(thread_id)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("")
         return True
 
@@ -613,7 +855,7 @@ class MemoryManager:
         session.private = not session.private
         path = self._private_session_path(session.user_id)
         if session.private:
-            with open(path, "w") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write("")
         elif os.path.isfile(path):
             os.remove(path)
@@ -636,6 +878,7 @@ class MemoryManager:
             user_text,
             bot_text,
             tool_calls_info=tool_calls_info,
+            tz_name=session.timezone,
         )
         self._append_thread_block_to_daily(session.user_id, session.current_date_str, thread_id, entry)
 
@@ -660,6 +903,7 @@ class MemoryManager:
         _IDENTITY_FILES = ("bootstrap.md", "identity.md", "user.md", "soul.md", "memory.md")
         ws_files = [f for f in _IDENTITY_FILES
                     if os.path.isfile(os.path.join(workspace, f))]
+        bootstrap_active = "bootstrap.md" in ws_files
 
         for filename in ws_files:
             content = self._strip_frontmatter(
@@ -679,16 +923,33 @@ class MemoryManager:
         if session.user_memory.strip():
             parts.append(f"## Memory\n{session.user_memory.strip()}")
 
-        parts.append(
-            f"Current date and time: {datetime.now().strftime('%A, %d. %B %Y %H:%M')}"
-        )
+        # workspace_refs are injected into the user message (see chat.py
+        # _augment_with_workspace_refs), not the system prompt — that's what
+        # actually triggers the model to call the files skill.
+
+        if session.timezone:
+            now_str = _local_now(session.timezone).strftime("%A, %d. %B %Y %H:%M")
+            parts.append(
+                f"Current date and time: {now_str} ({session.timezone}). "
+                "This is the user's local time — always use it directly; "
+                "do not convert or apply offsets."
+            )
+        else:
+            now_str = datetime.now().strftime("%A, %d. %B %Y %H:%M")
+            parts.append(
+                f"Current date and time: {now_str} (server local time — user "
+                "has not configured a timezone in session config; ask the user "
+                "or set it via the `config` skill if precise local time matters)."
+            )
 
         mode_block = self._build_mode_instructions(mode)
         if mode_block:
             parts.append(mode_block)
 
         # Skill instructions
-        skill_block = self._build_skill_instructions(skills or {})
+        skill_block = self._build_skill_instructions(
+            skills or {}, bootstrap_active=bootstrap_active,
+        )
         parts.append(skill_block)
 
         return "\n\n════════════════════\n\n".join(parts)
@@ -701,8 +962,16 @@ class MemoryManager:
         return ""
 
     @staticmethod
-    def _build_skill_instructions(skills: Dict[str, Any]) -> str:
-        """Build explicit skill usage instructions for the system prompt."""
+    def _build_skill_instructions(
+        skills: Dict[str, Any], *, bootstrap_active: bool = False,
+    ) -> str:
+        """Build explicit skill usage instructions for the system prompt.
+
+        During bootstrap, the skill rules ("only answer directly for
+        greetings") conflict with the bootstrap script ("first message must
+        be …"). We trim down to just the capability list so the bootstrap
+        instructions at the top of the prompt win.
+        """
         lines = load_system_prompt("chat/skill_capabilities_intro.md").splitlines()
         for name, skill in skills.items():
             desc = getattr(skill, "description", "")
@@ -711,9 +980,13 @@ class MemoryManager:
             else:
                 lines.append(f"- {name}")
 
-        has_search = any(
-            s in skills for s in ("perplexica", "searxng", "researcher")
-        )
+        if bootstrap_active:
+            lines.append("")
+            lines.append(
+                "Bootstrap is active — follow the script at the top of this "
+                "prompt before doing anything else."
+            )
+            return "\n".join(lines)
 
         has_memory = "memory" in skills
 
@@ -732,6 +1005,7 @@ class MemoryManager:
         *,
         track_similarity: bool = True,
         tool_calls_info: Optional[List[Dict[str, Any]]] = None,
+        topic_heading: Optional[str] = None,
     ) -> None:
         """Append a user/assistant exchange to the daily log (RAM + disk).
 
@@ -741,11 +1015,16 @@ class MemoryManager:
 
         ``tool_calls_info`` is a list of dicts with 'name', 'args', and 'result'
         keys representing tool calls made during this exchange.
+
+        ``topic_heading`` inserts a markdown section heading before the entry
+        in the daily log, marking a topic shift for Dream Wiki segmentation.
         """
         entry = self._format_exchange_entry(
             user_text,
             bot_text,
             tool_calls_info=tool_calls_info,
+            topic_heading=topic_heading,
+            tz_name=session.timezone,
         )
 
         session.exchanges.append((user_text, bot_text, tool_calls_info))
@@ -770,15 +1049,31 @@ class MemoryManager:
     # Summarization
     # ------------------------------------------------------------------
 
-    def should_summarize(self, session: Session) -> str:
+    def should_summarize(
+        self,
+        session: Session,
+        summary_threshold_tokens: Optional[int] = None,
+    ) -> str:
         """Check whether conversation should be summarized.
 
         Returns the trigger reason (empty string = no summary needed).
-        The scheduler gates most triggers behind its own idle check
-        (IDLE_SUMMARIZE_MIN); only "force" bypasses that gate.
+        The scheduler gates most "soft" triggers behind its own idle check
+        (IDLE_SUMMARIZE_MIN); "force" / "tokens_force" bypass that gate.
+
+        ``summary_threshold_tokens`` (if provided) enables token-based
+        triggering against the model's context window:
+        - reaching the threshold returns "tokens"
+        - reaching 1.5× the threshold returns "tokens_force" (bypasses idle)
         """
         if session.exchange_count >= FORCE_SUMMARY_EXCHANGES:
             return "force"
+
+        if summary_threshold_tokens and summary_threshold_tokens > 0:
+            tokens = estimate_session_tokens(session)
+            if tokens >= summary_threshold_tokens * 3 // 2:
+                return "tokens_force"
+            if tokens >= summary_threshold_tokens:
+                return "tokens"
 
         if session.exchange_count >= MAX_EXCHANGES_BEFORE_SUMMARY:
             return "exchange_limit"

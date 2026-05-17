@@ -47,6 +47,7 @@ provider is used.
 """
 
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -56,6 +57,115 @@ from langchain_openai import ChatOpenAI
 
 
 logger = logging.getLogger(__name__)
+
+
+# Heuristic: how many tool-call turns to grant the SkillRunner per model.
+# Bigger / more capable models can sustain longer exploratory loops without
+# losing the plot; tiny models tend to spiral and should be cut off earlier.
+# Parses size hints like ":7b", ":120b", ":e4b", ":0.6b" from the identifier.
+_SIZE_RE = re.compile(r":(?:e)?(\d+(?:\.\d+)?)\s*b\b", re.IGNORECASE)
+
+# Frontier / cloud APIs get a generous budget regardless of size hint.
+_CAPABLE_NAME_HINTS = (
+    "gpt-oss", "gpt-4", "gpt-5", "o1-", "o3-",
+    "claude", "claude-3", "claude-4",
+    "gemini-", "deepseek-r1", "deepseek-v3",
+    "llama-3.3", "llama-4",
+)
+
+
+def estimate_max_tool_turns(model_name: str) -> int:
+    """Heuristic budget for SkillRunner tool-call loops, derived from model name.
+
+    Used when neither the skill metadata nor the model config specifies
+    ``max_tool_turns`` explicitly. The numbers are deliberately coarse —
+    small models cap out earlier, frontier models get more room to explore.
+    """
+    name = (model_name or "").lower()
+
+    if any(hint in name for hint in _CAPABLE_NAME_HINTS):
+        return 40
+
+    match = _SIZE_RE.search(model_name or "")
+    if match is None:
+        return 20  # unknown size — conservative middle ground
+
+    try:
+        size_b = float(match.group(1))
+    except ValueError:
+        return 20
+
+    if size_b >= 70:
+        return 40
+    if size_b >= 30:
+        return 30
+    if size_b >= 14:
+        return 22
+    if size_b >= 7:
+        return 16
+    if size_b >= 3:
+        return 12
+    return 8
+
+
+# Context window (num_ctx) heuristic. Default Ollama num_ctx is just 2048
+# which silently truncates prompts — picking a sane per-model default avoids
+# that footgun. Frontier APIs get their published windows; local models map
+# to the typical native context for that family.
+# Default fraction of the context window at which we trigger summarization.
+# Leaves headroom for the summary call itself (system prompt, prior summary
+# included as input, the conversation being summarized) and ~5 recent
+# exchanges that survive untouched.
+DEFAULT_SUMMARIZE_FRACTION = 0.6
+
+
+_CTX_BY_FAMILY: List[Tuple[Tuple[str, ...], int]] = [
+    # Tested in order — first match wins.
+    (("claude", "gpt-4", "gpt-5", "gemini-", "o1-", "o3-"), 200_000),
+    (("gpt-oss",), 128_000),
+    (("deepseek-r1", "deepseek-v3"), 128_000),
+    (("llama-4",), 1_000_000),
+    (("llama-3.3",), 128_000),
+    (("qwen3.5", "qwen3:", "qwen3-"), 32_768),
+    (("gemma4", "gemma3", "gemma:"), 8_192),
+    (("llama3.1", "llama3.2", "llama3:"), 8_192),
+    (("phi4", "phi3"), 16_384),
+]
+
+
+def estimate_context_size(model_name: str) -> int:
+    """Heuristic context-window (in tokens) for *model_name*.
+
+    Used as ``num_ctx`` for Ollama-backed models and as a hint for
+    client-side compaction logic. Explicit ``context_size`` in the model
+    config overrides this.
+    """
+    name = (model_name or "").lower()
+    if not name:
+        return 8_192
+
+    for prefixes, ctx in _CTX_BY_FAMILY:
+        if any(p in name for p in prefixes):
+            return ctx
+
+    match = _SIZE_RE.search(model_name or "")
+    if match is None:
+        return 8_192
+
+    try:
+        size_b = float(match.group(1))
+    except ValueError:
+        return 8_192
+
+    if size_b >= 70:
+        return 32_768
+    if size_b >= 14:
+        return 16_384
+    if size_b >= 7:
+        return 8_192
+    if size_b >= 3:
+        return 4_096
+    return 2_048
 
 
 class _NoThinkWrapper:
@@ -323,6 +433,61 @@ class LLMFactory:
         model_cfg = self.get_model_config(model_name)
         return self._provider_backend_from_cfg(model_cfg)
 
+    def max_tool_turns_for_model(self, model_name: str) -> int:
+        """Return per-model tool-call budget.
+
+        Priority: explicit ``max_tool_turns`` in the model config →
+        heuristic estimated from the model identifier. The caller (skill
+        runner factory) further allows the skill itself to override this.
+        """
+        cfg = self.get_model_config(model_name)
+        explicit = cfg.get("max_tool_turns")
+        if isinstance(explicit, int) and explicit > 0:
+            return explicit
+        model_id = str(cfg.get("model") or model_name)
+        return estimate_max_tool_turns(model_id)
+
+    def context_size_for_model(self, model_name: str) -> int:
+        """Return per-model context-window size (tokens).
+
+        Priority: explicit ``context_size`` (or legacy ``num_ctx``) in the
+        model config → heuristic from the model identifier.
+        """
+        cfg = self.get_model_config(model_name)
+        for key in ("context_size", "num_ctx"):
+            explicit = cfg.get(key)
+            if isinstance(explicit, int) and explicit > 0:
+                return explicit
+        model_id = str(cfg.get("model") or model_name)
+        return estimate_context_size(model_id)
+
+    def summary_threshold_tokens(self, model_name: str) -> int:
+        """Return the token threshold above which the conversation should
+        be summarized.
+
+        Priority:
+        1. explicit ``summarize_at_tokens`` in the model config (absolute)
+        2. ``summarize_at_fraction`` × context_size (per-model fraction)
+        3. ``DEFAULT_SUMMARIZE_FRACTION`` × context_size
+
+        The fraction default leaves headroom for the summary call itself
+        plus a few user turns of recent exchanges.
+        """
+        cfg = self.get_model_config(model_name)
+
+        explicit = cfg.get("summarize_at_tokens")
+        if isinstance(explicit, int) and explicit > 0:
+            return explicit
+
+        fraction = cfg.get("summarize_at_fraction")
+        if not isinstance(fraction, (int, float)) or fraction <= 0:
+            fraction = DEFAULT_SUMMARIZE_FRACTION
+        # Cap fraction at 0.95 so we never bump right up against the window.
+        fraction = min(float(fraction), 0.95)
+
+        ctx = self.context_size_for_model(model_name)
+        return max(1, int(ctx * fraction))
+
     def default_model_name(
         self,
         agent_type: str = "chat",
@@ -516,7 +681,7 @@ class LLMFactory:
         if agent_type.startswith("skill."):
             return "skill_runner"
         if agent_type == "skill_runner":
-            return "default"
+            return "chat"
         if agent_type == "vision":
             return "chat"
         if agent_type == "chat":
@@ -556,12 +721,15 @@ class LLMFactory:
 
         if self._is_ollama(provider_name, api_base):
             ollama_base = api_base.removesuffix("/v1") or "http://localhost:11434"
+            num_ctx = self._resolve_num_ctx(model_cfg, model)
             kwargs: Dict[str, Any] = dict(
                 model=model, temperature=temperature, base_url=ollama_base,
                 client_kwargs={"timeout": timeout},
             )
             if keep_alive is not None:
                 kwargs["keep_alive"] = keep_alive
+            if num_ctx is not None:
+                kwargs["num_ctx"] = num_ctx
             return ChatOllama(**kwargs)
 
         extra_body: Dict[str, Any] = {}
@@ -647,11 +815,27 @@ class LLMFactory:
             model_cfg.get("temperature", 0.7),
             model_cfg.get("think"),
             model_cfg.get("max_tokens"),
+            model_cfg.get("context_size") or model_cfg.get("num_ctx"),
             provider_cfg.get("keepAlive"),
         )
 
     def _is_ollama(self, provider_name: str, api_base: str) -> bool:
         return "ollama" in provider_name.lower() or ":11434" in api_base
+
+    def _resolve_num_ctx(self, model_cfg: Dict[str, Any], model: str) -> Optional[int]:
+        """Resolve num_ctx for an Ollama-backed model.
+
+        Explicit ``context_size`` / ``num_ctx`` in the model config wins;
+        otherwise the size-based heuristic. Returns ``None`` only if the
+        model_cfg has an explicit zero/negative, signalling "let Ollama's
+        own default apply" — relevant when a user knowingly wants the
+        2048-token default back.
+        """
+        for key in ("context_size", "num_ctx"):
+            explicit = model_cfg.get(key)
+            if isinstance(explicit, int):
+                return explicit if explicit > 0 else None
+        return estimate_context_size(model)
 
     def _get_provider(self, name: str) -> Dict[str, Any]:
         if name and name in self.providers:

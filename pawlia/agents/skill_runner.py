@@ -59,6 +59,7 @@ class SkillRunnerAgent(BaseAgent):
         context: Optional[Dict[str, Any]] = None,
         logger: Optional[logging.Logger] = None,
         command_fallback: bool = True,
+        max_tool_turns: Optional[int] = None,
     ):
         super().__init__(llm, logger)
         self.log_name = f"skill_{skill.name}"
@@ -67,6 +68,7 @@ class SkillRunnerAgent(BaseAgent):
         self.context = context or {}
         self.context["cwd"] = skill.base_dir
         self.command_fallback = command_fallback
+        self.max_tool_turns = max_tool_turns if (isinstance(max_tool_turns, int) and max_tool_turns > 0) else self.MAX_TOOL_TURNS
 
         # Load matching credentials into context
         self._load_credentials()
@@ -238,7 +240,7 @@ class SkillRunnerAgent(BaseAgent):
 
         nudge_count = 0
         total_tool_calls = len(first_response.tool_calls)
-        max_turns = self.skill.max_tool_turns or self.MAX_TOOL_TURNS
+        max_turns = self.skill.max_tool_turns or self.max_tool_turns
         for _turn in range(1, max_turns):
             response = await self._invoke(messages, llm=self.bound_llm)
             self.logger.debug(

@@ -199,7 +199,7 @@ class TestMemoryManager:
             mm.set_model_override(session, "fast")
             assert session.model_override == "fast"
             assert mm.get_agent_override_value(session, "chat") == "fast"
-            assert os.path.isfile(mm._agent_overrides_path("u1"))
+            assert os.path.isfile(mm._session_config_path("u1"))
 
             mm.set_model_override(session, None)
             assert session.model_override is None
@@ -211,10 +211,10 @@ class TestMemoryManager:
             session = mm.load_session("u1")
 
             mm.set_agent_override_value(session, "chat", "fast")
-            assert os.path.isfile(mm._agent_overrides_path("u1"))
+            assert os.path.isfile(mm._session_config_path("u1"))
 
             mm.set_agent_override_value(session, "chat", None)
-            assert not os.path.exists(mm._agent_overrides_path("u1"))
+            assert not os.path.exists(mm._session_config_path("u1"))
 
             mm2 = self._make_mm(tmpdir)
             session2 = mm2.load_session("u1")
@@ -229,7 +229,7 @@ class TestMemoryManager:
             mm.set_thread_model_override(session, "t1", "fast")
             assert session.model_override == "fast"
             assert mm.get_thread_model_override(session, "t1") == "fast"
-            assert os.path.isfile(mm._agent_overrides_path("u1"))
+            assert os.path.isfile(mm._session_config_path("u1"))
             assert not os.path.exists(mm._thread_agent_overrides_path("u1", "t1"))
 
     def test_migrate_legacy_thread_logs_into_daily_sections(self):
@@ -387,6 +387,48 @@ class TestShouldSummarize:
                 mm.append_exchange(session, f"q{i}", f"unique answer {i}")
             assert mm.should_summarize(session) == "force"
 
+    def test_token_trigger_soft(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u1")
+            # ~ 200 chars ≈ 50 tokens — threshold 40 should trigger soft
+            mm.append_exchange(session, "x" * 100, "y" * 100)
+            assert mm.should_summarize(session, summary_threshold_tokens=40) == "tokens"
+
+    def test_token_trigger_force(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u1")
+            # ~ 1200 chars ≈ 300 tokens — threshold 100 → 1.5× = 150 → force
+            for i in range(6):
+                mm.append_exchange(session, "x" * 100, "y" * 100)
+            assert mm.should_summarize(session, summary_threshold_tokens=100) == "tokens_force"
+
+    def test_token_trigger_below_threshold(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u1")
+            mm.append_exchange(session, "short", "short")
+            # ~30 chars ≈ 8 tokens — threshold 1000 means no trigger
+            assert mm.should_summarize(session, summary_threshold_tokens=1000) == ""
+
+    def test_token_threshold_zero_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u1")
+            mm.append_exchange(session, "x" * 1000, "y" * 1000)
+            # Zero threshold means token-based trigger is off — only count-based remains.
+            assert mm.should_summarize(session, summary_threshold_tokens=0) == ""
+
+    def test_force_count_beats_token_threshold(self):
+        """exchange_count >= FORCE_SUMMARY_EXCHANGES wins even if tokens are tiny."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u1")
+            for i in range(FORCE_SUMMARY_EXCHANGES):
+                mm.append_exchange(session, f"q{i}", f"a{i}")
+            assert mm.should_summarize(session, summary_threshold_tokens=10_000_000) == "force"
+
 
 class TestDetectRepetition:
     def test_no_repetition(self):
@@ -420,8 +462,20 @@ class TestBuildSystemPrompt:
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)
             session = mm.load_session("u1")
+            # Skill rules are suppressed during bootstrap to avoid
+            # conflicting with the bootstrap script. Simulate a fully
+            # bootstrapped workspace by removing bootstrap.md.
+            os.remove(os.path.join(mm._workspace_dir("u1"), "bootstrap.md"))
             prompt = mm.build_system_prompt(session)
             assert "MUST call the matching skill" in prompt
+
+    def test_bootstrap_suppresses_skill_rules(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u1")
+            prompt = mm.build_system_prompt(session)
+            assert "Bootstrap is active" in prompt
+            assert "MUST call the matching skill" not in prompt
 
     def test_includes_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -685,13 +685,7 @@ async def test_preanswer_warmup_prepares_greeting_without_playing_it():
     client = SimpleNamespace(room_typing=AsyncMock())
     agent = MagicMock()
     agent.build_system_prompt.return_value = "CALL PROMPT"
-
-    async def _fake_run_streamed(*args, on_sentence=None, **kwargs):
-        if on_sentence:
-            await on_sentence("Hallo, ich bin da.")
-        return "Hallo, ich bin da."
-
-    agent.run_streamed = AsyncMock(side_effect=_fake_run_streamed)
+    agent.run_streamed = AsyncMock(return_value="Hallo")
     send_cb = AsyncMock()
     session = CallSession(
         call_id="call-warmup",
@@ -815,6 +809,51 @@ async def test_send_greeting_is_noop_after_preanswer_greeting():
     await session._send_greeting()
 
     agent.run_streamed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_greeting_drops_tts_after_hangup():
+    """If the call hangs up before the LLM finishes, the greeting must not be
+    enqueued onto a dead TTS track or posted to the room."""
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    agent = MagicMock()
+    agent.build_system_prompt.return_value = "CALL PROMPT"
+
+    send_cb = AsyncMock()
+    enqueue = MagicMock()
+    stop_hold = MagicMock()
+
+    session = CallSession(
+        call_id="call-hangup-mid-greeting",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-hangup",
+        client=SimpleNamespace(),
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=send_cb,
+    )
+    session._tts_track = SimpleNamespace(enqueue_pcm_float32=enqueue, stop_hold=stop_hold)
+
+    async def _fake_run_streamed(*args, on_sentence=None, **kwargs):
+        # Simulate the call hanging up *during* greeting generation, before
+        # any sentence callback fires.
+        session._hungup = True
+        session._done.set()
+        if on_sentence:
+            await on_sentence("Hallo, ich bin da.")
+        return "Hallo, ich bin da."
+
+    agent.run_streamed = AsyncMock(side_effect=_fake_run_streamed)
+
+    with patch("pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=np.ones(480, dtype=np.float32))):
+        await session._send_greeting()
+
+    enqueue.assert_not_called()
+    stop_hold.assert_not_called()
+    send_cb.assert_not_awaited()
+    assert session._greeting_sent is False
 
 
 def test_load_hold_audio_uses_ndarray_resampling():

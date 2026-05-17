@@ -368,10 +368,12 @@ class CallSession:
     BARGEIN_RMS_THRESHOLD = 0.05
     BARGEIN_MIN_WORDS = 4
     BARGEIN_MIN_CHARS = 12
-    # Pre-answer warmup: load STT and prepare the greeting before Matrix sees
-    # the call as answered, so the caller does not sit through cold-start time.
+    # Pre-answer warmup: load STT before Matrix sees the call as answered, so
+    # the caller does not sit through cold-start time. Greeting generation is
+    # NOT included — it depends on a remote LLM round-trip that can take 25s+
+    # and would delay the SDP answer, leaving the caller in "ringing" state.
     PREANSWER_WARMUP_ENABLED = True
-    PREANSWER_WARMUP_TIMEOUT_SECONDS = 25.0
+    PREANSWER_WARMUP_TIMEOUT_SECONDS = 5.0
     PREANSWER_STT_SILENCE_SECONDS = 0.4
     CONNECT_TIMEOUT_SECONDS = 45.0
     HANGUP_ON_MEDIA_END = True
@@ -419,6 +421,7 @@ class CallSession:
         self._answer_sent = asyncio.Event()
         self._media_connected = asyncio.Event()
         self._prepared_greeting: Optional[tuple[str, List[np.ndarray]]] = None
+        self._greeting_task: Optional[asyncio.Task] = None
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
         # Adaptive silence detection: rolling EMA of background noise floor
@@ -904,7 +907,8 @@ class CallSession:
         asyncio.ensure_future(self._log_receiver_stats())
         # Greet the caller once signaling and media are both ready.  Warmup may
         # prepare the LLM/TTS result ahead of time, but playback is gated here.
-        asyncio.ensure_future(self._send_greeting_when_ready())
+        if not self._greeting_sent:
+            self._greeting_task = asyncio.ensure_future(self._send_greeting_when_ready())
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
@@ -919,17 +923,17 @@ class CallSession:
             asyncio.create_task(self._warm_stt_with_silence()),
             asyncio.create_task(self._prepare_greeting()),
         ]
+        task = asyncio.gather(*tasks)
         try:
-            await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
-                timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
-            )
+            await asyncio.wait_for(task, timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS)
             logger.info(
                 "call %s: pre-answer warmup finished in %.1fs",
                 self.call_id[:8],
                 time.monotonic() - started,
             )
         except asyncio.TimeoutError:
+            for pending in tasks:
+                pending.cancel()
             logger.warning(
                 "call %s: pre-answer warmup timed out after %.1fs; answering anyway",
                 self.call_id[:8],
@@ -1092,13 +1096,19 @@ class CallSession:
             )
 
             async def _on_sentence(sentence: str) -> None:
-                if not self._tts_track:
+                if not self._tts_track or self._done.is_set() or self._hungup:
                     return
                 try:
                     tts_pcm = await synthesize_pcm(
                         sentence, self._app.config, sample_rate=48000,
                         voice_override=self._voice_override(),
                     )
+                    if self._done.is_set() or self._hungup:
+                        logger.info(
+                            "call %s: greeting TTS dropped (%d samples) — call ended before playback: %s",
+                            self.call_id[:8], len(tts_pcm) if tts_pcm is not None else 0, sentence[:60],
+                        )
+                        return
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info(
                             "call %s: greeting TTS (%d samples): %s",
@@ -1115,11 +1125,16 @@ class CallSession:
                 thread_id=self.thread_id,
                 on_sentence=_on_sentence,
             )
+            if self._done.is_set() or self._hungup:
+                logger.info("call %s: greeting completed after hangup — not posting to room", self.call_id[:8])
+                return
             await self._send_cb(response)
             self._greeting_sent = True
             self._mark_activity()
             self._activate_agc()
             logger.info("call %s: greeting sent", self.call_id[:8])
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.warning("call %s: greeting failed: %s", self.call_id[:8], e)
 
@@ -1157,6 +1172,8 @@ class CallSession:
             return
         self._hungup = True
         self._done.set()
+        if self._greeting_task and not self._greeting_task.done():
+            self._greeting_task.cancel()
         if self._pc:
             await self._pc.close()
         logger.info("call %s hung up", self.call_id[:8])

@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from pawlia.llm import LLMFactory
+from pawlia.llm import LLMFactory, estimate_context_size, estimate_max_tool_turns
 
 
 class _DummyLLM:
@@ -307,3 +307,182 @@ def test_get_uses_agent_overrides_for_resolution(monkeypatch: pytest.MonkeyPatch
     llm = factory.get("chat", agent_overrides={"chat": "m2,m1"})
 
     assert llm.invoke([]) == "ok-m2"
+
+
+# ---------------------------------------------------------------------------
+# max_tool_turns heuristic + per-model override
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("model, expected", [
+    # Frontier / cloud APIs by name
+    ("openai/gpt-oss-120b", 40),
+    ("gpt-4o", 40),
+    ("claude-opus-4-7", 40),
+    ("gemini-3-flash-preview:cloud", 40),
+    ("deepseek-r1:14b", 40),  # name hint beats size
+    # Local model size parsing
+    ("qwen3.5:latest", 20),   # no size suffix → conservative middle ground
+    ("qwen3:120b", 40),
+    ("qwen3:70b", 40),
+    ("qwen3:32b", 30),
+    ("qwen3:14b", 22),
+    ("qwen3:7b", 16),
+    ("qwen3:4b", 12),
+    ("qwen3:2b", 8),
+    ("qwen3:0.6b", 8),
+    # Gemma effective-param naming (gemma4:e4b)
+    ("gemma4:e4b", 12),
+    ("gemma4:26b", 22),
+    # Edge cases
+    ("", 20),
+])
+def test_estimate_max_tool_turns(model: str, expected: int):
+    assert estimate_max_tool_turns(model) == expected
+
+
+def test_max_tool_turns_explicit_config_overrides_heuristic():
+    config = _base_config()
+    config["models"]["fast"] = {"model": "qwen3:4b", "provider": "test", "max_tool_turns": 25}
+    factory = LLMFactory(config)
+    # Without override, 4b would give 12; explicit value must win.
+    assert factory.max_tool_turns_for_model("fast") == 25
+
+
+def test_max_tool_turns_falls_back_to_heuristic():
+    config = _base_config()
+    config["models"]["fast"] = {"model": "qwen3:4b", "provider": "test"}
+    factory = LLMFactory(config)
+    assert factory.max_tool_turns_for_model("fast") == 12
+
+
+def test_max_tool_turns_works_for_raw_model_string():
+    config = _base_config()
+    factory = LLMFactory(config)
+    # Unknown config key, falls through get_model_config → heuristic on the raw name.
+    assert factory.max_tool_turns_for_model("qwen3:14b") == 22
+
+
+def test_max_tool_turns_ignores_invalid_explicit_value():
+    config = _base_config()
+    config["models"]["m1"] = {"model": "qwen3:7b", "provider": "test", "max_tool_turns": 0}
+    factory = LLMFactory(config)
+    # Zero/negative is treated as "not set" — fall back to heuristic.
+    assert factory.max_tool_turns_for_model("m1") == 16
+
+
+# ---------------------------------------------------------------------------
+# context_size heuristic + per-model override
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("model, expected", [
+    # Frontier APIs by name
+    ("claude-opus-4-7", 200_000),
+    ("gpt-4o", 200_000),
+    ("gemini-3-flash-preview:cloud", 200_000),
+    ("openai/gpt-oss-120b", 128_000),
+    ("deepseek-r1:14b", 128_000),
+    # Local families
+    ("qwen3.5:latest", 32_768),
+    ("qwen3:14b", 32_768),
+    ("qwen3:4b", 32_768),
+    ("gemma4:e4b", 8_192),
+    ("gemma3:12b", 8_192),
+    ("llama3.1:latest", 8_192),
+    ("phi4:latest", 16_384),
+    # Size-based fallback (no family match)
+    ("unknown-model:70b", 32_768),
+    ("unknown-model:14b", 16_384),
+    ("unknown-model:7b", 8_192),
+    ("unknown-model:3b", 4_096),
+    ("unknown-model:1b", 2_048),
+    # No size, no family
+    ("totally-unknown", 8_192),
+    ("", 8_192),
+])
+def test_estimate_context_size(model: str, expected: int):
+    assert estimate_context_size(model) == expected
+
+
+def test_context_size_explicit_config_overrides_heuristic():
+    config = _base_config()
+    config["models"]["big"] = {"model": "qwen3.5:latest", "provider": "test", "context_size": 65536}
+    factory = LLMFactory(config)
+    assert factory.context_size_for_model("big") == 65536
+
+
+def test_context_size_num_ctx_alias_accepted():
+    config = _base_config()
+    config["models"]["legacy"] = {"model": "qwen3:7b", "provider": "test", "num_ctx": 4096}
+    factory = LLMFactory(config)
+    assert factory.context_size_for_model("legacy") == 4096
+
+
+def test_context_size_falls_back_to_heuristic():
+    config = _base_config()
+    config["models"]["q"] = {"model": "qwen3:14b", "provider": "test"}
+    factory = LLMFactory(config)
+    assert factory.context_size_for_model("q") == 32_768
+
+
+def test_context_size_in_cache_key_triggers_rebuild():
+    config = _base_config()
+    config["models"]["m1"] = {"model": "qwen3:7b", "provider": "test"}
+    factory = LLMFactory(config)
+    key_default = factory._cache_key(config["models"]["m1"])
+    key_explicit = factory._cache_key({**config["models"]["m1"], "context_size": 16384})
+    assert key_default != key_explicit
+
+
+# ---------------------------------------------------------------------------
+# summary_threshold_tokens
+# ---------------------------------------------------------------------------
+
+def test_summary_threshold_default_fraction():
+    config = _base_config()
+    config["models"]["m1"] = {"model": "qwen3:14b", "provider": "test"}
+    factory = LLMFactory(config)
+    # qwen3:14b → ctx 32768, default 0.6 → 19660
+    assert factory.summary_threshold_tokens("m1") == int(32_768 * 0.6)
+
+
+def test_summary_threshold_explicit_tokens_overrides_fraction():
+    config = _base_config()
+    config["models"]["m1"] = {
+        "model": "claude-opus-4-7", "provider": "test",
+        "summarize_at_tokens": 8000,
+        "summarize_at_fraction": 0.9,  # would imply 180K — absolute wins
+    }
+    factory = LLMFactory(config)
+    assert factory.summary_threshold_tokens("m1") == 8000
+
+
+def test_summary_threshold_custom_fraction():
+    config = _base_config()
+    config["models"]["m1"] = {
+        "model": "qwen3.5:latest", "provider": "test",
+        "summarize_at_fraction": 0.4,
+    }
+    factory = LLMFactory(config)
+    # qwen3.5 → ctx 32768, 0.4 → 13107
+    assert factory.summary_threshold_tokens("m1") == int(32_768 * 0.4)
+
+
+def test_summary_threshold_caps_fraction_at_0_95():
+    config = _base_config()
+    config["models"]["m1"] = {
+        "model": "unknown-model:7b", "provider": "test",
+        "summarize_at_fraction": 1.5,
+    }
+    factory = LLMFactory(config)
+    # unknown-model:7b → size fallback ctx 8192; 1.5 capped to 0.95 → 7782
+    assert factory.summary_threshold_tokens("m1") == int(8192 * 0.95)
+
+
+def test_summary_threshold_invalid_fraction_falls_back_to_default():
+    config = _base_config()
+    config["models"]["m1"] = {
+        "model": "unknown-model:7b", "provider": "test",
+        "summarize_at_fraction": -0.5,
+    }
+    factory = LLMFactory(config)
+    assert factory.summary_threshold_tokens("m1") == int(8192 * 0.6)

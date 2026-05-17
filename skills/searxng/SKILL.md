@@ -5,6 +5,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "2.0"
+  trust: external
   compatibility: Requires SearXNG instance configuration
   requires_config:
     - url

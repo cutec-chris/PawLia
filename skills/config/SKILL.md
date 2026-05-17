@@ -184,10 +184,88 @@ python <scripts_dir>/config.py private --off
 python <scripts_dir>/config.py private --thread <thread_id> --off
 ```
 
+## Session config (per-user overrides)
+
+`session/<user>/config.yaml` stores per-user overrides that mirror the global `config.yaml` structure.
+Supported sections: `agents`, `tts`, `disabled_skills`, `user`.
+
+The `user` section holds personal settings that govern how the model perceives
+the user's environment. Currently:
+
+- `user.timezone` — IANA name like `Europe/Berlin`. When set, the model sees
+  the user's local time in its system prompt and in daily log timestamps.
+  When unset, the model sees server-local time (UTC in container deploys),
+  which leads to confused replies like "kurz vor fünf" at 06:56 local. Always
+  set this if the user has mentioned their timezone, location, or working hours.
+  Validated via Python's `zoneinfo` — typos are rejected with a hint.
+
+Show the full session config:
+
+```
+python <scripts_dir>/config.py session
+```
+
+Show one section:
+
+```
+python <scripts_dir>/config.py session --section agents
+python <scripts_dir>/config.py session --section tts
+python <scripts_dir>/config.py session --section disabled_skills
+python <scripts_dir>/config.py session --section user
+```
+
+Read a specific value:
+
+```
+python <scripts_dir>/config.py session --get-path agents.chat
+python <scripts_dir>/config.py session --get-path user.timezone
+python <scripts_dir>/config.py session --get-path tts.voice
+```
+
+Write a specific value:
+
+```
+python <scripts_dir>/config.py session --set-path agents.chat --set-value smart
+python <scripts_dir>/config.py session --set-path tts.voice --set-value de_DE-thorsten-low
+python <scripts_dir>/config.py session --set-path user.timezone --set-value Europe/Berlin
+```
+
+The `model`, `agent`, and `voice` shortcut commands continue to work and write into this file.
+
+**Timezone validation:** writes to `user.timezone` are validated via `zoneinfo` —
+an unknown name is rejected with a hint pointing at the IANA tz database list.
+Take effect immediately: the next message will see the new local time in the
+system prompt. Clear with `--set-value` omitted (no value → field removed).
+
+## Disabled skills (per-session)
+
+Prevent specific skills from being available in this session, even if globally configured.
+
+List currently disabled skills:
+
+```
+python <scripts_dir>/config.py disabled-skills
+```
+
+Disable a skill:
+
+```
+python <scripts_dir>/config.py disabled-skills --add researcher
+python <scripts_dir>/config.py disabled-skills --add browser
+```
+
+Re-enable a skill:
+
+```
+python <scripts_dir>/config.py disabled-skills --remove researcher
+```
+
+Changes take effect immediately for the current session.
+
 ## Output
 
 All commands return JSON. On success: `{"success": true, ...}`. On error: `{"success": false, "error": "..."}`.
 
 After `set`, the response includes `"value_read_back"` — the value actually written to disk. Always compare it against what you intended to set and report any discrepancy to the user.
 
-**Note:** Changes to config.yaml (via `set`) take effect after the next restart. The `model` and `agent` commands change the active runtime selection immediately without restart.
+**Note:** Changes to config.yaml (via `set`) take effect after the next restart. The `model`, `agent`, `voice`, and `disabled-skills` commands take effect immediately without restart.
