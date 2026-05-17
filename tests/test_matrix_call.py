@@ -713,6 +713,51 @@ async def test_preanswer_warmup_prepares_greeting_without_playing_it():
 
 
 @pytest.mark.asyncio
+async def test_preanswer_warmup_timeout_keeps_greeting_warmup_running():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    agent = MagicMock()
+    agent.build_system_prompt.return_value = "CALL PROMPT"
+
+    greeting_ready = asyncio.Event()
+
+    async def _slow_run_streamed(*args, on_sentence=None, **kwargs):
+        await greeting_ready.wait()
+        if on_sentence:
+            await on_sentence("Hallo, ich bin da.")
+        return "Hallo, ich bin da."
+
+    agent.run_streamed = AsyncMock(side_effect=_slow_run_streamed)
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-warmup-timeout",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-warmup-timeout",
+        client=SimpleNamespace(),
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=send_cb,
+    )
+    session.PREANSWER_WARMUP_TIMEOUT_SECONDS = 0.01
+    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+
+    with patch("pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value=None)), patch(
+        "pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=np.ones(480, dtype=np.float32))
+    ):
+        await session._run_preanswer_warmup()
+        assert session._prepared_greeting is None
+        assert session._prepare_greeting_task is not None
+        assert session._prepare_greeting_task.done() is False
+
+        greeting_ready.set()
+        await session._prepare_greeting_task
+
+    assert session._prepared_greeting is not None
+    agent.run_streamed.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_deferred_greeting_waits_for_answer_and_media_ready():
     app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     agent = MagicMock()
@@ -753,6 +798,37 @@ async def test_deferred_greeting_waits_for_answer_and_media_ready():
     agent.run_streamed.assert_awaited_once()
     send_cb.assert_awaited_once_with("Hallo, ich bin da.")
     session._tts_track.enqueue_pcm_float32.assert_called_once()
+    assert session._greeting_sent is True
+
+
+@pytest.mark.asyncio
+async def test_send_greeting_waits_for_existing_prepare_task():
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-await-prepared-greeting",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-await-prepared-greeting",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=send_cb,
+    )
+    pcm = np.ones(480, dtype=np.float32)
+    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+
+    async def _prepare_later():
+        await asyncio.sleep(0)
+        session._prepared_greeting = ("Hallo, ich bin da.", [pcm])
+
+    session._prepare_greeting_task = asyncio.create_task(_prepare_later())
+
+    await session._send_greeting()
+
+    session._tts_track.enqueue_pcm_float32.assert_called_once_with(pcm)
+    session._tts_track.stop_hold.assert_called_once()
+    send_cb.assert_awaited_once_with("Hallo, ich bin da.")
     assert session._greeting_sent is True
 
 

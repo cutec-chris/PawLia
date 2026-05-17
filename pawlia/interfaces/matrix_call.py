@@ -368,12 +368,10 @@ class CallSession:
     BARGEIN_RMS_THRESHOLD = 0.05
     BARGEIN_MIN_WORDS = 4
     BARGEIN_MIN_CHARS = 12
-    # Pre-answer warmup: load STT before Matrix sees the call as answered, so
-    # the caller does not sit through cold-start time. Greeting generation is
-    # NOT included — it depends on a remote LLM round-trip that can take 25s+
-    # and would delay the SDP answer, leaving the caller in "ringing" state.
+    # Pre-answer warmup: load STT and prepare the first greeting before Matrix
+    # sees the call as answered so the caller does not hear a long cold start.
     PREANSWER_WARMUP_ENABLED = True
-    PREANSWER_WARMUP_TIMEOUT_SECONDS = 5.0
+    PREANSWER_WARMUP_TIMEOUT_SECONDS = 25.0
     PREANSWER_STT_SILENCE_SECONDS = 0.4
     CONNECT_TIMEOUT_SECONDS = 45.0
     HANGUP_ON_MEDIA_END = True
@@ -421,6 +419,7 @@ class CallSession:
         self._answer_sent = asyncio.Event()
         self._media_connected = asyncio.Event()
         self._prepared_greeting: Optional[tuple[str, List[np.ndarray]]] = None
+        self._prepare_greeting_task: Optional[asyncio.Task] = None
         self._greeting_task: Optional[asyncio.Task] = None
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
@@ -919,11 +918,9 @@ class CallSession:
             return
 
         started = time.monotonic()
-        tasks = [
-            asyncio.create_task(self._warm_stt_with_silence()),
-            asyncio.create_task(self._prepare_greeting()),
-        ]
-        task = asyncio.gather(*tasks)
+        stt_task = asyncio.create_task(self._warm_stt_with_silence())
+        greeting_task = self._ensure_prepare_greeting_task()
+        task = asyncio.gather(stt_task, asyncio.shield(greeting_task))
         try:
             await asyncio.wait_for(task, timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS)
             logger.info(
@@ -932,13 +929,29 @@ class CallSession:
                 time.monotonic() - started,
             )
         except asyncio.TimeoutError:
-            for pending in tasks:
-                pending.cancel()
+            stt_task.cancel()
             logger.warning(
-                "call %s: pre-answer warmup timed out after %.1fs; answering anyway",
+                "call %s: pre-answer warmup timed out after %.1fs; answering anyway"
+                " (greeting warmup continues in background)",
                 self.call_id[:8],
                 self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
             )
+        finally:
+            if stt_task.done():
+                try:
+                    await stt_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+
+    def _ensure_prepare_greeting_task(self) -> asyncio.Task:
+        """Start greeting warmup once and reuse it across answer/greeting flow."""
+        task = self._prepare_greeting_task
+        if task is None or task.done():
+            task = asyncio.create_task(self._prepare_greeting())
+            self._prepare_greeting_task = task
+        return task
 
     async def _warm_stt_with_silence(self) -> None:
         """Send a short silent WAV through the active STT path to trigger loading."""
@@ -1062,6 +1075,15 @@ class CallSession:
         if self._greeting_sent:
             return
 
+        task = self._prepare_greeting_task
+        if self._prepared_greeting is None and task and not task.done():
+            try:
+                await task
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("call %s: awaiting greeting warmup failed: %s", self.call_id[:8], e)
+
         if self._prepared_greeting is not None:
             response, prepared_pcm = self._prepared_greeting
             if self._tts_track:
@@ -1174,6 +1196,8 @@ class CallSession:
         self._done.set()
         if self._greeting_task and not self._greeting_task.done():
             self._greeting_task.cancel()
+        if self._prepare_greeting_task and not self._prepare_greeting_task.done():
+            self._prepare_greeting_task.cancel()
         if self._pc:
             await self._pc.close()
         logger.info("call %s hung up", self.call_id[:8])
