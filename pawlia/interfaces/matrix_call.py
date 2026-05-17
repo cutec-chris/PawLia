@@ -373,6 +373,8 @@ class CallSession:
     PREANSWER_WARMUP_ENABLED = True
     PREANSWER_WARMUP_TIMEOUT_SECONDS = 25.0
     PREANSWER_STT_SILENCE_SECONDS = 0.4
+    CONNECT_TIMEOUT_SECONDS = 45.0
+    HANGUP_ON_MEDIA_END = True
     # Wait this long after the user's latest speech before replying.  This
     # lets callers tell a longer story without the agent jumping into every
     # pause that was only used for breathing or thinking.
@@ -633,6 +635,17 @@ class CallSession:
             self.RESPONSE_DELAY_SECONDS,
             minimum=0.0,
         )
+        self.CONNECT_TIMEOUT_SECONDS = self._get_float_config(
+            voip_cfg,
+            "connect_timeout_seconds",
+            self.CONNECT_TIMEOUT_SECONDS,
+            minimum=1.0,
+        )
+        self.HANGUP_ON_MEDIA_END = self._get_bool_config(
+            voip_cfg,
+            "hangup_on_media_end",
+            self.HANGUP_ON_MEDIA_END,
+        )
 
     def _init_webrtc_vad(self):
         """Initialize the optional WebRTC VAD instance from config."""
@@ -884,6 +897,7 @@ class CallSession:
 
         # Auto-hangup watchdog
         asyncio.ensure_future(self._watchdog())
+        asyncio.ensure_future(self._connect_timeout_watchdog())
         # Send our ICE candidates once gathering completes (parsed from local SDP)
         asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
         # Periodic RTP receiver stats for diagnostics
@@ -1146,6 +1160,15 @@ class CallSession:
         if self._pc:
             await self._pc.close()
         logger.info("call %s hung up", self.call_id[:8])
+
+    @property
+    def finished(self) -> bool:
+        """True once this session cannot usefully accept more signaling."""
+        if self._hungup or self._done.is_set():
+            return True
+        if self._pc and self._pc.connectionState in {"closed", "failed"}:
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Internal: audio pipeline
@@ -1563,6 +1586,7 @@ class CallSession:
 
         logger.info("call %s: audio pipeline started", self.call_id[:8])
         frames_received = 0
+        media_ended = False
         try:
             while not self._done.is_set():
                 try:
@@ -1574,6 +1598,7 @@ class CallSession:
                 except MediaStreamError:
                     logger.warning("call %s: MediaStreamError after %d frames — track ended",
                                    self.call_id[:8], frames_received)
+                    media_ended = True
                     break
 
                 frames_received += 1
@@ -1751,6 +1776,15 @@ class CallSession:
         finally:
             self._done.set()
             logger.info("call %s: audio pipeline ended", self.call_id[:8])
+            if media_ended and self.HANGUP_ON_MEDIA_END and not self._hungup:
+                logger.info(
+                    "call %s: media track ended; sending hangup to avoid stale client reconnect",
+                    self.call_id[:8],
+                )
+                try:
+                    await self._send_hangup_event()
+                finally:
+                    await self.hangup()
     async def _process_speech(
         self,
         pcm: "np.ndarray",
@@ -1890,7 +1924,8 @@ class CallSession:
             logger.warning("call %s: ICE did not recover after %ds — ending call",
                            self.call_id[:8], ICE_RECONNECT_TIMEOUT)
             await self._notify_disconnect()
-            self._done.set()
+            await self._send_hangup_event()
+            await self.hangup()
 
     async def _notify_disconnect(self) -> None:
         """Send a Matrix message when the connection drops unexpectedly."""
@@ -1899,6 +1934,35 @@ class CallSession:
         except Exception as e:
             logger.warning("call %s: could not send disconnect notification: %s",
                            self.call_id[:8], e)
+
+    async def _connect_timeout_watchdog(self) -> None:
+        """End calls that never establish media after the SDP answer."""
+        try:
+            await self._answer_sent.wait()
+            await asyncio.wait_for(
+                self._media_connected.wait(),
+                timeout=self.CONNECT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            if self._done.is_set() or self._hungup:
+                return
+            state = self._pc.connectionState if self._pc else "unknown"
+            ice_state = self._pc.iceConnectionState if self._pc else "unknown"
+            logger.warning(
+                "call %s: media did not connect within %.1fs "
+                "(connection=%s ice=%s); ending call",
+                self.call_id[:8],
+                self.CONNECT_TIMEOUT_SECONDS,
+                state,
+                ice_state,
+            )
+            await self._notify_disconnect()
+            await self._send_hangup_event()
+            await self.hangup()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug("call %s: connect timeout watchdog error: %s", self.call_id[:8], e)
 
     async def _watchdog(self) -> None:
         """Auto-hangup after prolonged call inactivity."""
@@ -2041,9 +2105,17 @@ class CallManager:
             logger.info("call %s: invite expired, ignoring", event.call_id[:8])
             return
 
-        if event.call_id in self._sessions:
-            logger.warning("call %s: duplicate invite, ignoring", event.call_id[:8])
-            return
+        existing = self._sessions.get(event.call_id)
+        if existing:
+            if existing.finished:
+                logger.info(
+                    "call %s: replacing finished session on duplicate invite",
+                    event.call_id[:8],
+                )
+                self._sessions.pop(event.call_id, None)
+            else:
+                logger.warning("call %s: duplicate invite, ignoring", event.call_id[:8])
+                return
 
         sdp_offer = event.offer.get("sdp", "")
         if not sdp_offer:

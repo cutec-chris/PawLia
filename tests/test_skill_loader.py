@@ -97,6 +97,8 @@ class TestSkillLoader:
         skills = SkillLoader.discover(skills_dir)
         # Should find at least the skills that don't require config
         assert isinstance(skills, dict)
+        assert "memory" in skills
+        assert skills["memory"].workflow is not None
         for name, skill in skills.items():
             assert skill.name == name
             assert skill.description

@@ -560,6 +560,8 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
                     "preanswer_warmup_timeout_seconds": 7.5,
                     "preanswer_stt_silence_seconds": 0.2,
                     "response_delay_seconds": 3.5,
+                    "connect_timeout_seconds": 12.0,
+                    "hangup_on_media_end": False,
                 }
             }),
             cfg={},
@@ -585,6 +587,8 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
         assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(7.5)
         assert session.PREANSWER_STT_SILENCE_SECONDS == pytest.approx(0.2)
         assert session.RESPONSE_DELAY_SECONDS == pytest.approx(3.5)
+        assert session.CONNECT_TIMEOUT_SECONDS == pytest.approx(12.0)
+        assert session.HANGUP_ON_MEDIA_END is False
 
 
 def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
@@ -614,6 +618,8 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
                 "preanswer_warmup_timeout_seconds": 0,
                 "preanswer_stt_silence_seconds": 0,
                 "response_delay_seconds": -1,
+                "connect_timeout_seconds": 0,
+                "hangup_on_media_end": "perhaps",
             }
         }),
         cfg={},
@@ -639,6 +645,38 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
     assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(CallSession.PREANSWER_WARMUP_TIMEOUT_SECONDS)
     assert session.PREANSWER_STT_SILENCE_SECONDS == pytest.approx(CallSession.PREANSWER_STT_SILENCE_SECONDS)
     assert session.RESPONSE_DELAY_SECONDS == CallSession.RESPONSE_DELAY_SECONDS
+    assert session.CONNECT_TIMEOUT_SECONDS == CallSession.CONNECT_TIMEOUT_SECONDS
+    assert session.HANGUP_ON_MEDIA_END == CallSession.HANGUP_ON_MEDIA_END
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_watchdog_hangs_up_stale_call():
+    client = SimpleNamespace(room_send=AsyncMock())
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-connect-timeout",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-connect-timeout",
+        client=client,
+        app=SimpleNamespace(config={"voip": {"connect_timeout_seconds": 0.01}}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=send_cb,
+    )
+    session._pc = SimpleNamespace(
+        connectionState="connecting",
+        iceConnectionState="checking",
+        close=AsyncMock(),
+    )
+    session._answer_sent.set()
+
+    await session._connect_timeout_watchdog()
+
+    send_cb.assert_awaited_once()
+    client.room_send.assert_awaited_once()
+    session._pc.close.assert_awaited_once()
+    assert session.finished is True
 
 
 @pytest.mark.asyncio

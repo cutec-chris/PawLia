@@ -56,6 +56,8 @@ _MAX_CHAT_TOOL_TURNS = 16
 _MAX_CHAT_NUDGES = 3
 _REPLAY_TOOL_RESULT_LIMIT = 240
 _REPLAY_TOOL_CALLS_LIMIT = 3
+_LIVE_TOOL_RESULT_LIMIT = 12_000
+_PERSIST_TOOL_RESULT_LIMIT = 2_000
 _DEFERRED_TOOL_INTENT_RE = re.compile(
     r"(?:\b(?:let me|i(?:'ll| will| am going to)|first\s*,?\s*i(?:'ll| will)|now\s+i(?:'ll| will)|"
     r"ich\s+(?:werde|schaue|suche|pruefe|prüfe|checke|oeffne|öffne)|lass\s+mich)\b.{0,140}"
@@ -262,6 +264,19 @@ class ChatAgent(BaseAgent):
             return text
         return text[: limit - 3].rstrip() + "..."
 
+    @staticmethod
+    def _limit_tool_result(value: Any, *, limit: int = _LIVE_TOOL_RESULT_LIMIT) -> str:
+        """Keep tool output small enough for weaker/smaller chat models."""
+        text = "" if value is None else str(value)
+        if len(text) <= limit:
+            return text
+        omitted = len(text) - limit
+        return (
+            text[:limit].rstrip()
+            + f"\n\n[Tool output truncated: {omitted} characters omitted. "
+            "Ask for a narrower file/section/search if more detail is needed.]"
+        )
+
     def _format_replayed_assistant_turn(
         self,
         bot_text: str,
@@ -437,11 +452,14 @@ class ChatAgent(BaseAgent):
                 tool_calls_info.append({
                     "name": skill_name,
                     "args": normalized_args,
-                    "result": result,
+                    "result": self._limit_tool_result(
+                        result,
+                        limit=_PERSIST_TOOL_RESULT_LIMIT,
+                    ),
                 })
 
                 messages.append(ToolMessage(
-                    content=result,
+                    content=self._limit_tool_result(result),
                     tool_call_id=tool_call.get("id", ""),
                 ))
 
@@ -587,10 +605,13 @@ class ChatAgent(BaseAgent):
                 tool_calls_info.append({
                     "name": skill_name,
                     "args": normalized_args,
-                    "result": skill_result,
+                    "result": self._limit_tool_result(
+                        skill_result,
+                        limit=_PERSIST_TOOL_RESULT_LIMIT,
+                    ),
                 })
                 messages.append(ToolMessage(
-                    content=skill_result,
+                    content=self._limit_tool_result(skill_result),
                     tool_call_id=tool_call.get("id", ""),
                 ))
 
@@ -649,10 +670,13 @@ class ChatAgent(BaseAgent):
                     tool_calls_info.append({
                         "name": skill_name,
                         "args": normalized_args,
-                        "result": skill_result,
+                        "result": self._limit_tool_result(
+                            skill_result,
+                            limit=_PERSIST_TOOL_RESULT_LIMIT,
+                        ),
                     })
                     messages.append(ToolMessage(
-                        content=skill_result,
+                        content=self._limit_tool_result(skill_result),
                         tool_call_id=tool_call.get("id", ""),
                     ))
 
