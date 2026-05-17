@@ -31,6 +31,8 @@ Dispatcher with a two-turn pattern:
 The ChatAgent also handles:
 - Building the system prompt from identity files + memory + summary
 - Replaying recent exchanges as structured message pairs
+- Replaying earlier skill-backed exchanges in a compact text form instead of
+  restoring full historical tool payloads into context
 - Persisting exchanges to the daily log
 - Triggering conversation summarization (as background asyncio task)
 
@@ -38,6 +40,9 @@ The ChatAgent also handles:
 
 Executes a single skill. Dual-mode with `command_fallback` parameter:
 
+- **Mode 0: Workflow mode:** If a compiled `workflow.yaml` exists and is valid,
+  PawLia prefers it first. Building blocks become tools, and execution is
+  verified programmatically where possible.
 - **Tool-call mode:** LLM calls bash/tools via `bind_tools`. Multi-turn loop (max 12 turns).
 - **Command mode** (fallback for small models): LLM outputs a shell command in a ` ```bash ` block. Command is extracted via regex and executed. Returns raw output — no LLM interpretation to avoid hallucination.
 
@@ -130,13 +135,13 @@ Tools extend `Tool(ABC)` and register in `ToolRegistry`. Each tool provides `as_
 
 ```
 session/{user_id}/
+├── session_version.txt             # on-disk log/session format version
 ├── workspace/                      # Obsidian vault
 │   ├── memory/
-│   │   ├── 2026-03-15.md           # daily chat log (append-only)
+│   │   ├── 2026-03-15.md           # daily chat log (main + embedded thread sections)
 │   │   ├── memory.md                # persistent user facts
 │   │   ├── context_summary.md       # LLM-generated conversation summary
-│   │   ├── thread_XXX_2026-03-15.md  # per-thread logs
-│   │   └── model_override.txt       # session-level model override
+│   │   └── agent_overrides.yaml     # session-level agent/model overrides
 │   ├── calendar/                   # Full Calendar plugin events
 │   │   └── 2026-04-10 Meeting.md   # one .md per event (frontmatter)
 │   ├── tasks.md                    # Obsidian Tasks plugin format
@@ -145,8 +150,8 @@ session/{user_id}/
 │   │   ├── log.md                  # chronological audit log
 │   │   └── topics/                 # one .md page per topic/entity
 │   ├── soul.md                     # agent personality (from template)
-│   ├── IDENTITY.md                 # agent identity (from template)
-│   ├── USER.md                     # user context (from template)
+│   ├── identity.md                 # agent identity (from template)
+│   ├── user.md                     # user context (from template)
 │   ├── bootstrap.md                # onboarding (removed once identity files are filled)
 │   ├── skills/                     # workspace skills (with allow_workspace: true)
 │   └── .git/                       # optional: auto-managed by workspace git sync
@@ -157,15 +162,18 @@ session/{user_id}/
     └── dreamed_files.json          # Dream Wiki tracking
 ```
 
-**System prompt** is built from all `.md` files in workspace root + summary + memory + skill instructions.
+**System prompt** is built from the workspace identity files actually used by the
+code (`bootstrap.md`, `identity.md`, `user.md`, `soul.md`, `memory.md`) plus
+the conversation summary, current time block, mode-specific instructions, and
+skill instructions.
 
-Identity files (`soul.md`, `IDENTITY.md`, `USER.md`) are copied as templates from `pawlia/prompts/` on first use. `bootstrap.md` is removed once all three identity files are filled.
+Identity files (`soul.md`, `identity.md`, `user.md`) are copied as templates from `pawlia/prompts/` on first use. `bootstrap.md` is removed once all three identity files are filled and differ from their templates.
 
 **Summarization triggers:**
 
 | Trigger | Threshold | Constant |
 |---------|-----------|----------|
-| Exchange count | 10 | `MAX_EXCHANGES_BEFORE_SUMMARY` |
+| Exchange count | 20 | `MAX_EXCHANGES_BEFORE_SUMMARY` |
 | Bot response repetition | 0.6 similarity | `SIMILARITY_THRESHOLD` (window of 4) |
 | Idle timeout | 300s | `IDLE_TIMEOUT_SECONDS` |
 | Force threshold | 30 | `FORCE_SUMMARY_EXCHANGES` |
@@ -242,4 +250,6 @@ agents:
 - Skills are isolated: own directory, own config, no shared state
 - Tools are pluggable: extend `Tool`, register in `App.__init__`
 - Don't add conversation history to SkillRunnerAgent — isolation prevents hallucination
+- Prefer compiled workflows for reliability when a skill provides one; free-form
+  tool calling remains the fallback path inside the SkillRunner
 - Command mode returns raw script output — no LLM interpretation phase

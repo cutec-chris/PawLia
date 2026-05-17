@@ -3,34 +3,19 @@ version: '1.0'
 compiled_at: '2026-03-26'
 compiled_by: workflow_compiler
 workflows:
-- id: create_automation
-  trigger: User wants to create a new automation script and schedule
-  max_steps: 10
+- id: register_automation
+  trigger: User wants to create a scheduled automation that runs a natural-language instruction
+  max_steps: 5
   building_blocks:
-  - id: write_script
-    command: python <scripts_dir>/../files/scripts/files.py write --filename "{script_path}"
-    description: Write Python automation script to user's workspace
-    status_desc: Schreibe Automatisierungsskript {script_name}
-    env_params:
-    - script_content
-    verify:
-      exit_code: 0
-      output_not_contains:
-      - '"success": false'
-    on_error: script_write_failed
   - id: register_job
     command: python <scripts_dir>/../organizer/scripts/organizer.py add-job --name
-      "{job_name}" --script "{script_name}.py" --schedule "{schedule}"
-    description: Register script as scheduled job via organizer
+      "{job_name}" --instruction "{instruction}" --schedule "{schedule}"
+    description: Register a natural-language instruction as a scheduled job via organizer
     status_desc: Registriere Job {job_name} mit Zeitplan {schedule}
     verify:
       exit_code: 0
       output_contains:
-      - Job added successfully
-  - id: script_write_failed
-    command: echo '{"success": false, "error": "Script write failed"}'
-    description: Report script writing failure
-    status_desc: 'Fehler: {error_message}'
+      - '"success": true'
 - id: manage_jobs
   trigger: User wants to list, delete, or toggle existing automation jobs
   max_steps: 5

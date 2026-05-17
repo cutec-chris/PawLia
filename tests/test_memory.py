@@ -61,6 +61,16 @@ class TestParseExchanges:
     def test_no_matches(self):
         assert MemoryManager._parse_exchanges("random text") == []
 
+    def test_extract_main_history_ignores_thread_sections(self):
+        daily = (
+            "[10:00:00] User: main\nAssistant: root\n\n"
+            "## Thread abc\n"
+            "<!-- PAWLIA_THREAD_SECTION -->\n"
+            "[10:05:00] User: sub\nAssistant: reply\n"
+            "<!-- /PAWLIA_THREAD_SECTION -->\n"
+        )
+        assert MemoryManager._extract_main_history(daily) == "[10:00:00] User: main\nAssistant: root"
+
 
 class TestMemoryManager:
     def _make_mm(self, tmpdir):
@@ -133,6 +143,22 @@ class TestMemoryManager:
             assert "hello" in session.daily_history
             assert len(session.recent_bot_responses) == 1
 
+    def test_append_thread_exchange_writes_to_daily_thread_section(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.append_exchange(session, "main", "root")
+            mm.append_thread_exchange(session, "abc", "sub", "reply")
+
+            daily_path = mm._daily_path("u1", session.current_date_str)
+            daily = mm._read(daily_path)
+            assert "## Thread abc" in daily
+            assert "PAWLIA_THREAD_SECTION" in daily
+            assert "sub" in daily
+            assert MemoryManager._extract_main_history(daily).strip().endswith("Assistant: root")
+            assert MemoryManager._extract_thread_history(daily, "abc").strip().endswith("Assistant: reply")
+
     def test_append_exchange_no_similarity_tracking(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = self._make_mm(tmpdir)
@@ -142,6 +168,88 @@ class TestMemoryManager:
 
             assert session.exchange_count == 1
             assert len(session.recent_bot_responses) == 0
+
+    def test_agent_overrides_persist_and_merge(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.set_agent_override_value(session, "default", "smart,fast")
+            mm.set_agent_override_value(session, "skills.browser", "groq-fast,fast")
+            mm.set_agent_override_value(session, "chat", "smart")
+            mm.set_agent_override_value(session, "chat", "vision-fast", thread_id="t1")
+
+            assert mm.get_agent_override_value(session, "default") == "smart,fast"
+            assert mm.get_agent_override_value(session, "skills.browser") == "groq-fast,fast"
+            assert mm.get_agent_override_value(session, "chat", thread_id="t1") == "vision-fast"
+            assert mm.effective_agent_overrides(session, "t1")["default"] == "smart,fast"
+            assert mm.effective_agent_overrides(session, "t1")["chat"] == "vision-fast"
+
+            mm2 = self._make_mm(tmpdir)
+            session2 = mm2.load_session("u1")
+            assert mm2.get_agent_override_value(session2, "default") == "smart,fast"
+            assert mm2.get_agent_override_value(session2, "skills.browser") == "groq-fast,fast"
+            assert mm2.get_agent_override_value(session2, "chat", thread_id="t1") == "vision-fast"
+
+    def test_set_model_override_updates_chat_agent_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.set_model_override(session, "fast")
+            assert session.model_override == "fast"
+            assert mm.get_agent_override_value(session, "chat") == "fast"
+            assert os.path.isfile(mm._agent_overrides_path("u1"))
+
+            mm.set_model_override(session, None)
+            assert session.model_override is None
+            assert mm.get_agent_override_value(session, "chat") is None
+
+    def test_clearing_chat_override_removes_yaml_without_legacy_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.set_agent_override_value(session, "chat", "fast")
+            assert os.path.isfile(mm._agent_overrides_path("u1"))
+
+            mm.set_agent_override_value(session, "chat", None)
+            assert not os.path.exists(mm._agent_overrides_path("u1"))
+
+            mm2 = self._make_mm(tmpdir)
+            session2 = mm2.load_session("u1")
+            assert session2.model_override is None
+            assert mm2.get_agent_override_value(session2, "chat") is None
+
+    def test_thread_model_override_reuses_session_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+
+            mm.set_thread_model_override(session, "t1", "fast")
+            assert session.model_override == "fast"
+            assert mm.get_thread_model_override(session, "t1") == "fast"
+            assert os.path.isfile(mm._agent_overrides_path("u1"))
+            assert not os.path.exists(mm._thread_agent_overrides_path("u1", "t1"))
+
+    def test_migrate_legacy_thread_logs_into_daily_sections(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = self._make_mm(tmpdir)
+            session = mm.load_session("u1")
+            legacy_path = mm._thread_daily_path("u1", "abc", session.current_date_str)
+            with open(legacy_path, "w", encoding="utf-8") as f:
+                f.write("[10:00:00] User: old\nAssistant: thread reply\n")
+            version_path = mm._session_version_path("u1")
+            if os.path.exists(version_path):
+                os.remove(version_path)
+            mm._sessions.pop("u1", None)
+
+            session2 = mm.load_session("u1")
+            daily = mm._read(mm._daily_path("u1", session2.current_date_str))
+            assert "## Thread abc" in daily
+            assert "thread reply" in daily
+            assert not os.path.exists(legacy_path)
+            assert mm.get_thread_context(session2, "abc")[0] == ("old", "thread reply", None)
 
     def test_append_persists_to_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:

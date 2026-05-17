@@ -1,34 +1,30 @@
 ---
 name: researcher
 description: >
-  Create and manage research projects with their own knowledge base.
-  Each project has its own RAG instance for indexing and querying documents.
-  Use when the user wants to research a topic, add URLs/documents to a project,
-  or query an existing research project.
+  Create and manage research projects in the workspace.
+  Each project stores scraped documents as markdown files under
+  workspace/research/{project}/. No RAG backend is involved — the DreamWiki
+  is fed exclusively by conversations. Research insights flow into the wiki
+  organically when the user discusses their findings.
   The query MUST be a command:
   "create <name> <description>" to create a new project,
   "list" to list all projects,
-  "add <project> <url> [depth]" to scrape and index a URL (depth for recursive, default 1),
-  "query <project> <question>" to query the project's knowledge base,
+  "add <project> <url> [depth]" to scrape and save a URL (depth for recursive, default 1),
+  "query <project> <question>" to search the project's documents,
   "delete <project>" to delete a project,
   "rename <old> <new>" to rename a project.
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "1.0"
-  requires_config:
-    - embedding_provider
-    - embedding_model
-    - embedding_dim
-    - embedding_host
+  version: "2.0"
   optional_config:
-    - rag_provider           # defaults to embedding_provider
-    - rag_model              # LLM for RAG entity extraction (default: qwen3.5:latest)
-    - rag_numctx             # LLM context window (default: 4096)
-    - rag_timeout            # LLM timeout in seconds (default: 600)
-    - rag_embedding_timeout  # embedding timeout in seconds (default: 120)
-    - rag_max_async_llm      # max parallel LLM requests (default: 1)
-    - rag_max_async_embedding # max parallel embedding requests (default: 1)
+    - embedding_provider        # enables semantic search (ollama or openai-compat)
+    - embedding_model           # e.g. bge-m3:latest
+    - embedding_dim             # embedding vector dimension
+    - embedding_host            # e.g. http://localhost:11434
+    - embedding_base_url        # for openai-compatible providers
+    - embedding_api_key         # for openai-compatible providers
+    - rag_embedding_timeout     # embedding request timeout in seconds (default: 120)
 ---
 
 # Researcher Skill
@@ -48,10 +44,25 @@ python <scripts_dir>/researcher.py <command> [args...]
 |---------|-----------|-------------|
 | `create <name> <desc>` | `python <scripts_dir>/researcher.py create "<name>" "<description>"` | Create a new research project |
 | `list` | `python <scripts_dir>/researcher.py list` | List all projects |
-| `add <project> <url> [depth]` | `python <scripts_dir>/researcher.py add "<project>" "<url>" [depth]` | Scrape URL and index it (depth for recursive crawling) |
-| `query <project> <question>` | `python <scripts_dir>/researcher.py query "<project>" "<question>"` | Query the project knowledge base |
+| `add <project> <url> [depth]` | `python <scripts_dir>/researcher.py add "<project>" "<url>" [depth]` | Scrape URL and save to workspace (depth for recursive crawling) |
+| `query <project> <question>` | `python <scripts_dir>/researcher.py query "<project>" "<question>"` | Search the project's documents |
 | `delete <project>` | `python <scripts_dir>/researcher.py delete "<project>"` | Delete a project |
 | `rename <old> <new>` | `python <scripts_dir>/researcher.py rename "<old>" "<new>"` | Rename a project |
+
+## Storage
+
+Documents are saved as markdown under:
+```
+$PAWLIA_SESSION_DIR/{user_id}/workspace/research/{project}/
+```
+
+No RAG backend or DreamWiki is involved. The embed index (`.index/`) is built
+lazily on the first `query` call and invalidated automatically after each `add`.
+
+## Search
+
+- **With embedding config**: semantic search via cosine similarity on bge-m3 (or configured model)
+- **Without embedding config**: keyword search fallback
 
 ## Step-by-step instructions
 

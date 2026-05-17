@@ -6,8 +6,9 @@
 aiortc>=1.9
 av>=12.0
 numpy>=1.24
+webrtcvad-wheels>=2.0.14
 
 # TTS providers
 edge-tts>=6.1        # Microsoft Edge TTS (needs internet, no local model)
 # piper-tts comes from Alpine package (has compiled espeakbridge + onnxruntime)
-# pathvalidate installed system-wide in Dockerfile.voip (missing dep in Alpine's piper-tts)
+pathvalidate>=3.3,<4  # missing Python dep in Alpine's piper-tts package

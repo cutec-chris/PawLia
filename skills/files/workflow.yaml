@@ -1,10 +1,10 @@
 skill: files
-version: '1.1'
-compiled_at: '2026-03-26'
+version: '1.3'
+compiled_at: '2026-05-03'
 compiled_by: workflow_compiler
 workflows:
 - id: file_operations
-  trigger: When the user wants to list, read, write, or delete files in their sandboxed
+  trigger: When the user wants to list, read, write, edit, search, or delete files in their sandboxed
     workspace
   max_steps: 10
   goal_check:
@@ -13,7 +13,7 @@ workflows:
   building_blocks:
   - id: list_files
     command: python {scripts_dir}/files.py list
-    description: List all files in the workspace
+    description: List all files in the workspace (recursive, paths relative to workspace root)
     status_desc: Liste Dateien im Workspace
     verify:
       exit_code: 0
@@ -21,18 +21,88 @@ workflows:
       - '"success": false'
   - id: read_file
     command: python {scripts_dir}/files.py read --filename "{filename}"
-    description: Read content of a specific file
+    description: Read full content of a specific file
     status_desc: Lese Datei {filename}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: read_file_range
+    command: python {scripts_dir}/files.py read --filename "{filename}" --offset {offset} --limit {limit}
+    description: Read a line range of a file (0-based offset, limit lines). Use for large files.
+    status_desc: Lese Datei {filename} (Zeilen {offset}+{limit})
     verify:
       exit_code: 0
       output_not_contains:
       - '"success": false'
   - id: write_file
     command: python {scripts_dir}/files.py write --filename "{filename}"
-    description: Write content to a file (short or multiline)
+    description: Write content to a file (creates or overwrites). Prefer edit_file for small changes to existing files.
     status_desc: Schreibe Inhalt in Datei {filename}
     env_params:
     - content
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: edit_file
+    command: python {scripts_dir}/files.py edit --filename "{filename}"
+    description: Replace exactly one occurrence of old_string with new_string in an existing file. old_string must be unique in the file (include surrounding context if needed) and match byte-for-byte. Use this instead of rewriting the whole file for targeted changes.
+    status_desc: Bearbeite Datei {filename}
+    env_params:
+    - old_string
+    - new_string
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: edit_file_replace_all
+    command: python {scripts_dir}/files.py edit --filename "{filename}" --replace-all
+    description: Replace every occurrence of old_string with new_string in an existing file (no uniqueness requirement).
+    status_desc: Bearbeite Datei {filename} (alle Vorkommen)
+    env_params:
+    - old_string
+    - new_string
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: grep_workspace
+    command: python {scripts_dir}/files.py grep --pattern "{pattern}"
+    description: Search a regex across all workspace files. Returns filename, line number, and matching text.
+    status_desc: Suche im Workspace nach {pattern}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: grep_file
+    command: python {scripts_dir}/files.py grep --pattern "{pattern}" --filename "{filename}"
+    description: Search a regex inside a single workspace file.
+    status_desc: Suche in {filename} nach {pattern}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: outline_file
+    command: python {scripts_dir}/files.py outline --filename "{filename}"
+    description: Return the markdown heading structure of a file (level, title, line). Use to orient in a long markdown file before reading specific parts.
+    status_desc: Outline für {filename}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: read_section
+    command: python {scripts_dir}/files.py read-section --filename "{filename}" --section "{section}"
+    description: Read a markdown section by heading title (without leading #s). Returns content from the heading down to the next same-or-higher-level heading. Heading title must be unique in the file.
+    status_desc: Lese Abschnitt {section} aus {filename}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - '"success": false'
+  - id: delete_file
+    command: python {scripts_dir}/files.py delete --filename "{filename}"
+    description: Delete a file from the workspace
+    status_desc: Lösche Datei {filename}
     verify:
       exit_code: 0
       output_not_contains:

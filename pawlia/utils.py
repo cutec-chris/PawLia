@@ -1,13 +1,16 @@
 """Shared utility functions used across PawLia modules."""
 
+import asyncio
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 import yaml
 
 logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
 
 
 def _raise_invalid_dir(path: str) -> None:
@@ -129,6 +132,29 @@ def ensure_dir(path: str) -> str:
         _raise_invalid_dir(path)
 
     return path
+
+
+async def run_sync_in_thread(fn: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+    """Run a blocking callable in a plain thread and await the result.
+
+    We avoid ``asyncio.to_thread`` / ``run_in_executor`` here because they hang
+    in the current sandboxed Python 3.14 environment, while regular
+    ``threading.Thread`` still works reliably.
+    """
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[_T] = loop.create_future()
+
+    def _worker() -> None:
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            loop.call_soon_threadsafe(fut.set_exception, exc)
+        else:
+            loop.call_soon_threadsafe(fut.set_result, result)
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    return await fut
 
 
 # ---------------------------------------------------------------------------

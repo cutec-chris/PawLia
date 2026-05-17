@@ -47,6 +47,7 @@ provider is used.
 """
 
 import logging
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from langchain_core.messages import BaseMessage, SystemMessage
@@ -91,38 +92,89 @@ class _NoThinkWrapper:
 
 
 class _FallbackLLMWrapper:
-    """Wrap multiple LLMs and fail over to the next one on runtime errors."""
+    """Wrap multiple LLMs and fail over on runtime errors.
+
+    Tracks failures across requests per model. After three failed requests,
+    a model is skipped for 30 minutes before it is considered again.
+    """
+
+    _BLACKLIST_THRESHOLD = 3
+    _BLACKLIST_COOLDOWN_SECONDS = 30 * 60
 
     def __init__(self, llms: List[Any], labels: List[str]):
         if not llms:
             raise ValueError("Fallback wrapper requires at least one LLM")
         self._llms = llms
         self._labels = labels
+        self._now = time.monotonic
+        self._failures = [0 for _ in llms]
+        self._blacklisted_until = [0.0 for _ in llms]
+        self._last_errors: List[Optional[Exception]] = [None for _ in llms]
 
-    def _is_retryable_error(self, exc: Exception) -> bool:
-        """Check if the error should be retried instead of falling back."""
-        error_str = str(exc)
-        return "400" in error_str or "tool_use_failed" in error_str
+    def _is_blacklisted(self, idx: int, now: float) -> bool:
+        return self._blacklisted_until[idx] > now
+
+    def _note_success(self, idx: int) -> None:
+        self._failures[idx] = 0
+        self._blacklisted_until[idx] = 0.0
+        self._last_errors[idx] = None
+
+    def _note_failure(self, idx: int, exc: Exception) -> None:
+        now = self._now()
+        self._last_errors[idx] = exc
+        self._failures[idx] += 1
+        if self._failures[idx] >= self._BLACKLIST_THRESHOLD:
+            self._blacklisted_until[idx] = now + self._BLACKLIST_COOLDOWN_SECONDS
+            self._failures[idx] = 0
+            logger.warning(
+                "LLM blacklist: model '%s' failed %d times across requests, skipping it for %d minutes",
+                self._labels[idx],
+                self._BLACKLIST_THRESHOLD,
+                self._BLACKLIST_COOLDOWN_SECONDS // 60,
+            )
+
+    def _raise_if_all_blacklisted(self) -> None:
+        now = self._now()
+        active = [
+            idx for idx in range(len(self._llms))
+            if not self._is_blacklisted(idx, now)
+        ]
+        if active:
+            return
+
+        earliest_idx = min(
+            range(len(self._llms)),
+            key=lambda idx: self._blacklisted_until[idx],
+        )
+        remaining = max(0, int(self._blacklisted_until[earliest_idx] - now))
+        last_exc = self._last_errors[earliest_idx]
+        msg = (
+            "All fallback models are temporarily blacklisted; "
+            f"next retry for '{self._labels[earliest_idx]}' in about {remaining}s"
+        )
+        if last_exc is not None:
+            raise RuntimeError(msg) from last_exc
+        raise RuntimeError(msg)
 
     def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
-            retries = 0
-            while retries <= 3:  # max 3 retries
-                try:
-                    return llm.invoke(messages, **kwargs)
-                except Exception as exc:
-                    last_exc = exc
-                    if self._is_retryable_error(exc) and retries < 3:
-                        logger.warning(
-                            "LLM retry: model '%s' failed with retryable error (%s), retrying (%d/3)",
-                            self._labels[idx],
-                            exc,
-                            retries + 1,
-                        )
-                        retries += 1
-                        continue
-                    break
+            now = self._now()
+            if self._is_blacklisted(idx, now):
+                logger.info(
+                    "LLM skip: model '%s' is temporarily blacklisted for %ds more",
+                    self._labels[idx],
+                    int(self._blacklisted_until[idx] - now),
+                )
+                continue
+            try:
+                result = llm.invoke(messages, **kwargs)
+                self._note_success(idx)
+                return result
+            except Exception as exc:
+                last_exc = exc
+                self._note_failure(idx, exc)
             if idx < len(self._llms) - 1:
                 logger.warning(
                     "LLM fallback: model '%s' failed (%s), trying '%s'",
@@ -135,23 +187,23 @@ class _FallbackLLMWrapper:
 
     async def ainvoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
-            retries = 0
-            while retries <= 3:  # max 3 retries
-                try:
-                    return await llm.ainvoke(messages, **kwargs)
-                except Exception as exc:
-                    last_exc = exc
-                    if self._is_retryable_error(exc) and retries < 3:
-                        logger.warning(
-                            "LLM retry: model '%s' failed with retryable error (%s), retrying (%d/3)",
-                            self._labels[idx],
-                            exc,
-                            retries + 1,
-                        )
-                        retries += 1
-                        continue
-                    break
+            now = self._now()
+            if self._is_blacklisted(idx, now):
+                logger.info(
+                    "LLM skip: model '%s' is temporarily blacklisted for %ds more",
+                    self._labels[idx],
+                    int(self._blacklisted_until[idx] - now),
+                )
+                continue
+            try:
+                result = await llm.ainvoke(messages, **kwargs)
+                self._note_success(idx)
+                return result
+            except Exception as exc:
+                last_exc = exc
+                self._note_failure(idx, exc)
             if idx < len(self._llms) - 1:
                 logger.warning(
                     "LLM fallback: model '%s' failed (%s), trying '%s'",
@@ -170,14 +222,25 @@ class _FallbackLLMWrapper:
 
     async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
+            now = self._now()
+            if self._is_blacklisted(idx, now):
+                logger.info(
+                    "LLM skip(stream): model '%s' is temporarily blacklisted for %ds more",
+                    self._labels[idx],
+                    int(self._blacklisted_until[idx] - now),
+                )
+                continue
             yielded_any = False
             try:
                 async for chunk in llm.astream(messages, **kwargs):
                     yielded_any = True
                     yield chunk
+                self._note_success(idx)
                 return
             except Exception as exc:
+                self._note_failure(idx, exc)
                 if yielded_any:
                     raise
                 last_exc = exc
@@ -209,9 +272,13 @@ class LLMFactory:
     # Public API
     # ------------------------------------------------------------------
 
-    def get(self, agent_type: str = "chat") -> Any:
+    def get(self, agent_type: str = "chat", agent_overrides: Optional[Dict[str, Any]] = None) -> Any:
         """Return a (cached) LLM for the given agent type."""
-        model_cfgs = self._resolve_agent_candidates(agent_type)
+        model_cfgs = self._resolve_agent_candidates(
+            agent_type,
+            backend="pawlia",
+            agent_overrides=agent_overrides,
+        )
         if len(model_cfgs) == 1:
             return self._get_or_build_model(model_cfgs[0])
 
@@ -233,6 +300,50 @@ class LLMFactory:
             return cfg["model"]
         return name
 
+    def get_model_config(self, model_name: str) -> Dict[str, Any]:
+        """Resolve *model_name* to its full model config without building an LLM."""
+        if model_name in self.models:
+            return dict(self.models[model_name])
+
+        for _key, cfg in self.models.items():
+            if cfg.get("model") == model_name:
+                return dict(cfg)
+
+        default = self._resolve_agent("default")
+        return {**default, "model": model_name}
+
+    def get_provider_name_for_model(self, model_name: str) -> str:
+        model_cfg = self.get_model_config(model_name)
+        return str(model_cfg.get("provider") or self._default_provider_name())
+
+    def get_provider_config(self, provider_name: str) -> Dict[str, Any]:
+        return dict(self._get_provider(provider_name))
+
+    def get_backend_for_model(self, model_name: str) -> str:
+        model_cfg = self.get_model_config(model_name)
+        return self._provider_backend_from_cfg(model_cfg)
+
+    def default_model_name(
+        self,
+        agent_type: str = "chat",
+        agent_overrides: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Return the first configured model selector for *agent_type*."""
+        raw = self._resolve_agent_value_name(self._agent_value(agent_type, agent_overrides=agent_overrides))
+        if raw:
+            return raw
+
+        fallback = self._fallback_agent(agent_type)
+        if fallback:
+            return self.default_model_name(fallback, agent_overrides=agent_overrides)
+
+        if self.models:
+            return next(iter(self.models))
+
+        raise RuntimeError(
+            f"Cannot resolve agent '{agent_type}': no models defined in config"
+        )
+
     def get_with_model(self, model_name: str) -> Any:
         """Return a (cached) LLM by model name.
 
@@ -241,19 +352,12 @@ class LLMFactory:
         config entry.  If still unresolved, it is treated as a raw model
         identifier and the default provider is used.
         """
-        if model_name in self.models:
-            model_cfg = self.models[model_name]
-        else:
-            # Reverse lookup: match by actual model name inside configs
-            model_cfg = None
-            for _key, cfg in self.models.items():
-                if cfg.get("model") == model_name:
-                    model_cfg = cfg
-                    break
-            if model_cfg is None:
-                # Raw model string — use default provider
-                default = self._resolve_agent("default")
-                model_cfg = {**default, "model": model_name}
+        model_cfg = self.get_model_config(model_name)
+        backend = self._provider_backend_from_cfg(model_cfg)
+        if backend != "pawlia":
+            raise RuntimeError(
+                f"Model '{model_name}' uses backend '{backend}' and cannot be built by LLMFactory"
+            )
         key = self._cache_key(model_cfg)
         if key not in self._cache:
             self._cache[key] = self._build(model_cfg)
@@ -263,7 +367,11 @@ class LLMFactory:
     # Config resolution
     # ------------------------------------------------------------------
 
-    def _resolve_agent(self, agent_type: str) -> Dict[str, Any]:
+    def _resolve_agent(
+        self,
+        agent_type: str,
+        agent_overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Resolve the model config for an agent type following fallback chains.
 
         Supports two config styles:
@@ -285,13 +393,15 @@ class LLMFactory:
               chat:
                 model: qwen3.5:latest
         """
-        candidates = self._resolve_agent_candidates(agent_type)
+        candidates = self._resolve_agent_candidates(agent_type, agent_overrides=agent_overrides)
         return candidates[0]
 
     def _resolve_agent_candidates(
         self,
         agent_type: str,
         _visited: Optional[Set[str]] = None,
+        backend: Optional[str] = None,
+        agent_overrides: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Resolve one or more model configs for an agent type.
 
@@ -304,21 +414,33 @@ class LLMFactory:
         visited = set(visited)
         visited.add(agent_type)
 
-        value = self._agent_value(agent_type)
+        value = self._agent_value(agent_type, agent_overrides=agent_overrides)
         resolved = self._resolve_agent_value(value)
+        if backend is not None:
+            resolved = [
+                cfg for cfg in resolved
+                if self._provider_backend_from_cfg(cfg) == backend
+            ]
         if resolved:
             return resolved
 
         # Not found or unresolvable — walk up the fallback chain
         fallback = self._fallback_agent(agent_type)
         if fallback:
-            fallback_resolved = self._resolve_agent_candidates(fallback, visited)
+            fallback_resolved = self._resolve_agent_candidates(
+                fallback,
+                visited,
+                backend=backend,
+                agent_overrides=agent_overrides,
+            )
             if fallback_resolved:
                 return fallback_resolved
 
         # Last resort: use the first defined model in config
         if self.models:
-            return [next(iter(self.models.values()))]
+            for cfg in self.models.values():
+                if backend is None or self._provider_backend_from_cfg(cfg) == backend:
+                    return [cfg]
 
         raise RuntimeError(
             f"Cannot resolve agent '{agent_type}': no models defined in config"
@@ -353,10 +475,16 @@ class LLMFactory:
 
         return configs
 
-    def _agent_value(self, agent_type: str) -> Any:
+    def _agent_value(self, agent_type: str, agent_overrides: Optional[Dict[str, Any]] = None) -> Any:
         """Return the raw value assigned to an agent type (string key or inline dict)."""
+        overrides = agent_overrides or {}
+
         # "default" accepts both "default" (new) and "defaults" (legacy plural)
         if agent_type == "default":
+            if "default" in overrides:
+                return overrides.get("default")
+            if "defaults" in overrides:
+                return overrides.get("defaults")
             return (
                 self.agents_cfg.get("default")
                 or self.agents_cfg.get("defaults")
@@ -364,9 +492,24 @@ class LLMFactory:
 
         if agent_type.startswith("skill."):
             skill_name = agent_type[len("skill."):]
+            override_skills = overrides.get("skills", {})
+            if isinstance(override_skills, dict) and skill_name in override_skills:
+                return override_skills.get(skill_name)
             return self.agents_cfg.get("skills", {}).get(skill_name)
 
+        if agent_type in overrides:
+            return overrides.get(agent_type)
         return self.agents_cfg.get(agent_type)
+
+    def _resolve_agent_value_name(self, value: Any) -> Optional[str]:
+        """Return the first selector string for a raw agent config value."""
+        if isinstance(value, str):
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            return parts[0] if parts else None
+        if isinstance(value, dict):
+            model = value.get("model")
+            return str(model) if model else None
+        return None
 
     def _fallback_agent(self, agent_type: str) -> Optional[str]:
         """Return the next agent type to try in the fallback chain."""
@@ -391,6 +534,12 @@ class LLMFactory:
         temperature = model_cfg.get("temperature", 0.7)
         provider_name = model_cfg.get("provider") or self._default_provider_name()
         provider_cfg = self._get_provider(provider_name)
+        provider_backend = str(provider_cfg.get("backend") or "pawlia")
+
+        if provider_backend != "pawlia":
+            raise RuntimeError(
+                f"Provider '{provider_name}' uses backend '{provider_backend}' and cannot be built by LLMFactory"
+            )
 
         api_base = provider_cfg.get("apiBase", "").rstrip("/")
         api_key = provider_cfg.get("apiKey", "none")
@@ -492,8 +641,13 @@ class LLMFactory:
         provider_cfg = self._get_provider(provider_name)
         return (
             model_cfg.get("model", "llama3.1:latest"),
+            provider_name,
             provider_cfg.get("apiBase", ""),
+            provider_cfg.get("backend", "pawlia"),
             model_cfg.get("temperature", 0.7),
+            model_cfg.get("think"),
+            model_cfg.get("max_tokens"),
+            provider_cfg.get("keepAlive"),
         )
 
     def _is_ollama(self, provider_name: str, api_base: str) -> bool:
@@ -505,6 +659,11 @@ class LLMFactory:
         if self.providers:
             return next(iter(self.providers.values()))
         return {"apiBase": "http://localhost:11434/v1", "apiKey": "none"}
+
+    def _provider_backend_from_cfg(self, model_cfg: Dict[str, Any]) -> str:
+        provider_name = str(model_cfg.get("provider") or self._default_provider_name())
+        provider_cfg = self._get_provider(provider_name)
+        return str(provider_cfg.get("backend") or "pawlia")
 
     def _default_provider_name(self) -> str:
         if self.providers:

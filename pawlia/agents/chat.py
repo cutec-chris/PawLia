@@ -6,9 +6,11 @@ the ChatAgent spawns a SkillRunnerAgent to do the actual work, then
 incorporates the result into its final response.
 """
 
+import asyncio
 import json
 import logging
 import re
+import uuid
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 # Callback types
@@ -33,6 +35,7 @@ if TYPE_CHECKING:
 
 _SENTENCE_RE = re.compile(r'[.!?…]\s')
 _RE_CODE_BLOCK = re.compile(r'```[^\n]*\n(.*?)(?:```|$)', re.DOTALL)
+_RE_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
 
 _FAKE_TOOL_CALL_NUDGE = (
     "You wrote a tool call as plain text or a code block instead of using the "
@@ -40,13 +43,21 @@ _FAKE_TOOL_CALL_NUDGE = (
     "Use a real tool call now."
 )
 _MAX_FAKE_TOOL_RETRIES = 5
-_EMPTY_TURN2_NUDGE = "The tool finished. Please respond to the user now."
+_EMPTY_TURN2_NUDGE = (
+    "You have reached the maximum number of tool calls. "
+    "Do NOT call any more tools. "
+    "Summarize what you found so far and give the user a direct text response."
+)
 _CHAT_CONTINUE_NUDGE = (
     "The task is not complete yet. If you need a skill, call it now instead of describing "
     "what you plan to do. Only answer the user once the requested work is actually done."
 )
-_MAX_CHAT_TOOL_TURNS = 8
+_MAX_CHAT_TOOL_TURNS = 16
 _MAX_CHAT_NUDGES = 3
+_REPLAY_TOOL_RESULT_LIMIT = 240
+_REPLAY_TOOL_CALLS_LIMIT = 3
+_LIVE_TOOL_RESULT_LIMIT = 12_000
+_PERSIST_TOOL_RESULT_LIMIT = 2_000
 _DEFERRED_TOOL_INTENT_RE = re.compile(
     r"(?:\b(?:let me|i(?:'ll| will| am going to)|first\s*,?\s*i(?:'ll| will)|now\s+i(?:'ll| will)|"
     r"ich\s+(?:werde|schaue|suche|pruefe|prüfe|checke|oeffne|öffne)|lass\s+mich)\b.{0,140}"
@@ -96,7 +107,7 @@ class ChatAgent(BaseAgent):
         self,
         llm: ChatOpenAI,
         skills: Dict[str, AgentSkill],
-        skill_runner_factory: Callable[[AgentSkill], Any],
+        skill_runner_factory: Callable[[AgentSkill, Optional[str]], Any],
         logger: Optional[logging.Logger] = None,
         memory: Optional["MemoryManager"] = None,
         session: Optional["Session"] = None,
@@ -123,9 +134,9 @@ class ChatAgent(BaseAgent):
             self.bound_llm = llm
             self.vision_bound_llm = vision_llm or llm
 
-        # Resolver for per-thread model overrides: model_name -> ChatOpenAI
+        # Resolver for session/thread-specific agent selection at run() time.
         # Set by App.make_agent after construction.
-        self._llm_resolver: Optional[Callable[[str], Any]] = None
+        self._agent_llm_resolver: Optional[Callable[[str, Optional[str]], Any]] = None
         # Resolves config keys (e.g. "fast") to actual model names (e.g. "qwen3.5:4b").
         self._model_name_resolver: Optional[Callable[[str], str]] = None
 
@@ -139,6 +150,7 @@ class ChatAgent(BaseAgent):
         *,
         mode: str = "chat",
         system_prompt: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> str:
         """Resolve the system prompt for a chat or call context."""
         if system_prompt:
@@ -242,6 +254,63 @@ class ChatAgent(BaseAgent):
             )
         return skill_name, args, ""
 
+    @staticmethod
+    def _compact_text(value: Any, *, limit: int = _REPLAY_TOOL_RESULT_LIMIT) -> str:
+        """Collapse whitespace and trim long text for replay context."""
+        if value is None:
+            return ""
+        text = re.sub(r"\s+", " ", str(value)).strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    @staticmethod
+    def _limit_tool_result(value: Any, *, limit: int = _LIVE_TOOL_RESULT_LIMIT) -> str:
+        """Keep tool output small enough for weaker/smaller chat models."""
+        text = "" if value is None else str(value)
+        if len(text) <= limit:
+            return text
+        omitted = len(text) - limit
+        return (
+            text[:limit].rstrip()
+            + f"\n\n[Tool output truncated: {omitted} characters omitted. "
+            "Ask for a narrower file/section/search if more detail is needed.]"
+        )
+
+    def _format_replayed_assistant_turn(
+        self,
+        bot_text: str,
+        tool_calls_info: Optional[List[Dict[str, Any]]],
+    ) -> str:
+        """Return an assistant turn for replay into the chat context.
+
+        Conversational responses are replayed verbatim. Skill-backed exchanges
+        keep the assistant text and append a concise note about the tool calls,
+        so the prompt is not re-inflated with full raw tool outputs.
+        """
+        if not tool_calls_info:
+            return bot_text or ""
+
+        lines: List[str] = []
+        for tc in tool_calls_info[:_REPLAY_TOOL_CALLS_LIMIT]:
+            name = self._resolve_skill_name(str(tc.get("name", "") or "").strip()) or "unknown"
+            args = self._normalize_skill_args(tc.get("args", {}))
+            query = self._compact_text(args.get("query", ""), limit=100)
+            result = self._compact_text(tc.get("result", ""), limit=_REPLAY_TOOL_RESULT_LIMIT)
+
+            detail = f"- {name}"
+            if query:
+                detail += f": {query}"
+            if result:
+                detail += f" -> {result}"
+            lines.append(detail)
+
+        if len(tool_calls_info) > _REPLAY_TOOL_CALLS_LIMIT:
+            lines.append(f"- ... {len(tool_calls_info) - _REPLAY_TOOL_CALLS_LIMIT} more earlier skill call(s)")
+
+        summary = "Earlier skill use:\n" + "\n".join(lines)
+        return f"{bot_text}\n\n{summary}" if bot_text else summary
+
     async def run(
         self,
         user_input: str,
@@ -291,29 +360,9 @@ class ChatAgent(BaseAgent):
                     user_text, bot_text, tool_calls_info = exchange  # type: ignore
 
                 messages.append(HumanMessage(content=user_text))
-
-                # Restore tool calls if present
-                if tool_calls_info:
-                    # Create AIMessage with reconstructed tool_calls
-                    reconstructed_tool_calls = []
-                    for tc in tool_calls_info:
-                        reconstructed_tool_calls.append({
-                            "name": tc["name"],
-                            "args": tc["args"],
-                            "id": f"restored_{len(reconstructed_tool_calls)}",
-                        })
-                    messages.append(AIMessage(
-                        content=bot_text,
-                        tool_calls=reconstructed_tool_calls,
-                    ))
-                    # Add ToolMessage for each restored tool call with its result
-                    for i, tc in enumerate(tool_calls_info):
-                        messages.append(ToolMessage(
-                            content=tc["result"],
-                            tool_call_id=f"restored_{i}",
-                        ))
-                else:
-                    messages.append(AIMessage(content=bot_text))
+                messages.append(AIMessage(
+                    content=self._format_replayed_assistant_turn(bot_text, tool_calls_info)
+                ))
 
         # Resolve the LLMs to use for this call.
         # A thread-specific model override takes priority over the session default.
@@ -387,7 +436,7 @@ class ChatAgent(BaseAgent):
                             await _on_skill_start(skill_name, query)
                         except Exception as exc:
                             self.logger.debug("on_skill_start error: %s", exc)
-                    runner = self.skill_runner_factory(skill)
+                    runner = self.skill_runner_factory(skill, thread_id)
                     runner.on_step = _on_skill_step
                     result = await runner.run(query=query)
                     result = self._process_directives(result, thread_id)
@@ -403,11 +452,14 @@ class ChatAgent(BaseAgent):
                 tool_calls_info.append({
                     "name": skill_name,
                     "args": normalized_args,
-                    "result": result,
+                    "result": self._limit_tool_result(
+                        result,
+                        limit=_PERSIST_TOOL_RESULT_LIMIT,
+                    ),
                 })
 
                 messages.append(ToolMessage(
-                    content=result,
+                    content=self._limit_tool_result(result),
                     tool_call_id=tool_call.get("id", ""),
                 ))
 
@@ -479,16 +531,9 @@ class ChatAgent(BaseAgent):
                 else:
                     user_text, bot_text, tc_info = exchange  # type: ignore
                 messages.append(HumanMessage(content=user_text))
-                if tc_info:
-                    reconstructed = [
-                        {"name": tc["name"], "args": tc["args"], "id": f"restored_{i}"}
-                        for i, tc in enumerate(tc_info)
-                    ]
-                    messages.append(AIMessage(content=bot_text, tool_calls=reconstructed))
-                    for i, tc in enumerate(tc_info):
-                        messages.append(ToolMessage(content=tc["result"], tool_call_id=f"restored_{i}"))
-                else:
-                    messages.append(AIMessage(content=bot_text))
+                messages.append(AIMessage(
+                    content=self._format_replayed_assistant_turn(bot_text, tc_info)
+                ))
 
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
 
@@ -501,91 +546,35 @@ class ChatAgent(BaseAgent):
             messages.append(HumanMessage(content=user_input))
 
         # ---- Stream turn 1 ----
-        accumulated, raw_text = await self._stream_with_sentences(
-            messages, bound_llm, on_sentence,
-        )
+        # _partial_text tracks generated text for persist-on-cancel (barge-in during TTS
+        # cancels this coroutine before _persist is reached, losing the user's turn from history).
+        _partial_text = ""
+        try:
+            accumulated, raw_text = await self._stream_with_sentences(
+                messages, bound_llm, on_sentence,
+            )
+            _partial_text = raw_text
 
-        self.logger.debug("Streamed turn 1: tool_calls=%s, len=%d",
-                          bool(getattr(accumulated, "tool_calls", None)), len(raw_text))
+            self.logger.debug("Streamed turn 1: tool_calls=%s, len=%d",
+                              bool(getattr(accumulated, "tool_calls", None)), len(raw_text))
 
-        # If the streamed response is a fake tool call, retry non-streamed
-        if accumulated and self._is_fake_tool_call(accumulated):
-            self.logger.warning("Fake tool call detected in streamed turn 1, retrying non-streamed")
-            accumulated, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
-            raw_text = accumulated.content if isinstance(accumulated.content, str) else ""
+            # If the streamed response is a fake tool call, retry non-streamed
+            if accumulated and self._is_fake_tool_call(accumulated):
+                self.logger.warning("Fake tool call detected in streamed turn 1, retrying non-streamed")
+                accumulated, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
+                raw_text = accumulated.content if isinstance(accumulated.content, str) else ""
+                _partial_text = raw_text
 
-        if not accumulated or not getattr(accumulated, "tool_calls", None):
-            result = self.strip_thinking(raw_text)
-            await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
-            return result
+            if not accumulated or not getattr(accumulated, "tool_calls", None):
+                result = self.strip_thinking(raw_text)
+                await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
+                return result
 
-        # ---- Skill calls detected → execute (non-streamed) ----
-        messages.append(accumulated)
-        tool_calls_info: List[Dict[str, Any]] = []
+            # ---- Skill calls detected → execute (non-streamed) ----
+            messages.append(accumulated)
+            tool_calls_info: List[Dict[str, Any]] = []
 
-        for tool_call in accumulated.tool_calls:
-            skill_name, normalized_args, error = self._decode_skill_call(tool_call)
-            query = normalized_args.get("query", "")
-            skill = self.skills.get(skill_name)
-
-            if error:
-                self.logger.warning("Skill call rejected: %s", error)
-                skill_result = error
-            elif skill:
-                self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
-                if _on_skill_start:
-                    try:
-                        await _on_skill_start(skill_name, query)
-                    except Exception:
-                        pass
-                runner = self.skill_runner_factory(skill)
-                runner.on_step = _on_skill_step
-                skill_result = await runner.run(query=query)
-                skill_result = self._process_directives(skill_result, thread_id)
-                if _on_skill_done:
-                    try:
-                        await _on_skill_done(skill_name)
-                    except Exception:
-                        pass
-            else:
-                self.logger.warning("Unknown skill called: %s", skill_name)
-                skill_result = f"Error: Unknown skill '{skill_name}'."
-
-            tool_calls_info.append({
-                "name": skill_name,
-                "args": normalized_args,
-                "result": skill_result,
-            })
-            messages.append(ToolMessage(
-                content=skill_result,
-                tool_call_id=tool_call.get("id", ""),
-            ))
-
-        # Refresh workspace skills (e.g. skill-creator may have added one)
-        if self._refresh_and_rebind_skills():
-            bound_llm = self.bound_llm
-
-        # ---- Continue tool loop until the task is actually complete ----
-        raw_text2 = ""
-        nudge_count = 0
-        final_response: Optional[AIMessage] = None
-
-        for _turn in range(_MAX_CHAT_TOOL_TURNS):
-            next_response, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
-
-            if not next_response.tool_calls:
-                text = self.extract_text(next_response)
-                if self._should_nudge_for_incomplete_task(text, has_tool_history=True) \
-                   and nudge_count < _MAX_CHAT_NUDGES:
-                    nudge_count += 1
-                    messages = messages + [next_response, HumanMessage(content=_CHAT_CONTINUE_NUDGE)]
-                    continue
-                final_response = next_response
-                raw_text2 = text
-                break
-
-            messages.append(next_response)
-            for tool_call in next_response.tool_calls:
+            for tool_call in accumulated.tool_calls:
                 skill_name, normalized_args, error = self._decode_skill_call(tool_call)
                 query = normalized_args.get("query", "")
                 skill = self.skills.get(skill_name)
@@ -600,7 +589,7 @@ class ChatAgent(BaseAgent):
                             await _on_skill_start(skill_name, query)
                         except Exception:
                             pass
-                    runner = self.skill_runner_factory(skill)
+                    runner = self.skill_runner_factory(skill, thread_id)
                     runner.on_step = _on_skill_step
                     skill_result = await runner.run(query=query)
                     skill_result = self._process_directives(skill_result, thread_id)
@@ -616,39 +605,122 @@ class ChatAgent(BaseAgent):
                 tool_calls_info.append({
                     "name": skill_name,
                     "args": normalized_args,
-                    "result": skill_result,
+                    "result": self._limit_tool_result(
+                        skill_result,
+                        limit=_PERSIST_TOOL_RESULT_LIMIT,
+                    ),
                 })
                 messages.append(ToolMessage(
-                    content=skill_result,
+                    content=self._limit_tool_result(skill_result),
                     tool_call_id=tool_call.get("id", ""),
                 ))
 
-            # Refresh workspace skills after each skill return
+            # Refresh workspace skills (e.g. skill-creator may have added one)
             if self._refresh_and_rebind_skills():
                 bound_llm = self.bound_llm
-        else:
-            accumulated2, raw_text2 = await self._stream_with_sentences(
-                messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)], unbound_llm, on_sentence,
+
+            # ---- Continue tool loop until the task is actually complete ----
+            raw_text2 = ""
+            nudge_count = 0
+            final_response: Optional[AIMessage] = None
+
+            for _turn in range(_MAX_CHAT_TOOL_TURNS):
+                next_response, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
+
+                if not next_response.tool_calls:
+                    text = self.extract_text(next_response)
+                    if self._should_nudge_for_incomplete_task(text, has_tool_history=True) \
+                       and nudge_count < _MAX_CHAT_NUDGES:
+                        nudge_count += 1
+                        messages = messages + [next_response, HumanMessage(content=_CHAT_CONTINUE_NUDGE)]
+                        continue
+                    final_response = next_response
+                    raw_text2 = text
+                    break
+
+                messages.append(next_response)
+                for tool_call in next_response.tool_calls:
+                    skill_name, normalized_args, error = self._decode_skill_call(tool_call)
+                    query = normalized_args.get("query", "")
+                    skill = self.skills.get(skill_name)
+
+                    if error:
+                        self.logger.warning("Skill call rejected: %s", error)
+                        skill_result = error
+                    elif skill:
+                        self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
+                        if _on_skill_start:
+                            try:
+                                await _on_skill_start(skill_name, query)
+                            except Exception:
+                                pass
+                        runner = self.skill_runner_factory(skill, thread_id)
+                        runner.on_step = _on_skill_step
+                        skill_result = await runner.run(query=query)
+                        skill_result = self._process_directives(skill_result, thread_id)
+                        if _on_skill_done:
+                            try:
+                                await _on_skill_done(skill_name)
+                            except Exception:
+                                pass
+                    else:
+                        self.logger.warning("Unknown skill called: %s", skill_name)
+                        skill_result = f"Error: Unknown skill '{skill_name}'."
+
+                    tool_calls_info.append({
+                        "name": skill_name,
+                        "args": normalized_args,
+                        "result": self._limit_tool_result(
+                            skill_result,
+                            limit=_PERSIST_TOOL_RESULT_LIMIT,
+                        ),
+                    })
+                    messages.append(ToolMessage(
+                        content=self._limit_tool_result(skill_result),
+                        tool_call_id=tool_call.get("id", ""),
+                    ))
+
+                # Refresh workspace skills after each skill return
+                if self._refresh_and_rebind_skills():
+                    bound_llm = self.bound_llm
+            else:
+                accumulated2, raw_text2 = await self._stream_with_sentences(
+                    messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)], unbound_llm, on_sentence,
+                )
+                final_response = accumulated2 if isinstance(accumulated2, AIMessage) else None
+
+            if on_sentence and raw_text2.strip():
+                sentences, remainder = _split_sentences(raw_text2)
+                for sentence in sentences:
+                    if sentence.strip():
+                        await on_sentence(sentence)
+                if remainder.strip():
+                    await on_sentence(remainder.strip())
+
+            result = self.strip_thinking(raw_text2)
+            used_skills = bool(tool_calls_info)
+            await self._persist(
+                user_input, result,
+                track_similarity=not used_skills,
+                thread_id=thread_id,
+                tool_calls_info=tool_calls_info if used_skills else None,
             )
-            final_response = accumulated2 if isinstance(accumulated2, AIMessage) else None
-
-        if on_sentence and raw_text2.strip():
-            sentences, remainder = _split_sentences(raw_text2)
-            for sentence in sentences:
-                if sentence.strip():
-                    await on_sentence(sentence)
-            if remainder.strip():
-                await on_sentence(remainder.strip())
-
-        result = self.strip_thinking(raw_text2)
-        used_skills = bool(tool_calls_info)
-        await self._persist(
-            user_input, result,
-            track_similarity=not used_skills,
-            thread_id=thread_id,
-            tool_calls_info=tool_calls_info if used_skills else None,
-        )
-        return result
+            return result
+        except asyncio.CancelledError:
+            # Barge-in: the TTS-playing coroutine was cancelled before _persist was reached.
+            # Persist whatever text was generated so the user's utterance stays in history
+            # and the next LLM turn has the full conversation context.
+            if _partial_text:
+                partial = self.strip_thinking(_partial_text)
+                try:
+                    await asyncio.shield(
+                        self._persist(user_input, partial,
+                                      track_similarity=False, thread_id=thread_id)
+                    )
+                    self.logger.debug("run_streamed: persisted partial response on cancel (%d chars)", len(partial))
+                except Exception as exc:
+                    self.logger.debug("run_streamed: persist-on-cancel failed: %s", exc)
+            raise
 
     async def _stream_with_sentences(
         self,
@@ -731,6 +803,25 @@ class ChatAgent(BaseAgent):
                         self.logger.info("Directive: model override set to '%s'", model)
                     if self.on_model_change:
                         self.on_model_change(model)
+            elif directive == "set_agent_override":
+                path = str(obj.get("path", "") or "").strip()
+                value = obj.get("value")
+                if path and self.memory and self.session:
+                    target_thread = obj.get("thread") or thread_id
+                    self.memory.set_agent_override_value(
+                        self.session,
+                        path,
+                        str(value).strip() if isinstance(value, str) and str(value).strip() else None,
+                        thread_id=target_thread,
+                    )
+                    self.logger.info(
+                        "Directive: %s agent override '%s' -> %r",
+                        f"thread '{target_thread}'" if target_thread else "session",
+                        path,
+                        value,
+                    )
+                    if self.on_model_change:
+                        self.on_model_change(str(value or ""))
             elif directive == "set_voice":
                 if self.memory and self.session:
                     voice = obj.get("voice")
@@ -759,47 +850,120 @@ class ChatAgent(BaseAgent):
     ) -> Tuple[Any, Any]:
         """Return (bound_llm, unbound_llm) for this call.
 
-        Checks for a thread-specific model override first, then a session-level
-        override, and finally falls back to the agent's default LLMs.
-        Both overrides are resolved dynamically so directive-based changes
-        (set_model) take effect without requiring an agent restart.
+        Resolves the active `agents` selection dynamically so session/thread
+        overrides take effect without rebuilding the whole agent.
         """
-        if self._llm_resolver and self.memory and self.session:
-            model: Optional[str] = None
-            if thread_id:
-                model = self.memory.get_thread_model_override(self.session, thread_id)
-            if not model:
-                model = self.session.model_override
-            if model:
-                llm = self._llm_resolver(model)
-                bound = llm.bind_tools(self._skill_specs, tool_choice="auto") if self._skill_specs else llm
-                return bound, llm
+        if self._agent_llm_resolver:
+            agent_type = "vision" if images else "chat"
+            llm = self._agent_llm_resolver(agent_type, thread_id)
+            bound = llm.bind_tools(self._skill_specs, tool_choice="auto") if self._skill_specs else llm
+            return bound, llm
 
         return (self.vision_bound_llm if images else self.bound_llm), self.llm
 
     def _active_override_model(self, thread_id: Optional[str]) -> Optional[str]:
         """Return the name of the active model override, or ``None``."""
-        if thread_id and self.memory and self.session:
-            model = self.memory.get_thread_model_override(self.session, thread_id)
-            if model:
-                return model
-        if self.session and self.session.model_override:
-            return self.session.model_override
+        if self.memory and self.session:
+            return self.memory.get_agent_override_value(self.session, "chat", thread_id=thread_id)
         return None
 
-    def _is_fake_tool_call(self, response: AIMessage) -> bool:
-        """Return True if the LLM wrote a tool call as text instead of calling it.
+    def _extract_fake_skill_calls(self, response: AIMessage) -> List[Dict[str, Any]]:
+        """Recover text-form skill calls from models that miss function calling.
 
-        Detects fenced code blocks whose first token matches a known skill name.
-        Only relevant when tools are bound and no real tool_calls are present.
+        Some OpenAI-compatible providers accept a tools schema but still let
+        smaller models emit the tool call as plain text, usually as
+        ``<tool_call>{...}</tool_call>`` or a fenced JSON block.  Treat those as
+        real skill calls instead of spending another turn asking the model to
+        retry the exact same shape.
         """
+        if not self._skill_specs or response.tool_calls:
+            return []
+        content = response.content if isinstance(response.content, str) else ""
+
+        calls: List[Dict[str, Any]] = []
+
+        def _append_from_obj(obj: Any) -> None:
+            if isinstance(obj, list):
+                for item in obj:
+                    _append_from_obj(item)
+                return
+            if not isinstance(obj, dict):
+                return
+
+            name = str(obj.get("name") or obj.get("tool") or obj.get("function") or "").strip()
+            if not name:
+                return
+            skill_name = self._resolve_skill_name(name)
+            if skill_name not in self.skills:
+                return
+
+            raw_args = obj.get("args")
+            if raw_args is None:
+                raw_args = obj.get("arguments")
+            if raw_args is None:
+                raw_args = obj.get("parameters")
+            args = self._normalize_skill_args(raw_args)
+            if "query" not in args:
+                # Common shorthand: {"name": "searxng", "query": "..."}
+                args = self._normalize_skill_args(obj)
+            if "query" not in args:
+                return
+
+            calls.append({
+                "id": obj.get("id") or f"fake_{uuid.uuid4().hex[:8]}",
+                "name": skill_name,
+                "args": args,
+            })
+
+        snippets: List[str] = [m.group(1).strip() for m in _RE_TOOL_CALL_TAG.finditer(content)]
+        snippets.extend(m.group(1).strip() for m in _RE_CODE_BLOCK.finditer(content))
+
+        stripped = content.strip()
+        if stripped.startswith(("{", "[")):
+            snippets.append(stripped)
+
+        for snippet in snippets:
+            if not snippet:
+                continue
+            try:
+                _append_from_obj(json.loads(snippet))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                # Fall through to command-like fenced blocks below.
+                pass
+
+        if calls:
+            return calls
+
+        skill_names = set(self.skills.keys())
+        for match in _RE_CODE_BLOCK.finditer(content):
+            block = match.group(1).strip()
+            first_token = block.split()[0] if block else ""
+            skill_name = self._resolve_skill_name(first_token)
+            if skill_name in skill_names:
+                query = block[len(first_token):].strip()
+                if query:
+                    calls.append({
+                        "id": f"fake_{uuid.uuid4().hex[:8]}",
+                        "name": skill_name,
+                        "args": {"query": query},
+                    })
+
+        return calls
+
+    def _is_fake_tool_call(self, response: AIMessage) -> bool:
+        """Return True if the LLM wrote a skill call as text."""
+        if self._extract_fake_skill_calls(response):
+            return True
         if not self._skill_specs or response.tool_calls:
             return False
         content = response.content if isinstance(response.content, str) else ""
+        if "<tool_call>" in content:
+            return True
         skill_names = set(self.skills.keys())
         for match in _RE_CODE_BLOCK.finditer(content):
-            first_token = match.group(1).strip().split()[0] if match.group(1).strip() else ""
-            if first_token in skill_names:
+            block = match.group(1).strip()
+            first_token = block.split()[0] if block else ""
+            if self._resolve_skill_name(first_token) in skill_names:
                 return True
         return False
 
@@ -826,6 +990,14 @@ class ChatAgent(BaseAgent):
         retry_messages = list(messages)
         for attempt in range(_MAX_FAKE_TOOL_RETRIES):
             response = await self._invoke(retry_messages, llm=llm)
+            fake_calls = self._extract_fake_skill_calls(response)
+            if fake_calls:
+                self.logger.warning(
+                    "Recovered %d text-form skill call(s) from model output",
+                    len(fake_calls),
+                )
+                response.tool_calls = fake_calls
+                return response, retry_messages
             if not self._is_fake_tool_call(response):
                 return response, retry_messages
             self.logger.warning(

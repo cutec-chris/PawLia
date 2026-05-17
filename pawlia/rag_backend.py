@@ -4,11 +4,10 @@ Supported backends:
   - markdown  (default) — Dream Wiki: LLM builds structured, interlinked wiki
   - lightrag            — LightRAG knowledge-graph RAG, powerful but slow
   - simple              — chunking + embedding + cosine similarity, no extra deps
-  - mem0                — mem0 fact-extraction (requires: pip install mem0ai chromadb)
 
 Select via skill-config:
   memory:
-    rag_backend: lightrag   # markdown | lightrag | simple | mem0
+    rag_backend: lightrag   # markdown | lightrag | simple
 
 All backends expose the same async interface:
   insert(text, doc_id)
@@ -270,133 +269,6 @@ class LightRAGBackend(RagBackend):
 
 
 # ---------------------------------------------------------------------------
-# mem0 backend
-# ---------------------------------------------------------------------------
-
-class Mem0Backend(RagBackend):
-    """mem0-based memory backend.
-
-    Uses mem0's fact-extraction approach: documents are split into atomic
-    facts by a small LLM call, then stored in a local ChromaDB vector store.
-    Queries retrieve the most relevant facts, returned as a formatted string.
-
-    Much faster than LightRAG for indexing because there is no full
-    knowledge-graph construction — typically 2-5 LLM calls per document
-    instead of 10-20+.
-
-    Configuration keys (same section as lightrag):
-      rag_model, embedding_model, embedding_host, embedding_dim
-    """
-
-    def __init__(
-        self,
-        index_path: str,
-        cfg: dict,
-        llm_busy_check: Optional[Callable[[], bool]] = None,
-    ):
-        self._index_path = index_path
-        self._cfg = cfg
-        self._llm_busy = llm_busy_check
-        self._memory = None
-        self._indexed: set[str] = set()
-
-    def _build_config(self) -> dict:
-        cfg = self._cfg
-        llm_provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
-        emb_provider = cfg.get("embedding_provider", "ollama")
-        model = cfg.get("rag_model", "qwen3.5:latest")
-        embedding_model = cfg.get("embedding_model", "bge-m3:latest")
-        host = cfg.get("embedding_host", "http://localhost:11434")
-        dim = int(cfg.get("embedding_dim", 1024))
-
-        # LLM config — Ollama vs. OpenAI-compatible
-        if llm_provider == "ollama":
-            llm_cfg: dict = {
-                "model": model,
-                "ollama_base_url": host,
-                "temperature": 0,
-                "max_tokens": 2000,
-            }
-        else:
-            llm_cfg = {
-                "model": model,
-                "api_key": cfg.get("rag_api_key", cfg.get("embedding_api_key", "")),
-                "openai_base_url": cfg.get("rag_base_url", cfg.get("embedding_base_url", "")),
-                "temperature": 0,
-                "max_tokens": 2000,
-            }
-            llm_provider = "openai"  # mem0 uses "openai" for any OpenAI-compat provider
-
-        # Embedder config — Ollama vs. OpenAI-compatible
-        if emb_provider == "ollama":
-            emb_cfg: dict = {
-                "model": embedding_model,
-                "ollama_base_url": host,
-                "embedding_dims": dim,
-            }
-        else:
-            emb_cfg = {
-                "model": embedding_model,
-                "api_key": cfg.get("embedding_api_key", ""),
-                "openai_base_url": cfg.get("embedding_base_url", ""),
-                "embedding_dims": dim,
-            }
-            emb_provider = "openai"
-
-        return {
-            "llm": {"provider": llm_provider, "config": llm_cfg},
-            "embedder": {"provider": emb_provider, "config": emb_cfg},
-            "vector_store": {
-                "provider": "chroma",
-                "config": {
-                    "collection_name": "pawlia_memory",
-                    "path": os.path.join(self._index_path, "chroma"),
-                },
-            },
-            "history_db_path": os.path.join(self._index_path, "history.db"),
-        }
-
-    def _get_memory(self):
-        if self._memory is None:
-            from mem0 import Memory
-            self._memory = Memory.from_config(self._build_config())
-        return self._memory
-
-    async def insert(self, text: str, doc_id: str) -> None:
-        if self._llm_busy and self._llm_busy():
-            raise RuntimeError("LLM busy — deferring memory embedding")
-        memory = self._get_memory()
-        # mem0.add() is synchronous and blocking — run in thread pool
-        await asyncio.to_thread(memory.add, text, user_id=doc_id)
-        self._indexed.add(doc_id)
-
-    async def wait_for_indexed(
-        self, doc_id: str, timeout: int = 120, poll_interval: float = 5.0,
-    ) -> bool:
-        # insert() is synchronous/blocking so by the time it returns the
-        # document is already indexed — nothing to poll.
-        return doc_id in self._indexed
-
-    async def query(self, question: str) -> str:
-        memory = self._get_memory()
-        results = await asyncio.to_thread(memory.search, query=question, limit=10)
-
-        # mem0 returns {"results": [...]} where each item has a "memory" key
-        items = results if isinstance(results, list) else results.get("results", [])
-        if not items:
-            return "Keine relevanten Erinnerungen gefunden."
-
-        lines = []
-        for r in items:
-            if isinstance(r, dict) and "memory" in r:
-                score = r.get("score", 0)
-                lines.append(f"- {r['memory']}  (relevance: {score:.2f})")
-            else:
-                lines.append(f"- {r}")
-        return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
 # Simple vector backend (numpy only, no external DB)
 # ---------------------------------------------------------------------------
 
@@ -481,37 +353,54 @@ class SimpleVectorBackend(RagBackend):
     # ── embedding ───────────────────────────────────────────────────────────
 
     async def _embed(self, texts: list[str]):
+        import json as _json
+        import urllib.request as _urllib
         import numpy as np
         cfg = self._cfg
         provider = cfg.get("embedding_provider", "ollama")
         model = cfg.get("embedding_model", "bge-m3:latest")
         host = cfg.get("embedding_host", "http://localhost:11434")
         dim = int(cfg.get("embedding_dim", 1024))
+        timeout = int(cfg.get("embedding_timeout", cfg.get("rag_embedding_timeout", 120)))
 
         if self._llm_busy and self._llm_busy():
             raise RuntimeError("LLM busy — deferring memory embedding")
 
         if provider == "ollama":
-            import lightrag.llm.ollama
+            url = f"{host.rstrip('/')}/api/embed"
+            payload = _json.dumps({"model": model, "input": texts}).encode()
+            req = _urllib.Request(url, data=payload,
+                                  headers={"Content-Type": "application/json"},
+                                  method="POST")
+            def _do():
+                with _urllib.urlopen(req, timeout=timeout) as resp:
+                    return _json.loads(resp.read().decode())
+            from pawlia.utils import run_sync_in_thread
             try:
-                result = await lightrag.llm.ollama.ollama_embed.func(
-                    texts, host=host, embed_model=model, max_token_size=8192,
-                )
+                data = await run_sync_in_thread(_do)
+                result = data["embeddings"]
             except Exception as e:
                 if "NaN" in str(e):
                     return np.zeros((len(texts), dim))
                 raise
-            arr = np.array(result, dtype="float32")
         else:
-            import lightrag.llm.openai
-            result = await lightrag.llm.openai.openai_embed(
-                texts,
-                embed_model=model,
-                api_key=cfg.get("embedding_api_key"),
-                base_url=cfg.get("embedding_base_url"),
-            )
-            arr = np.array(result, dtype="float32")
+            # OpenAI-compatible embeddings endpoint
+            base_url = cfg.get("embedding_base_url", host)
+            api_key = cfg.get("embedding_api_key", "")
+            url = f"{base_url.rstrip('/')}/embeddings"
+            payload = _json.dumps({"model": model, "input": texts}).encode()
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+            req = _urllib.Request(url, data=payload, headers=headers, method="POST")
+            def _do_openai():
+                with _urllib.urlopen(req, timeout=timeout) as resp:
+                    return _json.loads(resp.read().decode())
+            from pawlia.utils import run_sync_in_thread
+            data = await run_sync_in_thread(_do_openai)
+            result = [item["embedding"] for item in data["data"]]
 
+        arr = np.array(result, dtype="float32")
         if np.isnan(arr).any():
             arr = np.nan_to_num(arr, nan=0.0)
         return arr
@@ -736,7 +625,8 @@ class MarkdownTopicBackend(RagBackend):
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode())
 
-        result = await asyncio.to_thread(_do)
+        from pawlia.utils import run_sync_in_thread
+        result = await run_sync_in_thread(_do)
 
         if provider == "ollama":
             content = result.get("message", {}).get("content", "")
@@ -1080,7 +970,6 @@ def create_backend(
       - ``"markdown"`` (default) — Dream Wiki: structured, interlinked wiki
       - ``"lightrag"``           — LightRAG knowledge-graph
       - ``"simple"``             — chunking + cosine similarity (numpy only)
-      - ``"mem0"``               — mem0 fact extraction (requires mem0ai + chromadb)
 
     Parameters
     ----------
@@ -1103,10 +992,6 @@ def create_backend(
         logger.debug("Using SimpleVector backend at %s", index_path)
         return SimpleVectorBackend(index_path, cfg, llm_busy_check)
 
-    if backend_name == "mem0":
-        logger.debug("Using mem0 backend at %s", index_path)
-        return Mem0Backend(index_path, cfg, llm_busy_check)
-
     logger.debug("Using LightRAG backend at %s", index_path)
     return LightRAGBackend(
         index_path, cfg, llm_busy_check,
@@ -1114,7 +999,3 @@ def create_backend(
         max_async_llm=max_async_llm,
         max_async_embedding=max_async_embedding,
     )
-
-
-# Legacy alias — existing code that references MarkdownTopicBackend keeps working.
-MarkdownTopicBackend = None  # replaced by DreamWikiBackend; import from dream_wiki if needed

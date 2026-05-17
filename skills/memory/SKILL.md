@@ -14,10 +14,10 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "2.0"
-  requires_config:
-    - rag_model              # LLM used for wiki analysis
-    - embedding_host         # API host (used for LLM calls too)
+  requires_config: []
   optional_config:
+    - rag_model              # LLM used for wiki analysis (markdown backend has a default)
+    - embedding_host         # API host (used for LLM calls too)
     - rag_provider           # defaults to embedding_provider / ollama
     - rag_numctx             # LLM context window (default: 4096)
     - rag_timeout            # LLM timeout in seconds (default: 600)
@@ -67,5 +67,5 @@ python <scripts_dir>/memory.py status
 
 - The `index` command is also run automatically on every `search` to pick up new logs.
 - Search results contain relevant excerpts from past conversations — use them to answer the user's question.
-- The `dream` command processes unprocessed chat logs into a structured wiki with cross-references (`[[wikilinks]]`).
+- The `dream` command processes unprocessed chat logs into a structured wiki with cross-references (Obsidian wikilinks by default, configurable via `wiki_link_format`).
 - The Dream Wiki runs automatically when the user has been idle for 30 minutes (configurable via `dream_idle_minutes`).

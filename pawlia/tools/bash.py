@@ -1,5 +1,6 @@
 """Bash tool - executes shell commands."""
 
+import json
 import os
 import re
 import subprocess
@@ -76,6 +77,10 @@ class BashTool(Tool):
                 env["PAWLIA_SESSION_DIR"] = context["session_dir"]
             if context.get("config_path"):
                 env["PAWLIA_CONFIG_PATH"] = context["config_path"]
+            if context.get("skill_config"):
+                env["PAWLIA_SKILL_CONFIG"] = json.dumps(
+                    context["skill_config"], ensure_ascii=False
+                )
             # Extra env vars from workflow executor (e.g. multiline content)
             for k, v in context.get("env_extra", {}).items():
                 env[k] = v

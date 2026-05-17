@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""Researcher skill — manage RAG-backed research projects.
+"""Researcher skill — scrape and search research projects in the workspace.
+
+Files land in workspace/research/{project}/ — no RAG backend, no DreamWiki.
+The DreamWiki is fed exclusively by conversations; research insights flow in
+organically when the user discusses their findings.
 
 Usage:
-    researcher.py <user_id> create <name> <description>
-    researcher.py <user_id> list
-    researcher.py <user_id> add <project> <url> [depth]
-    researcher.py <user_id> query <project> <question>
-    researcher.py <user_id> delete <project>
-    researcher.py <user_id> rename <old_name> <new_name>
+    researcher.py create <name> <description>
+    researcher.py list
+    researcher.py add <project> <url> [depth]
+    researcher.py query <project> <question>
+    researcher.py delete <project>
+    researcher.py rename <old_name> <new_name>
+
+    (user_id via PAWLIA_USER_ID env var; legacy positional arg also supported)
 """
 
 import asyncio
@@ -33,8 +39,12 @@ import yaml
 
 _SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 _SKILL_DIR = _SCRIPT_DIR.parent
-_PROJECT_ROOT = _SKILL_DIR.parent.parent  # thalia/
-_SESSION_DIR = pathlib.Path(os.environ["PAWLIA_SESSION_DIR"]) if "PAWLIA_SESSION_DIR" in os.environ else _PROJECT_ROOT / "session"
+_PROJECT_ROOT = _SKILL_DIR.parent.parent
+_SESSION_DIR = (
+    pathlib.Path(os.environ["PAWLIA_SESSION_DIR"])
+    if "PAWLIA_SESSION_DIR" in os.environ
+    else _PROJECT_ROOT / "session"
+)
 
 sys.path.insert(0, str(_PROJECT_ROOT))
 
@@ -42,41 +52,199 @@ USER_AGENT = "pawlia-researcher/1.0"
 
 
 def _load_skill_config() -> dict:
-    """Load researcher config from config.yaml -> skill-config.researcher."""
-    for candidate in (
-        _PROJECT_ROOT / "config.yaml",
-        _PROJECT_ROOT / "config.yml",
-    ):
+    raw = os.environ.get("PAWLIA_SKILL_CONFIG")
+    if raw:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+    for candidate in (_PROJECT_ROOT / "config.yaml", _PROJECT_ROOT / "config.yml"):
         if candidate.is_file():
             with open(candidate, encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
-            skill_config_root = cfg.get("skill-config") or {}
-            return skill_config_root.get("researcher", {})
+            return (cfg.get("skill-config") or {}).get("researcher", {})
     return {}
 
 
 CFG = _load_skill_config()
 
 # ---------------------------------------------------------------------------
-# Per-project backend cache
+# Embed-based search (optional — falls back to keyword if no embedding config)
 # ---------------------------------------------------------------------------
 
-_backends: dict[str, "RagBackend"] = {}
+_CHUNK_SIZE = 800
+_TOP_K = 6
+_MIN_SCORE = 0.1
 
 
-async def _get_backend(project_path: pathlib.Path):
-    from pawlia.rag_backend import create_backend
+def _chunk_text(text: str) -> list[str]:
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    chunks: list[str] = []
+    buf: list[str] = []
+    buf_len = 0
+    for para in paragraphs:
+        if buf_len + len(para) > _CHUNK_SIZE and buf:
+            chunks.append("\n\n".join(buf))
+            buf = [buf[-1]]
+            buf_len = len(buf[0])
+        buf.append(para)
+        buf_len += len(para)
+    if buf:
+        chunks.append("\n\n".join(buf))
+    return chunks or [text[:_CHUNK_SIZE]]
 
-    key = str(project_path)
-    if key not in _backends:
-        index_path = project_path / ".rag_index"
-        index_path.mkdir(exist_ok=True)
-        _backends[key] = create_backend(
-            str(index_path),
-            CFG,
-            think=False,
+
+async def _embed(texts: list[str]) -> list[list[float]]:
+    """Embed texts via Ollama /api/embed or OpenAI-compatible /embeddings."""
+    import urllib.request as _urllib
+    cfg = CFG
+    provider = cfg.get("embedding_provider", "")
+    model = cfg.get("embedding_model", "")
+    host = cfg.get("embedding_host", "http://localhost:11434")
+    timeout = int(cfg.get("rag_embedding_timeout", 120))
+
+    if not provider or not model:
+        raise RuntimeError("no embedding config")
+
+    if provider == "ollama":
+        url = f"{host.rstrip('/')}/api/embed"
+        payload = json.dumps({"model": model, "input": texts}).encode()
+        req = _urllib.Request(url, data=payload,
+                              headers={"Content-Type": "application/json"},
+                              method="POST")
+        def _do():
+            with _urllib.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())["embeddings"]
+    else:
+        base = cfg.get("embedding_base_url", host)
+        api_key = cfg.get("embedding_api_key", "")
+        url = f"{base.rstrip('/')}/embeddings"
+        payload = json.dumps({"model": model, "input": texts}).encode()
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        req = _urllib.Request(url, data=payload, headers=headers, method="POST")
+        def _do():
+            with _urllib.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode())
+                return [item["embedding"] for item in data["data"]]
+
+    from pawlia.utils import run_sync_in_thread
+    return await run_sync_in_thread(_do)
+
+
+async def _build_index(project_path: pathlib.Path) -> tuple[object, list[dict]] | None:
+    """Build or load a numpy embed index for all .md files in the project.
+
+    Returns (vectors_np_array, metadata_list) or None if no embedding config.
+    Index is rebuilt whenever any source .md is newer than the stored index.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+
+    index_dir = project_path / ".index"
+    vec_path = index_dir / "vectors.npy"
+    meta_path = index_dir / "chunks.json"
+
+    md_files = sorted(
+        f for f in project_path.glob("*.md") if f.name != "README.md"
+    )
+    if not md_files:
+        return None
+
+    newest_md = max(f.stat().st_mtime for f in md_files)
+    index_mtime = meta_path.stat().st_mtime if meta_path.exists() else 0
+
+    if index_mtime >= newest_md and vec_path.exists() and meta_path.exists():
+        vectors = np.load(str(vec_path))
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+        return vectors, meta
+
+    # Rebuild
+    all_chunks: list[str] = []
+    all_meta: list[dict] = []
+    for md_file in md_files:
+        text = md_file.read_text(encoding="utf-8")
+        for i, chunk in enumerate(_chunk_text(text)):
+            all_chunks.append(chunk)
+            all_meta.append({"file": md_file.name, "chunk_idx": i})
+
+    try:
+        embeddings = await _embed(all_chunks)
+    except RuntimeError:
+        return None
+
+    vectors = np.array(embeddings, dtype="float32")
+    if np.isnan(vectors).any():
+        vectors = np.nan_to_num(vectors, nan=0.0)
+
+    index_dir.mkdir(exist_ok=True)
+    np.save(str(vec_path), vectors)
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(
+            [{"text": c, **m} for c, m in zip(all_chunks, all_meta)],
+            f, ensure_ascii=False,
         )
-    return _backends[key]
+
+    return vectors, [{"text": c, **m} for c, m in zip(all_chunks, all_meta)]
+
+
+async def _search_embed(project_path: pathlib.Path, question: str) -> str | None:
+    """Semantic search using embeddings. Returns None if no embedding config."""
+    import numpy as np
+
+    result = await _build_index(project_path)
+    if result is None:
+        return None
+
+    vectors, meta = result
+    try:
+        q_vecs = await _embed([question])
+    except RuntimeError:
+        return None
+
+    q_vec = np.array(q_vecs[0], dtype="float32")
+    norms = np.linalg.norm(vectors, axis=1)
+    q_norm = np.linalg.norm(q_vec)
+    scores = np.zeros(len(meta))
+    valid = norms > 0
+    if valid.any() and q_norm > 0:
+        scores[valid] = (vectors[valid] @ q_vec) / (norms[valid] * q_norm)
+
+    top_idx = np.argsort(scores)[::-1][:_TOP_K]
+    parts = [meta[i]["text"] for i in top_idx if scores[i] >= _MIN_SCORE]
+    if not parts:
+        return "Keine relevanten Informationen gefunden."
+    return "\n\n---\n\n".join(parts)
+
+
+_STOP_WORDS = frozenset(
+    "der die das und oder ein eine ist war hat haben was wie wer wo wann "
+    "warum ich du wir sie er es mit von zu für auf in an bei nach über "
+    "unter vor hinter zwischen nicht auch noch schon nur aber denn wenn "
+    "dass weil als ob the a an and or is was are were has have what how "
+    "who where when why i you we they he she it with from to for on at "
+    "by about do did not also".split()
+)
+
+
+def _search_keyword(project_path: pathlib.Path, question: str) -> str:
+    query_words = set(re.split(r"\W+", question.lower())) - _STOP_WORDS - {""}
+    scored: list[tuple[int, str]] = []
+    for md_file in sorted(project_path.glob("*.md")):
+        if md_file.name == "README.md":
+            continue
+        content = md_file.read_text(encoding="utf-8")
+        score = sum(1 for w in query_words if w in content.lower())
+        scored.append((score, content))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = [c for s, c in scored if s > 0][:_TOP_K]
+    if not results:
+        return "Keine relevanten Informationen gefunden."
+    return "\n\n---\n\n".join(r[:3000] for r in results)
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +300,8 @@ def _extract_links(html: str, base_url: str) -> list[str]:
     return list(links)
 
 
-async def _scrape_and_index(project_path: pathlib.Path, url: str) -> dict:
-    """Scrape a single URL, convert to markdown, index via RAG backend."""
+async def _scrape_and_save(project_path: pathlib.Path, url: str) -> dict:
+    """Scrape a URL, convert to markdown, save to workspace. No RAG backend."""
     headers = {"User-Agent": USER_AGENT}
     url_hash = hashlib.sha1(url.encode()).hexdigest()
     filename = project_path / f"{url_hash}.md"
@@ -160,7 +328,7 @@ async def _scrape_and_index(project_path: pathlib.Path, url: str) -> dict:
         if filename.exists():
             current = await asyncio.to_thread(filename.read_text, encoding="utf-8")
             if current.startswith(f"# Version: {version}"):
-                return {"status": "skipped", "message": "already indexed"}
+                return {"status": "skipped", "message": "already saved"}
 
         def get():
             return requests.get(url, headers=headers, timeout=30)
@@ -187,12 +355,13 @@ async def _scrape_and_index(project_path: pathlib.Path, url: str) -> dict:
             return {"status": "error", "message": f"unsupported content type: {content_type}"}
 
     markdown_text = f"# Version: {version}\n# URL: {url}\n\n{markdown_text}"
-
-    backend = await _get_backend(project_path)
-    await backend.insert(markdown_text, url)
-    await backend.wait_for_indexed(url, timeout=60, poll_interval=1.0)
-
     await asyncio.to_thread(filename.write_text, markdown_text, encoding="utf-8")
+
+    # Invalidate embed index so next query rebuilds it
+    index_dir = project_path / ".index"
+    if index_dir.exists():
+        shutil.rmtree(index_dir)
+
     return {"status": "ok", "file": str(filename), "version": version}
 
 
@@ -225,7 +394,7 @@ async def _scrape_recursive(project_path: pathlib.Path, base_url: str, max_depth
                     queue.append((link, depth + 1))
 
         try:
-            result = await _scrape_and_index(project_path, url)
+            result = await _scrape_and_save(project_path, url)
             results.append({"url": url, **result})
         except Exception as e:
             results.append({"url": url, "status": "error", "message": str(e)})
@@ -244,7 +413,7 @@ async def cmd_create(user_dir: pathlib.Path, name: str, description: str):
         sys.exit(1)
     path.mkdir(parents=True)
     (path / "README.md").write_text(f"# {name}\n\n{description}\n", encoding="utf-8")
-    print(json.dumps({"status": "ok", "name": name}))
+    print(json.dumps({"status": "ok", "name": name, "path": str(path)}))
 
 
 async def cmd_list(user_dir: pathlib.Path):
@@ -253,14 +422,15 @@ async def cmd_list(user_dir: pathlib.Path):
         return
     projects = []
     for p in sorted(user_dir.iterdir()):
-        if p.is_dir():
-            readme = p / "README.md"
-            desc = ""
-            if readme.exists():
-                lines = readme.read_text(encoding="utf-8").splitlines()
-                desc = lines[2].strip() if len(lines) > 2 else ""
-            doc_count = len(list(p.glob("*.md"))) - (1 if readme.exists() else 0)
-            projects.append({"name": p.name, "description": desc, "documents": doc_count})
+        if not p.is_dir():
+            continue
+        readme = p / "README.md"
+        desc = ""
+        if readme.exists():
+            lines = readme.read_text(encoding="utf-8").splitlines()
+            desc = lines[2].strip() if len(lines) > 2 else ""
+        doc_count = len([f for f in p.glob("*.md") if f.name != "README.md"])
+        projects.append({"name": p.name, "description": desc, "documents": doc_count})
     print(json.dumps({"projects": projects}, ensure_ascii=False))
 
 
@@ -269,12 +439,11 @@ async def cmd_add(user_dir: pathlib.Path, project: str, url: str, depth: int = 1
     if not path.exists():
         print(json.dumps({"error": f"Project '{project}' not found"}))
         sys.exit(1)
-
     if depth > 1:
         results = await _scrape_recursive(path, url, depth)
         print(json.dumps({"status": "ok", "results": results}, ensure_ascii=False))
     else:
-        result = await _scrape_and_index(path, url)
+        result = await _scrape_and_save(path, url)
         print(json.dumps(result, ensure_ascii=False))
 
 
@@ -284,8 +453,10 @@ async def cmd_query(user_dir: pathlib.Path, project: str, question: str):
         print(json.dumps({"error": f"Project '{project}' not found"}))
         sys.exit(1)
 
-    backend = await _get_backend(path)
-    result = await backend.query(question)
+    result = await _search_embed(path, question)
+    if result is None:
+        result = _search_keyword(path, question)
+
     print(json.dumps({"result": result}, ensure_ascii=False))
 
 
@@ -294,7 +465,6 @@ async def cmd_delete(user_dir: pathlib.Path, project: str):
     if not path.exists():
         print(json.dumps({"error": f"Project '{project}' not found"}))
         sys.exit(1)
-    _backends.pop(str(path), None)
     shutil.rmtree(path)
     print(json.dumps({"status": "ok", "message": f"Project '{project}' deleted"}))
 
@@ -334,35 +504,35 @@ async def main():
         print("       (user_id can be set via PAWLIA_USER_ID env var)", file=sys.stderr)
         sys.exit(1)
 
-    user_dir = _SESSION_DIR / user_id / "researches"
+    user_dir = _SESSION_DIR / user_id / "workspace" / "research"
     user_dir.mkdir(parents=True, exist_ok=True)
 
     if command == "create":
         if len(args) < 2:
-            print("Usage: researcher.py <user_id> create <name> <description>", file=sys.stderr)
+            print("Usage: researcher.py create <name> <description>", file=sys.stderr)
             sys.exit(1)
         await cmd_create(user_dir, args[0], " ".join(args[1:]))
     elif command == "list":
         await cmd_list(user_dir)
     elif command == "add":
         if len(args) < 2:
-            print("Usage: researcher.py <user_id> add <project> <url> [depth]", file=sys.stderr)
+            print("Usage: researcher.py add <project> <url> [depth]", file=sys.stderr)
             sys.exit(1)
         depth = int(args[2]) if len(args) > 2 else 1
         await cmd_add(user_dir, args[0], args[1], depth)
     elif command == "query":
         if len(args) < 2:
-            print("Usage: researcher.py <user_id> query <project> <question>", file=sys.stderr)
+            print("Usage: researcher.py query <project> <question>", file=sys.stderr)
             sys.exit(1)
         await cmd_query(user_dir, args[0], " ".join(args[1:]))
     elif command == "delete":
         if len(args) < 1:
-            print("Usage: researcher.py <user_id> delete <project>", file=sys.stderr)
+            print("Usage: researcher.py delete <project>", file=sys.stderr)
             sys.exit(1)
         await cmd_delete(user_dir, args[0])
     elif command == "rename":
         if len(args) < 2:
-            print("Usage: researcher.py <user_id> rename <old> <new>", file=sys.stderr)
+            print("Usage: researcher.py rename <old> <new>", file=sys.stderr)
             sys.exit(1)
         await cmd_rename(user_dir, args[0], args[1])
     else:

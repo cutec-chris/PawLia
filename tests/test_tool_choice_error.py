@@ -3,7 +3,9 @@
 import pytest
 
 from pawlia.agents.base import BaseAgent
+from pawlia.skills.executor import WorkflowExecutor
 from pawlia.skills.executor import _is_tool_choice_error, _extract_tool_name
+from pawlia.skills.workflow_schema import BuildingBlock, Workflow
 
 
 class TestToolChoiceErrorHandling:
@@ -58,3 +60,48 @@ class TestWorkflowExecutorToolChoiceHelpers:
 
     def test_extract_tool_name_empty(self):
         assert _extract_tool_name("no tool here") == ""
+
+
+class TestWorkflowExecutorConfigInjection:
+    def test_config_placeholders_are_not_model_parameters(self):
+        executor = WorkflowExecutor(
+            tool_registry=None,
+            context={"skill_config": {"url": "http://example.test", "timeout": 15}},
+            llm=None,
+        )
+        workflow = Workflow(
+            id="search",
+            trigger="search",
+            max_steps=1,
+            building_blocks=[
+                BuildingBlock(
+                    id="run_search",
+                    command='python {scripts_dir}/search.py --query "{query}" --url "{url}" --timeout {timeout}',
+                    description="Run search",
+                )
+            ],
+        )
+
+        tools = executor._blocks_to_tools(workflow)
+        params = tools[0]["function"]["parameters"]
+
+        assert params["required"] == ["query"]
+        assert "query" in params["properties"]
+        assert "url" not in params["properties"]
+        assert "timeout" not in params["properties"]
+
+    def test_substitute_fills_config_placeholders(self):
+        executor = WorkflowExecutor(
+            tool_registry=None,
+            context={"cwd": "/tmp/skill", "skill_config": {"url": "http://example.test"}},
+            llm=None,
+        )
+
+        command = executor._substitute(
+            'python {scripts_dir}/search.py --query "{query}" --url "{url}"',
+            {"query": "hello"},
+        )
+
+        assert "/tmp/skill/scripts/search.py" in command.replace("\\", "/")
+        assert '--query "hello"' in command
+        assert '--url "http://example.test"' in command

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
 import io
 import logging
 import sys
@@ -16,6 +17,32 @@ def _make_pcm_from_frame_levels(levels, frame_size=960):
         np.full(frame_size, level, dtype=np.float32)
         for level in levels
     ])
+
+
+def _make_tonal_pcm_from_frame_levels(levels, freq_hz=220.0, sample_rate=48000, frame_size=960):
+    frames = []
+    phase = 0.0
+    phase_step = 2 * np.pi * freq_hz / sample_rate
+    for level in levels:
+        idx = np.arange(frame_size, dtype=np.float32)
+        frame = (level * np.sin(phase + idx * phase_step)).astype(np.float32)
+        phase = float((phase + frame_size * phase_step) % (2 * np.pi))
+        frames.append(frame)
+    return np.concatenate(frames)
+
+
+class _FakeVad:
+    def __init__(self, voiced_pattern):
+        self._voiced_pattern = list(voiced_pattern)
+        self._index = 0
+
+    def is_speech(self, frame_bytes, sample_rate):
+        if self._index < len(self._voiced_pattern):
+            result = self._voiced_pattern[self._index]
+        else:
+            result = False
+        self._index += 1
+        return result
 
 
 @pytest.mark.asyncio
@@ -46,15 +73,18 @@ async def test_process_speech_uses_call_system_prompt():
         start_hold=MagicMock(),
         stop_hold=MagicMock(),
         enqueue_pcm_float32=MagicMock(),
+        is_playing=False,
     )
     session._keep_typing = AsyncMock(return_value=None)
+    session.RESPONSE_DELAY_SECONDS = 0.0
 
     with patch("pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value="Hallo da")), patch(
         "pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=[])
     ):
         await session._process_speech(pcm, 48000)
+        await session._pending_response_task
 
-    agent.build_system_prompt.assert_called_once_with(mode="call")
+    agent.build_system_prompt.assert_called_once_with(mode="call", thread_id="thread-1")
     agent.run_streamed.assert_awaited_once_with(
         "Hallo da",
         system_prompt="CALL PROMPT",
@@ -168,17 +198,77 @@ def test_should_transcribe_chunk_rejects_background_noise():
     levels = [0.0] * 80
     for idx in (5, 22, 39, 57):
         levels[idx] = 0.05
-    pcm = _make_pcm_from_frame_levels(levels)
+    pcm = _make_tonal_pcm_from_frame_levels(levels)
 
     assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
 
 
 def test_should_transcribe_chunk_accepts_sustained_speech():
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 10 + [True] * 30 + [False] * 40)):
+        session = CallSession(
+            call_id="call-speech",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-speech",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+
+        levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
+        pcm = _make_tonal_pcm_from_frame_levels(levels)
+
+        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
+
+
+def test_should_transcribe_chunk_rejects_broadband_noise():
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 100)):
+        session = CallSession(
+            call_id="call-noise-broadband",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-noise-broadband",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+
+        rng = np.random.default_rng(7)
+        pcm = rng.normal(0.0, 0.05, 48000 * 2).astype(np.float32)
+
+        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+
+
+def test_should_transcribe_chunk_rejects_when_webrtcvad_disagrees():
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 100)):
+        session = CallSession(
+            call_id="call-vad-reject",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-vad-reject",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+
+        levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
+        pcm = _make_tonal_pcm_from_frame_levels(levels)
+
+        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+
+
+def test_live_frame_filter_rejects_broadband_wind_noise():
     session = CallSession(
-        call_id="call-speech",
+        call_id="call-live-wind",
         room_id="!room:test",
         caller_id="@user:test",
-        thread_id="thread-speech",
+        thread_id="thread-live-wind",
         client=SimpleNamespace(),
         app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
         cfg={},
@@ -186,10 +276,28 @@ def test_should_transcribe_chunk_accepts_sustained_speech():
         send_cb=AsyncMock(),
     )
 
-    levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
-    pcm = _make_pcm_from_frame_levels(levels)
+    rng = np.random.default_rng(9)
+    pcm = rng.normal(0.0, 0.08, 960).astype(np.float32)
 
-    assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
+    assert session._is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is False
+
+
+def test_live_frame_filter_accepts_speech_band_tone():
+    session = CallSession(
+        call_id="call-live-speech",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-live-speech",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    pcm = _make_tonal_pcm_from_frame_levels([0.08], freq_hz=220.0)
+
+    assert session._is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is True
 
 
 def test_meaningful_interrupt_accepts_keywords_and_full_sentences():
@@ -246,7 +354,12 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
         send_cb=send_cb,
     )
 
-    session._tts_track = SimpleNamespace(interrupt=MagicMock(), stop_hold=MagicMock())
+    session._tts_track = SimpleNamespace(
+        interrupt=MagicMock(),
+        stop_after_current_sentence=MagicMock(),
+        stop_hold=MagicMock(),
+        is_playing=False,
+    )
     session._cancel_active_response = AsyncMock()
     session._respond_to_transcript = AsyncMock()
 
@@ -254,6 +367,7 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
 
     session._tts_track.interrupt.assert_not_called()
+    session._tts_track.stop_after_current_sentence.assert_not_called()
     session._cancel_active_response.assert_not_awaited()
     session._respond_to_transcript.assert_not_awaited()
     send_cb.assert_not_awaited()
@@ -277,46 +391,204 @@ async def test_process_speech_interrupts_for_meaningful_barge_in():
         send_cb=send_cb,
     )
 
-    session._tts_track = SimpleNamespace(interrupt=MagicMock(), stop_hold=MagicMock())
+    session._tts_track = SimpleNamespace(
+        interrupt=MagicMock(),
+        stop_after_current_sentence=MagicMock(),
+        stop_hold=MagicMock(),
+        is_playing=False,
+    )
     session._cancel_active_response = AsyncMock()
     session._respond_to_transcript = AsyncMock()
+    session.RESPONSE_DELAY_SECONDS = 0.0
 
     with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="warte kurz")):
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
+        await session._pending_response_task
 
-    session._tts_track.interrupt.assert_called_once()
+    session._tts_track.interrupt.assert_not_called()
+    session._tts_track.stop_after_current_sentence.assert_called_once()
     session._cancel_active_response.assert_awaited_once()
-    session._respond_to_transcript.assert_awaited_once_with("warte kurz")
+    session._respond_to_transcript.assert_awaited_once_with("warte kurz", announce_transcript=False)
 
 
-def test_call_session_loads_voip_audio_thresholds_from_config():
+@pytest.mark.asyncio
+async def test_meaningful_barge_in_cancels_previous_response_task():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
     session = CallSession(
-        call_id="call-config",
+        call_id="call-barge-cancel",
         room_id="!room:test",
         caller_id="@user:test",
-        thread_id="thread-config",
-        client=SimpleNamespace(),
-        app=SimpleNamespace(config={
-            "voip": {
-                "silence_threshold": 0.03,
-                "silence_seconds": 2.2,
-                "min_speech_seconds": 0.7,
-                "min_active_speech_ratio": 0.25,
-                "min_consecutive_speech_frames": 11,
-                "call_inactivity_seconds": 240,
-            }
-        }),
+        thread_id="thread-barge-cancel",
+        client=client,
+        app=app,
         cfg={},
         agent=MagicMock(),
         send_cb=AsyncMock(),
     )
 
-    assert session.SILENCE_THRESHOLD == pytest.approx(0.03)
-    assert session.SILENCE_SECONDS == pytest.approx(2.2)
-    assert session.MIN_SPEECH_SECONDS == pytest.approx(0.7)
-    assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(0.25)
-    assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == 11
-    assert session.CALL_INACTIVITY_SECONDS == 240
+    previous_response = asyncio.create_task(asyncio.sleep(30))
+    session._track_response_task(previous_response)
+    session._tts_track = SimpleNamespace(
+        stop_after_current_sentence=MagicMock(),
+        stop_hold=MagicMock(),
+        is_playing=False,
+    )
+    session._respond_to_transcript = AsyncMock()
+    session.RESPONSE_DELAY_SECONDS = 0.0
+
+    try:
+        with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="warte kurz")):
+            await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
+            await session._pending_response_task
+    finally:
+        if not previous_response.done():
+            previous_response.cancel()
+
+    assert previous_response.cancelled()
+    session._tts_track.stop_after_current_sentence.assert_called_once()
+    session._respond_to_transcript.assert_awaited_once_with("warte kurz", announce_transcript=False)
+
+
+@pytest.mark.asyncio
+async def test_transcripts_are_debounced_while_user_keeps_speaking():
+    session = CallSession(
+        call_id="call-debounce",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-debounce",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    session.RESPONSE_DELAY_SECONDS = 0.01
+    session._respond_to_transcript = AsyncMock()
+    session._speaking = True
+
+    await session._queue_transcript_response("erster teil")
+    await asyncio.sleep(0.03)
+
+    session._respond_to_transcript.assert_not_awaited()
+
+    session._mark_user_speech_ended()
+    await session._pending_response_task
+
+    session._respond_to_transcript.assert_awaited_once_with("erster teil", announce_transcript=False)
+
+
+@pytest.mark.asyncio
+async def test_new_transcript_restarts_response_debounce_and_combines_context():
+    session = CallSession(
+        call_id="call-debounce-combine",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-debounce-combine",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    session.RESPONSE_DELAY_SECONDS = 0.05
+    session._respond_to_transcript = AsyncMock()
+    session._mark_user_speech_ended()
+
+    await session._queue_transcript_response("erster teil")
+    first_task = session._pending_response_task
+    await session._queue_transcript_response("zweiter teil")
+    await asyncio.sleep(0)
+    assert first_task.cancelled() or first_task.done()
+    await session._pending_response_task
+
+    session._respond_to_transcript.assert_awaited_once_with(
+        "erster teil\nzweiter teil",
+        announce_transcript=False,
+    )
+
+
+@pytest.mark.skipif(not matrix_call._AIORTC_AVAILABLE, reason="aiortc not installed")
+def test_tts_barge_in_finishes_current_sentence_and_discards_later_sentences():
+    track = matrix_call._TTSAudioTrack()
+    frame_count = track.SAMPLES_PER_FRAME * 2
+
+    track.enqueue_pcm_float32(np.ones(frame_count, dtype=np.float32) * 0.1)
+    track.enqueue_pcm_float32(np.ones(frame_count, dtype=np.float32) * 0.2)
+
+    first_item = track._queue.get_nowait()
+    assert first_item[1] == 1
+    track._current_sentence_id = 1
+
+    track.stop_after_current_sentence()
+
+    kept = []
+    while not track._queue.empty():
+        kept.append(track._queue.get_nowait())
+
+    assert kept
+    assert {item[1] for item in kept} == {1}
+
+
+def test_call_session_loads_voip_audio_thresholds_from_config():
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([])):
+        session = CallSession(
+            call_id="call-config",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-config",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={
+                "voip": {
+                    "silence_threshold": 0.03,
+                    "silence_seconds": 2.2,
+                    "min_speech_seconds": 0.7,
+                    "min_active_speech_ratio": 0.25,
+                    "min_consecutive_speech_frames": 11,
+                    "min_speech_band_ratio": 0.42,
+                    "max_spectral_flatness": 0.61,
+                    "min_speech_like_ratio": 0.14,
+                    "min_consecutive_speechlike_frames": 6,
+                    "webrtcvad_enabled": True,
+                    "webrtcvad_mode": 3,
+                    "webrtcvad_min_voiced_ratio": 0.22,
+                    "webrtcvad_min_consecutive_frames": 5,
+                    "call_inactivity_seconds": 240,
+                    "preanswer_warmup_enabled": False,
+                    "preanswer_warmup_timeout_seconds": 7.5,
+                    "preanswer_stt_silence_seconds": 0.2,
+                    "response_delay_seconds": 3.5,
+                    "connect_timeout_seconds": 12.0,
+                    "hangup_on_media_end": False,
+                }
+            }),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+
+        assert session.SILENCE_THRESHOLD == pytest.approx(0.03)
+        assert session.SILENCE_SECONDS == pytest.approx(2.2)
+        assert session.MIN_SPEECH_SECONDS == pytest.approx(0.7)
+        assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(0.25)
+        assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == 11
+        assert session.MIN_SPEECH_BAND_RATIO == pytest.approx(0.42)
+        assert session.MAX_SPECTRAL_FLATNESS == pytest.approx(0.61)
+        assert session.MIN_SPEECH_LIKE_RATIO == pytest.approx(0.14)
+        assert session.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == 6
+        assert session.WEBRTC_VAD_ENABLED is True
+        assert session.WEBRTC_VAD_MODE == 3
+        assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(0.22)
+        assert session.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == 5
+        assert session.CALL_INACTIVITY_SECONDS == 240
+        assert session.PREANSWER_WARMUP_ENABLED is False
+        assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(7.5)
+        assert session.PREANSWER_STT_SILENCE_SECONDS == pytest.approx(0.2)
+        assert session.RESPONSE_DELAY_SECONDS == pytest.approx(3.5)
+        assert session.CONNECT_TIMEOUT_SECONDS == pytest.approx(12.0)
+        assert session.HANGUP_ON_MEDIA_END is False
 
 
 def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
@@ -333,7 +605,21 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
                 "min_speech_seconds": 0,
                 "min_active_speech_ratio": 1.5,
                 "min_consecutive_speech_frames": 0,
+                "min_speech_band_ratio": 1.3,
+                "max_spectral_flatness": -0.1,
+                "min_speech_like_ratio": -1,
+                "min_consecutive_speechlike_frames": 0,
+                "webrtcvad_enabled": "maybe",
+                "webrtcvad_mode": 99,
+                "webrtcvad_min_voiced_ratio": 2,
+                "webrtcvad_min_consecutive_frames": 0,
                 "call_inactivity_seconds": 0,
+                "preanswer_warmup_enabled": "perhaps",
+                "preanswer_warmup_timeout_seconds": 0,
+                "preanswer_stt_silence_seconds": 0,
+                "response_delay_seconds": -1,
+                "connect_timeout_seconds": 0,
+                "hangup_on_media_end": "perhaps",
             }
         }),
         cfg={},
@@ -346,7 +632,189 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
     assert session.MIN_SPEECH_SECONDS == pytest.approx(CallSession.MIN_SPEECH_SECONDS)
     assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(CallSession.MIN_ACTIVE_SPEECH_RATIO)
     assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECH_FRAMES
+    assert session.MIN_SPEECH_BAND_RATIO == pytest.approx(CallSession.MIN_SPEECH_BAND_RATIO)
+    assert session.MAX_SPECTRAL_FLATNESS == pytest.approx(CallSession.MAX_SPECTRAL_FLATNESS)
+    assert session.MIN_SPEECH_LIKE_RATIO == pytest.approx(CallSession.MIN_SPEECH_LIKE_RATIO)
+    assert session.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
+    assert session.WEBRTC_VAD_ENABLED == CallSession.WEBRTC_VAD_ENABLED
+    assert session.WEBRTC_VAD_MODE == CallSession.WEBRTC_VAD_MODE
+    assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(CallSession.WEBRTC_VAD_MIN_VOICED_RATIO)
+    assert session.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == CallSession.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
     assert session.CALL_INACTIVITY_SECONDS == CallSession.CALL_INACTIVITY_SECONDS
+    assert session.PREANSWER_WARMUP_ENABLED == CallSession.PREANSWER_WARMUP_ENABLED
+    assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(CallSession.PREANSWER_WARMUP_TIMEOUT_SECONDS)
+    assert session.PREANSWER_STT_SILENCE_SECONDS == pytest.approx(CallSession.PREANSWER_STT_SILENCE_SECONDS)
+    assert session.RESPONSE_DELAY_SECONDS == CallSession.RESPONSE_DELAY_SECONDS
+    assert session.CONNECT_TIMEOUT_SECONDS == CallSession.CONNECT_TIMEOUT_SECONDS
+    assert session.HANGUP_ON_MEDIA_END == CallSession.HANGUP_ON_MEDIA_END
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_watchdog_hangs_up_stale_call():
+    client = SimpleNamespace(room_send=AsyncMock())
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-connect-timeout",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-connect-timeout",
+        client=client,
+        app=SimpleNamespace(config={"voip": {"connect_timeout_seconds": 0.01}}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=send_cb,
+    )
+    session._pc = SimpleNamespace(
+        connectionState="connecting",
+        iceConnectionState="checking",
+        close=AsyncMock(),
+    )
+    session._answer_sent.set()
+
+    await session._connect_timeout_watchdog()
+
+    send_cb.assert_awaited_once()
+    client.room_send.assert_awaited_once()
+    session._pc.close.assert_awaited_once()
+    assert session.finished is True
+
+
+@pytest.mark.asyncio
+async def test_preanswer_warmup_prepares_greeting_without_playing_it():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    agent = MagicMock()
+    agent.build_system_prompt.return_value = "CALL PROMPT"
+
+    async def _fake_run_streamed(*args, on_sentence=None, **kwargs):
+        if on_sentence:
+            await on_sentence("Hallo, ich bin da.")
+        return "Hallo, ich bin da."
+
+    agent.run_streamed = AsyncMock(side_effect=_fake_run_streamed)
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-warmup",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-warmup",
+        client=client,
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=send_cb,
+    )
+    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+
+    with patch("pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value=None)) as transcribe_pcm, \
+         patch("pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=np.ones(480, dtype=np.float32))):
+        await session._run_preanswer_warmup()
+
+    transcribe_pcm.assert_awaited_once()
+    agent.run_streamed.assert_awaited_once()
+    send_cb.assert_not_awaited()
+    session._tts_track.enqueue_pcm_float32.assert_not_called()
+    assert session._greeting_sent is False
+    assert session._prepared_greeting is not None
+
+
+@pytest.mark.asyncio
+async def test_deferred_greeting_waits_for_answer_and_media_ready():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    agent = MagicMock()
+    agent.build_system_prompt.return_value = "CALL PROMPT"
+
+    async def _fake_run_streamed(*args, on_sentence=None, **kwargs):
+        if on_sentence:
+            await on_sentence("Hallo, ich bin da.")
+        return "Hallo, ich bin da."
+
+    agent.run_streamed = AsyncMock(side_effect=_fake_run_streamed)
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-deferred-greeting",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-deferred-greeting",
+        client=SimpleNamespace(),
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=send_cb,
+    )
+    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+
+    with patch("pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=np.ones(480, dtype=np.float32))):
+        task = asyncio.create_task(session._send_greeting_when_ready())
+        await asyncio.sleep(0)
+        agent.run_streamed.assert_not_awaited()
+
+        await session.mark_answer_sent()
+        await asyncio.sleep(0)
+        agent.run_streamed.assert_not_awaited()
+
+        session._media_connected.set()
+        await task
+
+    agent.run_streamed.assert_awaited_once()
+    send_cb.assert_awaited_once_with("Hallo, ich bin da.")
+    session._tts_track.enqueue_pcm_float32.assert_called_once()
+    assert session._greeting_sent is True
+
+
+@pytest.mark.asyncio
+async def test_deferred_greeting_plays_prepared_audio_when_ready():
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-prepared-greeting",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-prepared-greeting",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=send_cb,
+    )
+    pcm = np.ones(480, dtype=np.float32)
+    session._prepared_greeting = ("Hallo, ich bin da.", [pcm])
+    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+
+    task = asyncio.create_task(session._send_greeting_when_ready())
+    await asyncio.sleep(0)
+    session._tts_track.enqueue_pcm_float32.assert_not_called()
+
+    await session.mark_answer_sent()
+    session._media_connected.set()
+    await task
+
+    session._tts_track.enqueue_pcm_float32.assert_called_once_with(pcm)
+    session._tts_track.stop_hold.assert_called_once()
+    send_cb.assert_awaited_once_with("Hallo, ich bin da.")
+    assert session._greeting_sent is True
+
+
+@pytest.mark.asyncio
+async def test_send_greeting_is_noop_after_preanswer_greeting():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    agent = MagicMock()
+    agent.run_streamed = AsyncMock(return_value="Hallo")
+    session = CallSession(
+        call_id="call-greeting-once",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-greeting-once",
+        client=SimpleNamespace(),
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=AsyncMock(),
+    )
+    session._greeting_sent = True
+
+    await session._send_greeting()
+
+    agent.run_streamed.assert_not_awaited()
 
 
 def test_load_hold_audio_uses_ndarray_resampling():

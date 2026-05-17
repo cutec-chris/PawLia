@@ -153,6 +153,7 @@ class ScriptExecutor:
         except asyncio.TimeoutError:
             if proc:
                 proc.kill()
+                await proc.wait()
             return {"success": False, "output": "", "error": f"Script timed out after {ScriptExecutor.TIMEOUT}s"}
         except Exception as e:
             return {"success": False, "output": "", "error": str(e)}
@@ -259,11 +260,11 @@ class ChecklistProcessor:
                 script_path = resolve_script(self.session_dir, user_id, script)
                 params = dict(item.get("params", {}))
                 params["event"] = event_info
-                # Collect previous results from state
+                # Collect previous results from state — only successful items
                 params["previous_results"] = {
                     iid: ist.get("result")
                     for iid, ist in file_state.items()
-                    if isinstance(ist, dict) and ist.get("result") is not None
+                    if isinstance(ist, dict) and ist.get("status") == "done" and ist.get("result") is not None
                 }
 
                 result = await ScriptExecutor.run(
@@ -358,13 +359,14 @@ class JobRunner:
 
             try:
                 runner = self._app.run_instruction(instruction, user_id)
-                result = await runner.run(query=instruction)
+                result = await runner.run(instruction, thread_id=None)
                 job["last_run"] = now.isoformat()
                 job["last_result"] = "success"
                 changed = True
 
-                if job.get("notify", True):
-                    output = result[:500] if result else "erledigt"
+                notify = job.get("notify", True)
+                if notify is True:
+                    output = result if result else "erledigt"
                     await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{output}")
 
             except Exception as e:
@@ -373,7 +375,8 @@ class JobRunner:
                 job["last_result"] = "failed"
                 changed = True
 
-                if job.get("notify", True):
+                notify = job.get("notify", True)
+                if notify is True or notify == "error":
                     await self._notify(user_id,
                         f"\u26a0\ufe0f Job '{job_name}' fehlgeschlagen: {str(e)[:200]}")
 
@@ -561,8 +564,12 @@ def create_job(
     name: str,
     schedule: str,
     instruction: str,
-    notify: bool = True,
+    notify: bool | str = True,
 ) -> Dict[str, Any]:
+    """Create a job definition.
+
+    ``notify``: True = always deliver output, False = never, "error" = only on failure.
+    """
     return {
         "id": f"job-{uuid.uuid4().hex[:8]}",
         "name": name,

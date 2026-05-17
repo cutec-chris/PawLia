@@ -1,10 +1,19 @@
 providers:
   ollama:
+    backend: pawlia
     apiBase: http://localhost:11434/v1
     apiKey: ollama
     timeout: 240
     keepAlive: -1
+  # hermes_local:
+  #   backend: hermes
+  #   apiBase: http://127.0.0.1:8642/v1
+  #   apiKey: change-me
+  #   timeout: 600
+  #   conversation_namespace: pawlia
+  #   store: true
   # groq:
+  #   backend: pawlia
   #   apiBase: https://api.groq.com/openai/v1
   #   apiKey: gsk_...
 
@@ -32,6 +41,9 @@ models:
   #   provider: ollama
   #   temperature: 0.3
   #   audio_input: true    # native audio — skips STT, sends audio directly to the model
+  # hermes:
+  #   model: hermes-agent
+  #   provider: hermes_local
 
 # Assign a model (by key) to each agent type.
 # You can provide multiple models comma-separated to enable runtime failover,
@@ -71,40 +83,75 @@ interfaces:
   #   # stun_servers:                        # STUN for VoIP (optional)
   #   #   - stun:stun.l.google.com:19302
 
+  # openai:                                  # OpenAI- & Ollama-compatible REST API
+  #   port: 11435                            # POST /v1/chat/completions, GET /v1/models
+  #   # host: 0.0.0.0                        # GET /api/tags, POST /api/chat (Ollama format)
+  #   # api_key: mysecret                    # optional — require Bearer token
+
 # voip:
-#   silence_threshold: 0.02           # frame RMS above this counts as speech (after AGC)
+#   silence_threshold: 0.018          # frame RMS above this counts as speech (after AGC)
 #   silence_seconds: 2.2              # trailing silence that ends a chunk
 #   min_speech_seconds: 0.4           # shorter chunks are discarded early
 #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
 #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
+#   min_speech_band_ratio: 0.35       # energy share in the speech band
+#   max_spectral_flatness: 0.72       # reject very noise-like chunks
+#   min_speech_like_ratio: 0.08       # active + speech-like frame ratio required
+#   min_consecutive_speechlike_frames: 4
+#   webrtcvad_enabled: true           # extra lightweight speech detector
+#   webrtcvad_mode: 2                 # 0..3, higher = stricter
+#   webrtcvad_min_voiced_ratio: 0.12  # voiced-frame ratio required if enabled
+#   webrtcvad_min_consecutive_frames: 4
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
+#   response_delay_seconds: 2.5       # wait this long after speech ends before replying
+#   agc_window_seconds: 15.0          # keep AGC active this long after bot/user activity
+#   agc_target_rms: 0.10              # target loudness used for VAD normalization
+#   agc_max_gain: 12.0                # upper cap for AGC amplification
+#   agc_smoothing: 0.15               # how quickly AGC reacts (higher = faster)
 #   bargein_rms_threshold: 0.05       # raw RMS to interrupt TTS playback
+#   preanswer_warmup_enabled: true    # warm STT + prepare greeting before answering calls
+#   preanswer_warmup_timeout_seconds: 25.0
+#   preanswer_stt_silence_seconds: 0.4
 
 # Speech-to-text transcription (voice messages + VoIP calls).
 # Any OpenAI-compatible /audio/transcriptions endpoint works.
+#
+# Explicitly list the STT providers PawLia may use. This list is the fallback
+# order; PawLia does not try every configured provider automatically.
+# Use one entry for no fallback, or multiple entries for fallback.
 # transcription:
-#   provider: groq
+#   providers:
+#     - name: lan-whisper
+#       provider: local
+#       base_url: http://192.168.177.120:8005/v1
+#       model: deepdml/faster-whisper-large-v3-turbo-ct2
+#       language: de
+#       timeout: 10
+#     - groq
+#
+#   # After 3 runtime failures, a provider is skipped for 30 minutes.
+#   # Entries may be provider names (like `groq`) or inline provider configs
+#   # (like `lan-whisper` above).
+#
 #   groq:
 #     api_key: YOUR_GROQ_API_KEY
 #     model: whisper-large-v3-turbo
 #     # base_url: https://api.groq.com/openai/v1   # set automatically; override if needed
-#     # language: de
-
-#   # Other API (OpenAI or self-hosted):
-#   # provider: openai
+#     language: de
+#     timeout: 30
+#
+#   # Other available provider configs, only used if listed in `providers`.
 #   # openai:
 #   #   api_key: YOUR_API_KEY
 #   #   base_url: https://api.openai.com/v1
 #   #   model: whisper-1
-#   #   # language: de
-
-#   # Local (no API key; requires FFmpeg + faster-whisper):
-#   # provider: local
+#
 #   # local:
+#   #   # No base_url: use in-process faster-whisper (requires FFmpeg + faster-whisper)
 #   #   model: base        # tiny | base | small | medium | large-v3
 #   #   device: cpu        # cpu | cuda
 #   #   compute_type: int8
-#   #   # language: de
+#   #   language: de
 
 # Text-to-speech for VoIP call responses — pick one provider and uncomment it.
 # tts:
@@ -132,6 +179,14 @@ workspace:
     # weekly_squash_time: "23:30"  # squash all weekly commits into one (default: 23:30)
     # push: false                  # push to remote after squash (uses --force-with-lease)
 
+# CalDAV/CardDAV server — maps Radicale login names to picoclaw user_ids.
+# Login name = htpasswd username = first URL path component (e.g. /chris/calendar/).
+# Add users to radicale/users with: htpasswd -B -b radicale/users chris mypassword
+# caldav:
+#   users:
+#     chris: cli_user          # simple name → user_id
+#     anna: anna_user
+
 skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload
   allow_workspace: true    # load skills from session/<user>/workspace/skills/ (default: true)
@@ -149,7 +204,7 @@ skill-config:
   #   embedding_model: bge-m3:latest
   #   embedding_dim: 1024
   #   embedding_host: http://localhost:11434
-  #   # rag_backend: markdown            # markdown (default) | lightrag | simple | mem0
+  #   # rag_backend: markdown            # markdown (default) | lightrag | simple
   #   # rag_provider: ollama             # defaults to embedding_provider
   #   # rag_model: qwen3.5:latest        # LLM for topic extraction / RAG (not used by simple)
   #   # rag_numctx: 4096                 # LLM context window (lightrag/markdown)
@@ -163,11 +218,10 @@ skill-config:
   #   embedding_model: bge-m3:latest
   #   embedding_dim: 1024
   #   embedding_host: http://localhost:11434
-  #   # rag_backend: markdown            # markdown (default) | lightrag | simple | mem0
+  #   # rag_backend: markdown            # markdown (default) | lightrag | simple
   #   #                                  #   markdown  — LLM extracts topics → one .md file per topic, keyword retrieval
   #   #                                  #   lightrag  — knowledge-graph RAG (powerful, slow, needs lightrag-hku)
   #   #                                  #   simple    — chunk + embed + cosine similarity (fast, no extra deps)
-  #   #                                  #   mem0      — fact extraction (needs mem0ai + chromadb)
   #   # rag_provider: ollama             # defaults to embedding_provider
   #   # rag_model: qwen3.5:latest        # LLM for topic extraction / RAG (not used by simple)
   #   # rag_numctx: 4096                 # LLM context window (lightrag/markdown)

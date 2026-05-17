@@ -8,6 +8,7 @@ Proven patterns for writing effective PawLia skills.
 - [Command Reference Table](#command-reference-table)
 - [Output Format Templates](#output-format-templates)
 - [Error Handling / Self-Repair](#error-handling--self-repair)
+- [Config Injection](#config-injection)
 - [Never Swallow Upstream Errors](#never-swallow-upstream-errors)
 - [Harness](#harness)
 - [Conditional Logic](#conditional-logic)
@@ -126,6 +127,52 @@ General recovery strategy:
 ```
 
 Key principle: the sub-agent should self-recover rather than bubble errors up.
+
+---
+
+## Config Injection
+
+Deployment settings such as URLs, hosts, timeouts, model names, embedding
+dimensions, and API base paths belong in `skill-config.<skill-name>` and are
+injected by PawLia. Do not make the sub-agent invent or pass them as ordinary
+CLI arguments.
+
+In `SKILL.md`, declare required keys under `metadata.requires_config`:
+
+```yaml
+metadata:
+  requires_config:
+    - url
+    - timeout
+```
+
+In scripts, read the per-skill config from `PAWLIA_SKILL_CONFIG`:
+
+```python
+import json
+import os
+
+skill_config = json.loads(os.environ.get("PAWLIA_SKILL_CONFIG", "{}"))
+url = skill_config.get("url")
+timeout = int(skill_config.get("timeout", 30))
+```
+
+Good command example:
+
+```markdown
+python <scripts_dir>/search.py --query "<query>" --limit 5
+```
+
+Bad command example:
+
+```markdown
+python <scripts_dir>/search.py --query "<query>" --url "<url>" --timeout "<timeout>"
+```
+
+Compiled workflow commands may still contain placeholders like `{url}` or
+`{timeout}` when needed; if those keys exist in `skill-config.<skill-name>`,
+the workflow executor fills them from config and does not ask the model for
+them.
 
 ---
 

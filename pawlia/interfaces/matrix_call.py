@@ -47,6 +47,13 @@ except Exception as _e:
     _logging.getLogger("pawlia.interfaces.matrix_call").warning("aiortc import failed: %s", _e)
     _AIORTC_AVAILABLE = False
 
+try:
+    import webrtcvad  # type: ignore
+    _WEBRTCVAD_IMPORT_ERROR = None
+except Exception as _e:
+    webrtcvad = None  # type: ignore[assignment]
+    _WEBRTCVAD_IMPORT_ERROR = _e
+
 if TYPE_CHECKING:
     from nio import AsyncClient, MatrixRoom
     from pawlia.app import App
@@ -57,6 +64,17 @@ _INTERRUPT_KEYWORD_RE = re.compile(
     r"\b(?:halt|stop|stopp|wait|warte|warten|moment|sekunde|pause)\b",
     re.IGNORECASE,
 )
+
+
+def _build_webrtc_vad(mode: int):
+    """Create a WebRTC VAD instance when the optional dependency is available."""
+    if webrtcvad is None:
+        return None
+    try:
+        return webrtcvad.Vad(mode)
+    except Exception as e:
+        logger.warning("matrix-call: could not initialize webrtcvad(mode=%s): %s", mode, e)
+        return None
 
 # ---------------------------------------------------------------------------
 # Outgoing audio track (TTS playback)
@@ -76,10 +94,12 @@ if _AIORTC_AVAILABLE:
 
         def __init__(self) -> None:
             super().__init__()
-            self._queue: asyncio.Queue[Optional[np.ndarray]] = asyncio.Queue()
+            self._queue: asyncio.Queue[Any] = asyncio.Queue()
             self._pts = 0
             self._time_base = fractions.Fraction(1, self.SAMPLE_RATE)
             self._start_time: Optional[float] = None
+            self._next_sentence_id = 1
+            self._current_sentence_id: Optional[int] = None
             # Hold audio: looping background sound while waiting for agent
             self._hold_pcm: Optional[np.ndarray] = None  # int16 mono @ 48 kHz
             self._hold_pos: int = 0
@@ -105,13 +125,33 @@ if _AIORTC_AVAILABLE:
             self._hold_active = False
 
         def interrupt(self) -> None:
-            """Barge-in: clear all queued TTS audio and stop hold."""
+            """Barge-in: clear all queued TTS audio and stop hold immediately."""
             while not self._queue.empty():
                 try:
                     self._queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
             self._hold_active = False
+            self._current_sentence_id = None
+
+        def stop_after_current_sentence(self) -> None:
+            """Barge-in: finish the sentence in progress and discard later TTS."""
+            self._hold_active = False
+            current_sid = self._current_sentence_id
+            if current_sid is None:
+                self.interrupt()
+                return
+
+            kept: List[Any] = []
+            while not self._queue.empty():
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if isinstance(item, tuple) and len(item) == 3 and item[1] == current_sid:
+                    kept.append(item)
+            for item in kept:
+                self._queue.put_nowait(item)
 
         async def recv(self):  # noqa: D401
             from av import AudioFrame  # type: ignore
@@ -125,9 +165,19 @@ if _AIORTC_AVAILABLE:
                 await asyncio.sleep(delay)
 
             try:
-                samples = self._queue.get_nowait()
+                item = self._queue.get_nowait()
             except asyncio.QueueEmpty:
+                item = None
+
+            if item is None:
                 samples = None
+            elif isinstance(item, tuple) and len(item) == 3:
+                samples, sentence_id, is_last = item
+                self._current_sentence_id = sentence_id
+                if is_last:
+                    self._current_sentence_id = None
+            else:
+                samples = item
 
             if samples is None or len(samples) == 0:
                 if (self._hold_active
@@ -159,9 +209,28 @@ if _AIORTC_AVAILABLE:
 
         def enqueue_pcm_float32(self, pcm: np.ndarray) -> None:
             """Enqueue float32 mono PCM for playback (chunks it into 20 ms frames)."""
-            pcm_int16 = (np.clip(pcm, -1.0, 1.0) * 32767).astype(np.int16)
-            for i in range(0, len(pcm_int16), self.SAMPLES_PER_FRAME):
-                self._queue.put_nowait(pcm_int16[i : i + self.SAMPLES_PER_FRAME])
+            # Debug: Check if we received valid audio data
+            if pcm is None or len(pcm) == 0:
+                logger.warning("TTS: Received empty or None audio data")
+                return
+
+            # Ensure proper range and convert to int16
+            pcm_normalized = np.clip(pcm, -1.0, 1.0)
+            pcm_int16 = (pcm_normalized * 32767).astype(np.int16)
+
+            # Debug: Log audio statistics
+            logger.debug("TTS: Enqueuing audio - samples: %d, min: %.4f, max: %.4f, mean: %.4f",
+                       len(pcm), float(np.min(pcm)), float(np.max(pcm)), float(np.mean(pcm)))
+
+            sentence_id = self._next_sentence_id
+            self._next_sentence_id += 1
+            chunks = [
+                pcm_int16[i : i + self.SAMPLES_PER_FRAME]
+                for i in range(0, len(pcm_int16), self.SAMPLES_PER_FRAME)
+            ]
+            for index, chunk in enumerate(chunks):
+                if len(chunk) > 0:
+                    self._queue.put_nowait((chunk, sentence_id, index == len(chunks) - 1))
 
 
 # ---------------------------------------------------------------------------
@@ -232,36 +301,84 @@ def _parse_sdp_candidates(sdp: str) -> List[Dict]:
             })
     return candidates
 
-
 # ---------------------------------------------------------------------------
 # Per-call session
 # ---------------------------------------------------------------------------
 
 class CallSession:
-    """Manages a single active VoIP call."""
+    """Manages a single active VoIP call.
+
+    Adaptive silence detection
+    --------------------------
+    Rather than using a fixed RMS threshold to distinguish speech from silence,
+    the pipeline maintains a rolling EMA of the background noise floor
+    (_noise_floor) during periods when no speech buffer is active.  The
+    frame-level gate (_is_speech_like_frame) then uses
+
+        effective_threshold = max(SILENCE_THRESHOLD, _noise_floor × 2.0)
+
+    so that steady background noise (e.g. road noise while cycling) falls
+    below the effective threshold and counts as silence.  This lets
+    silence_count accumulate even when the raw RMS never drops to zero,
+    preventing speech chunks from growing indefinitely.
+
+    Adaptive response delay
+    -----------------------
+    After a speech chunk is accepted and transcribed, the pipeline waits
+    _compute_response_delay() seconds before generating a reply.  The delay
+    scales with the duration of the last accepted chunk so that long monologues
+    get a longer pause window (the caller may just be thinking), while short
+    utterances get a quick response.  A small bonus is added when the noise
+    floor is elevated, since background noise can mask the true end of speech.
+
+        last_speech_duration  →  base delay
+        < 6 s                    RESPONSE_DELAY_SECONDS (default 1.2 s)
+        6 – 12 s                 max(base, 3.0 s)
+        12 – 20 s                max(base, 4.0 s)
+        > 20 s                   max(base, 5.0 s)
+    """
 
     # Silence detection: RMS below this (after AGC) → silence
-    SILENCE_THRESHOLD = 0.02
+    SILENCE_THRESHOLD = 0.018
     # Seconds of silence that end a speech chunk
-    SILENCE_SECONDS = 2.2
+    SILENCE_SECONDS = 1.5
     # Minimum seconds of speech before we transcribe (filter short noise bursts)
     MIN_SPEECH_SECONDS = 0.4
     # Chunk-level guard: require enough active speech frames before STT
     MIN_ACTIVE_SPEECH_RATIO = 0.12
     MIN_CONSECUTIVE_SPEECH_FRAMES = 8
+    MIN_SPEECH_BAND_RATIO = 0.35
+    MAX_SPECTRAL_FLATNESS = 0.72
+    MIN_SPEECH_LIKE_RATIO = 0.08
+    MIN_CONSECUTIVE_SPEECHLIKE_FRAMES = 4
+    WEBRTC_VAD_ENABLED = True
+    WEBRTC_VAD_MODE = 2
+    WEBRTC_VAD_MIN_VOICED_RATIO = 0.12
+    WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES = 4
     # End calls when no speech chunk has been sent to STT for too long.
     CALL_INACTIVITY_SECONDS = 180
     WATCHDOG_POLL_SECONDS = 5.0
     # AGC: boost gain in windows where we expect the user to speak
-    AGC_WINDOW_SECONDS = 8.0      # how long the AGC stays active
-    AGC_TARGET_RMS = 0.08         # target RMS level for normalization
-    AGC_MAX_GAIN = 10.0           # don't amplify more than this
-    AGC_SMOOTHING = 0.05          # EMA alpha for gain updates (lower = smoother)
+    AGC_WINDOW_SECONDS = 15.0     # how long the AGC stays active
+    AGC_TARGET_RMS = 0.10         # target RMS level for normalization
+    AGC_MAX_GAIN = 12.0           # don't amplify more than this
+    AGC_SMOOTHING = 0.15          # EMA alpha for gain updates (higher = faster)
     # Barge-in: buffer possible interruptions during TTS above this RMS and
     # only stop playback after the transcript looks meaningful.
     BARGEIN_RMS_THRESHOLD = 0.05
     BARGEIN_MIN_WORDS = 4
     BARGEIN_MIN_CHARS = 12
+    # Pre-answer warmup: load STT and prepare the greeting before Matrix sees
+    # the call as answered, so the caller does not sit through cold-start time.
+    PREANSWER_WARMUP_ENABLED = True
+    PREANSWER_WARMUP_TIMEOUT_SECONDS = 25.0
+    PREANSWER_STT_SILENCE_SECONDS = 0.4
+    CONNECT_TIMEOUT_SECONDS = 45.0
+    HANGUP_ON_MEDIA_END = True
+    # Wait this long after the user's latest speech before replying.  This
+    # lets callers tell a longer story without the agent jumping into every
+    # pause that was only used for breathing or thinking.
+    RESPONSE_DELAY_SECONDS = 1.2
 
     def __init__(
         self,
@@ -293,15 +410,44 @@ class CallSession:
         self._speaking = False
         self._ice_reconnect_task: Optional[asyncio.Task] = None
         self._last_activity_at = time.monotonic()
+        self._last_user_speech_at = self._last_activity_at
         # AGC state
         self._agc_until: float = 0.0   # monotonic timestamp; AGC active while now < this
         self._agc_gain: float = 1.0    # current smoothed gain factor
         self._active_response_task: Optional[asyncio.Task] = None
+        self._greeting_sent = False
+        self._answer_sent = asyncio.Event()
+        self._media_connected = asyncio.Event()
+        self._prepared_greeting: Optional[tuple[str, List[np.ndarray]]] = None
+        self._pending_response_task: Optional[asyncio.Task] = None
+        self._pending_transcripts: List[str] = []
+        # Adaptive silence detection: rolling EMA of background noise floor
+        self._noise_floor: float = 0.01
+        # Duration of the most recently accepted speech chunk (seconds)
+        self._last_speech_duration: float = 0.0
         self._load_voip_audio_config()
+        self._webrtc_vad = self._init_webrtc_vad()
 
     def _mark_activity(self) -> None:
         """Record user or bot activity to keep the call alive."""
         self._last_activity_at = time.monotonic()
+
+    def _mark_user_speech_started(self) -> None:
+        self._speaking = True
+        self._last_user_speech_at = time.monotonic()
+        self._mark_activity()
+
+    def _mark_user_speech_ended(self) -> None:
+        self._speaking = False
+        self._last_user_speech_at = time.monotonic()
+        self._mark_activity()
+
+    def _bot_is_active(self) -> bool:
+        """Return True while Pawlia is still speaking or generating audio."""
+        if self._tts_track and self._tts_track.is_playing:
+            return True
+        task = self._active_response_task
+        return bool(task and not task.done())
 
     def _activate_agc(self) -> None:
         """Open an AGC window for the next AGC_WINDOW_SECONDS."""
@@ -377,11 +523,88 @@ class CallSession:
             self.MIN_CONSECUTIVE_SPEECH_FRAMES,
             minimum=1,
         )
+        self.MIN_SPEECH_BAND_RATIO = self._get_float_config(
+            voip_cfg,
+            "min_speech_band_ratio",
+            self.MIN_SPEECH_BAND_RATIO,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.MAX_SPECTRAL_FLATNESS = self._get_float_config(
+            voip_cfg,
+            "max_spectral_flatness",
+            self.MAX_SPECTRAL_FLATNESS,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.MIN_SPEECH_LIKE_RATIO = self._get_float_config(
+            voip_cfg,
+            "min_speech_like_ratio",
+            self.MIN_SPEECH_LIKE_RATIO,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES = self._get_int_config(
+            voip_cfg,
+            "min_consecutive_speechlike_frames",
+            self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES,
+            minimum=1,
+        )
+        self.WEBRTC_VAD_ENABLED = self._get_bool_config(
+            voip_cfg,
+            "webrtcvad_enabled",
+            self.WEBRTC_VAD_ENABLED,
+        )
+        self.WEBRTC_VAD_MODE = self._get_int_config(
+            voip_cfg,
+            "webrtcvad_mode",
+            self.WEBRTC_VAD_MODE,
+            minimum=0,
+            maximum=3,
+        )
+        self.WEBRTC_VAD_MIN_VOICED_RATIO = self._get_float_config(
+            voip_cfg,
+            "webrtcvad_min_voiced_ratio",
+            self.WEBRTC_VAD_MIN_VOICED_RATIO,
+            minimum=0.0,
+            maximum=1.0,
+        )
+        self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES = self._get_int_config(
+            voip_cfg,
+            "webrtcvad_min_consecutive_frames",
+            self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES,
+            minimum=1,
+        )
         self.CALL_INACTIVITY_SECONDS = self._get_int_config(
             voip_cfg,
             "call_inactivity_seconds",
             self.CALL_INACTIVITY_SECONDS,
             minimum=1,
+        )
+        self.AGC_WINDOW_SECONDS = self._get_float_config(
+            voip_cfg,
+            "agc_window_seconds",
+            self.AGC_WINDOW_SECONDS,
+            minimum=0.1,
+        )
+        self.AGC_TARGET_RMS = self._get_float_config(
+            voip_cfg,
+            "agc_target_rms",
+            self.AGC_TARGET_RMS,
+            minimum=0.001,
+        )
+        self.AGC_MAX_GAIN = self._get_float_config(
+            voip_cfg,
+            "agc_max_gain",
+            self.AGC_MAX_GAIN,
+            minimum=1.0,
+        )
+        self.AGC_SMOOTHING = self._get_float_config(
+            voip_cfg,
+            "agc_smoothing",
+            self.AGC_SMOOTHING,
+            minimum=0.001,
+            maximum=1.0,
         )
         self.BARGEIN_RMS_THRESHOLD = self._get_float_config(
             voip_cfg,
@@ -389,6 +612,53 @@ class CallSession:
             self.BARGEIN_RMS_THRESHOLD,
             minimum=0.0,
         )
+        self.PREANSWER_WARMUP_ENABLED = self._get_bool_config(
+            voip_cfg,
+            "preanswer_warmup_enabled",
+            self.PREANSWER_WARMUP_ENABLED,
+        )
+        self.PREANSWER_WARMUP_TIMEOUT_SECONDS = self._get_float_config(
+            voip_cfg,
+            "preanswer_warmup_timeout_seconds",
+            self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+            minimum=0.1,
+        )
+        self.PREANSWER_STT_SILENCE_SECONDS = self._get_float_config(
+            voip_cfg,
+            "preanswer_stt_silence_seconds",
+            self.PREANSWER_STT_SILENCE_SECONDS,
+            minimum=0.05,
+        )
+        self.RESPONSE_DELAY_SECONDS = self._get_float_config(
+            voip_cfg,
+            "response_delay_seconds",
+            self.RESPONSE_DELAY_SECONDS,
+            minimum=0.0,
+        )
+        self.CONNECT_TIMEOUT_SECONDS = self._get_float_config(
+            voip_cfg,
+            "connect_timeout_seconds",
+            self.CONNECT_TIMEOUT_SECONDS,
+            minimum=1.0,
+        )
+        self.HANGUP_ON_MEDIA_END = self._get_bool_config(
+            voip_cfg,
+            "hangup_on_media_end",
+            self.HANGUP_ON_MEDIA_END,
+        )
+
+    def _init_webrtc_vad(self):
+        """Initialize the optional WebRTC VAD instance from config."""
+        if not self.WEBRTC_VAD_ENABLED:
+            return None
+        vad = _build_webrtc_vad(self.WEBRTC_VAD_MODE)
+        if vad is None and _WEBRTCVAD_IMPORT_ERROR is not None:
+            logger.info(
+                "call %s: webrtcvad unavailable, continuing without it: %s",
+                self.call_id[:8],
+                _WEBRTCVAD_IMPORT_ERROR,
+            )
+        return vad
 
     def _get_float_config(
         self,
@@ -433,12 +703,37 @@ class CallSession:
             return default
         return value
 
+    def _get_bool_config(
+        self,
+        cfg: Dict[str, Any],
+        key: str,
+        default: bool,
+    ) -> bool:
+        value = cfg.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        logger.warning(
+            "call %s: invalid boolean voip.%s=%r — using default %r",
+            self.call_id[:8],
+            key,
+            value,
+            default,
+        )
+        return default
+
     def _get_int_config(
         self,
         cfg: Dict[str, Any],
         key: str,
         default: int,
         minimum: Optional[int] = None,
+        maximum: Optional[int] = None,
     ) -> int:
         value = cfg.get(key, default)
         try:
@@ -460,6 +755,16 @@ class CallSession:
                 key,
                 value,
                 minimum,
+                default,
+            )
+            return default
+        if maximum is not None and value > maximum:
+            logger.warning(
+                "call %s: voip.%s=%s above maximum %s, using default %s",
+                self.call_id[:8],
+                key,
+                value,
+                maximum,
                 default,
             )
             return default
@@ -521,11 +826,18 @@ class CallSession:
                         logger.debug("call %s: receiver params: %s",
                                      self.call_id[:8], getattr(r, "_track", None))
                 asyncio.ensure_future(self._audio_pipeline(track))
+            elif track.kind == "video":
+                # Drain decoded video frames so aiortc doesn't buffer them indefinitely.
+                # Replace with frame-processing logic once video input to the model is implemented.
+                asyncio.ensure_future(self._drain_video_track(track))
 
         @self._pc.on("connectionstatechange")
         async def on_conn_state():
+            state = self._pc.connectionState
             logger.info("call %s: connection state → %s",
-                        self.call_id[:8], self._pc.connectionState)
+                        self.call_id[:8], state)
+            if state == "connected":
+                self._media_connected.set()
 
         @self._pc.on("iceconnectionstatechange")
         async def on_ice_state():
@@ -581,17 +893,88 @@ class CallSession:
             logger.info("call %s: hold audio loaded (%d samples, %.1fs)",
                         self.call_id[:8], len(hold_pcm), len(hold_pcm) / self._tts_track.SAMPLE_RATE)
 
+        await self._run_preanswer_warmup()
+
         # Auto-hangup watchdog
         asyncio.ensure_future(self._watchdog())
+        asyncio.ensure_future(self._connect_timeout_watchdog())
         # Send our ICE candidates once gathering completes (parsed from local SDP)
         asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
         # Periodic RTP receiver stats for diagnostics
         asyncio.ensure_future(self._log_receiver_stats())
-        # Greet the caller so they don't have to speak first
-        asyncio.ensure_future(self._send_greeting())
+        # Greet the caller once signaling and media are both ready.  Warmup may
+        # prepare the LLM/TTS result ahead of time, but playback is gated here.
+        asyncio.ensure_future(self._send_greeting_when_ready())
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
+
+    async def _run_preanswer_warmup(self) -> None:
+        """Warm STT and prepare greeting audio before the call is answered."""
+        if not self.PREANSWER_WARMUP_ENABLED:
+            return
+
+        started = time.monotonic()
+        tasks = [
+            asyncio.create_task(self._warm_stt_with_silence()),
+            asyncio.create_task(self._prepare_greeting()),
+        ]
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
+                timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+            )
+            logger.info(
+                "call %s: pre-answer warmup finished in %.1fs",
+                self.call_id[:8],
+                time.monotonic() - started,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "call %s: pre-answer warmup timed out after %.1fs; answering anyway",
+                self.call_id[:8],
+                self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+            )
+
+    async def _warm_stt_with_silence(self) -> None:
+        """Send a short silent WAV through the active STT path to trigger loading."""
+        try:
+            sample_rate = 16000
+            sample_count = max(1, int(sample_rate * self.PREANSWER_STT_SILENCE_SECONDS))
+            silence = np.zeros(sample_count, dtype=np.float32)
+
+            active_model = None
+            active_override = getattr(self._agent, "_active_override_model", None)
+            if callable(active_override):
+                active_model = active_override(self.thread_id)
+            llm_factory = getattr(self._app, "llm", None)
+            audio_model_info = getattr(llm_factory, "audio_model_info", None)
+            audio_info = (
+                audio_model_info(active_model or "chat")
+                if callable(audio_model_info)
+                else None
+            )
+            if audio_info:
+                from pawlia.transcription import transcribe_pcm_via_model
+                await transcribe_pcm_via_model(
+                    silence,
+                    sample_rate,
+                    audio_info[0],
+                    audio_info[1],
+                    prompt="This is a silent warmup audio clip. Return an empty response.",
+                )
+            else:
+                from pawlia.transcription import transcribe_pcm
+                await transcribe_pcm(silence, sample_rate, self._app.config)
+            logger.info("call %s: STT warmup completed", self.call_id[:8])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("call %s: STT warmup failed: %s", self.call_id[:8], e)
+
+    async def mark_answer_sent(self) -> None:
+        """Mark that Matrix accepted our SDP answer event for this call."""
+        self._answer_sent.set()
 
     async def _flush_local_candidates(self, done: asyncio.Event) -> None:
         """Wait for ICE gathering then send candidates parsed from local SDP."""
@@ -620,8 +1003,75 @@ class CallSession:
         )
         logger.info("call %s: sent %d local ICE candidates", self.call_id[:8], len(candidates))
 
+    async def _prepare_greeting(self) -> None:
+        """Generate greeting text and TTS audio without playing it yet."""
+        if self._greeting_sent or self._prepared_greeting is not None:
+            return
+
+        try:
+            from pawlia.tts import synthesize_pcm
+        except ImportError:
+            logger.debug("call %s: TTS not available, skipping greeting warmup", self.call_id[:8])
+            return
+
+        try:
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
+            greeting_input = (
+                "[SYSTEM: A voice call was just accepted. "
+                "Greet the caller with a short, friendly greeting. "
+                "Keep the established persona and preferred form of address from the profile/history. "
+                "If speaking German and there is no explicit preference, use informal 'du', not formal 'Sie'. "
+                "Keep it to one or two sentences.]"
+            )
+            prepared_pcm: List[np.ndarray] = []
+
+            async def _on_sentence(sentence: str) -> None:
+                try:
+                    tts_pcm = await synthesize_pcm(
+                        sentence, self._app.config, sample_rate=48000,
+                        voice_override=self._voice_override(),
+                    )
+                    if tts_pcm is not None and len(tts_pcm):
+                        logger.info(
+                            "call %s: prepared greeting TTS (%d samples): %s",
+                            self.call_id[:8], len(tts_pcm), sentence[:60],
+                        )
+                        prepared_pcm.append(tts_pcm)
+                except Exception as e:
+                    logger.warning("call %s: greeting TTS warmup failed: %s", self.call_id[:8], e)
+
+            response = await self._agent.run_streamed(
+                greeting_input,
+                system_prompt=call_prompt,
+                thread_id=self.thread_id,
+                on_sentence=_on_sentence,
+            )
+            self._prepared_greeting = (response, prepared_pcm)
+            logger.info("call %s: greeting prepared", self.call_id[:8])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("call %s: greeting warmup failed: %s", self.call_id[:8], e)
+
     async def _send_greeting(self) -> None:
         """Generate and play a greeting via LLM + TTS when the call is accepted."""
+        if self._greeting_sent:
+            return
+
+        if self._prepared_greeting is not None:
+            response, prepared_pcm = self._prepared_greeting
+            if self._tts_track:
+                for tts_pcm in prepared_pcm:
+                    self._tts_track.enqueue_pcm_float32(tts_pcm)
+                if prepared_pcm:
+                    self._tts_track.stop_hold()
+            await self._send_cb(response)
+            self._greeting_sent = True
+            self._mark_activity()
+            self._activate_agc()
+            logger.info("call %s: prepared greeting sent", self.call_id[:8])
+            return
+
         try:
             from pawlia.tts import synthesize_pcm
         except ImportError:
@@ -632,10 +1082,12 @@ class CallSession:
             return
 
         try:
-            call_prompt = self._agent.build_system_prompt(mode="call")
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
             greeting_input = (
                 "[SYSTEM: A voice call was just accepted. "
                 "Greet the caller with a short, friendly greeting. "
+                "Keep the established persona and preferred form of address from the profile/history. "
+                "If speaking German and there is no explicit preference, use informal 'du', not formal 'Sie'. "
                 "Keep it to one or two sentences.]"
             )
 
@@ -664,11 +1116,26 @@ class CallSession:
                 on_sentence=_on_sentence,
             )
             await self._send_cb(response)
+            self._greeting_sent = True
             self._mark_activity()
             self._activate_agc()
             logger.info("call %s: greeting sent", self.call_id[:8])
         except Exception as e:
             logger.warning("call %s: greeting failed: %s", self.call_id[:8], e)
+
+    async def _send_greeting_when_ready(self) -> None:
+        """Send the greeting only after signaling and media are both ready."""
+        if self._greeting_sent:
+            return
+        try:
+            await self._answer_sent.wait()
+            await self._media_connected.wait()
+            if not self._done.is_set():
+                await self._send_greeting()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("call %s: deferred greeting failed: %s", self.call_id[:8], e)
 
     async def add_candidates(self, candidates: List[Dict]) -> None:
         """Feed ICE candidates from ``m.call.candidates``."""
@@ -694,6 +1161,15 @@ class CallSession:
             await self._pc.close()
         logger.info("call %s hung up", self.call_id[:8])
 
+    @property
+    def finished(self) -> bool:
+        """True once this session cannot usefully accept more signaling."""
+        if self._hungup or self._done.is_set():
+            return True
+        if self._pc and self._pc.connectionState in {"closed", "failed"}:
+            return True
+        return False
+
     # ------------------------------------------------------------------
     # Internal: audio pipeline
     # ------------------------------------------------------------------
@@ -713,6 +1189,14 @@ class CallSession:
                 "active_frames": 0.0,
                 "active_ratio": 0.0,
                 "longest_run": 0.0,
+                "voiced_frames": 0.0,
+                "voiced_ratio": 0.0,
+                "voiced_run": 0.0,
+                "speech_like_frames": 0.0,
+                "speech_like_ratio": 0.0,
+                "speech_like_run": 0.0,
+                "median_band_ratio": 0.0,
+                "median_flatness": 1.0,
                 "p90_rms": 0.0,
             }
 
@@ -729,13 +1213,92 @@ class CallSession:
             current_run = current_run + 1 if is_active else 0
             longest_run = max(longest_run, current_run)
 
+        voiced_mask = np.zeros(len(frame_rms), dtype=bool)
+        if self._webrtc_vad is not None:
+            for idx, frame in enumerate(framed):
+                frame_int16 = (np.clip(frame, -1.0, 1.0) * 32767.0).astype(np.int16)
+                try:
+                    voiced_mask[idx] = bool(self._webrtc_vad.is_speech(frame_int16.tobytes(), sample_rate))
+                except Exception as e:
+                    logger.debug("call %s: webrtcvad frame analysis failed: %s", self.call_id[:8], e)
+                    voiced_mask = np.zeros(len(frame_rms), dtype=bool)
+                    break
+
+        voiced_run = 0
+        current_voiced_run = 0
+        for is_voiced in voiced_mask:
+            current_voiced_run = current_voiced_run + 1 if is_voiced else 0
+            voiced_run = max(voiced_run, current_voiced_run)
+
+        window = np.hanning(frame_size).astype(np.float32)
+        spectra = np.fft.rfft(framed * window[None, :], axis=1)
+        power = np.abs(spectra) ** 2
+        freqs = np.fft.rfftfreq(frame_size, d=1.0 / sample_rate)
+        speech_band = (freqs >= 180.0) & (freqs <= 4000.0)
+        total_power = np.maximum(np.sum(power, axis=1), 1e-9)
+        band_ratio = np.sum(power[:, speech_band], axis=1) / total_power
+        flatness = np.exp(np.mean(np.log(power + 1e-9), axis=1)) / np.maximum(np.mean(power + 1e-9, axis=1), 1e-9)
+        speech_like_mask = active_mask & (band_ratio >= self.MIN_SPEECH_BAND_RATIO) & (flatness <= self.MAX_SPECTRAL_FLATNESS)
+
+        speech_like_run = 0
+        current_speech_like_run = 0
+        for is_speech_like in speech_like_mask:
+            current_speech_like_run = current_speech_like_run + 1 if is_speech_like else 0
+            speech_like_run = max(speech_like_run, current_speech_like_run)
+
         return {
             "frame_count": float(len(frame_rms)),
             "active_frames": float(np.count_nonzero(active_mask)),
             "active_ratio": float(np.mean(active_mask)),
             "longest_run": float(longest_run),
+            "voiced_frames": float(np.count_nonzero(voiced_mask)),
+            "voiced_ratio": float(np.mean(voiced_mask)),
+            "voiced_run": float(voiced_run),
+            "speech_like_frames": float(np.count_nonzero(speech_like_mask)),
+            "speech_like_ratio": float(np.mean(speech_like_mask)),
+            "speech_like_run": float(speech_like_run),
+            "median_band_ratio": float(np.median(band_ratio)),
+            "median_flatness": float(np.median(flatness)),
             "p90_rms": float(np.percentile(frame_rms, 90)),
         }
+
+    def _is_speech_like_frame(
+        self,
+        pcm: "np.ndarray",
+        sample_rate: int,
+        adjusted_rms: float,
+    ) -> bool:
+        """Return True when a live frame looks like speech, not just loud noise."""
+        # Raise silence threshold dynamically when background noise is present.
+        # noise_floor is an EMA of RMS during non-speech periods; a frame whose
+        # RMS is less than 2× the measured floor is treated as silence so that
+        # steady background noise (e.g. cycling) does not prevent silence_count
+        # from accumulating.
+        effective_threshold = max(self.SILENCE_THRESHOLD, self._noise_floor * 2.0)
+        if adjusted_rms <= effective_threshold:
+            return False
+
+        if len(pcm) < 2:
+            return False
+
+        window = np.hanning(len(pcm)).astype(np.float32)
+        spectrum = np.fft.rfft(pcm * window)
+        power = np.abs(spectrum) ** 2
+        total_power = float(np.sum(power))
+        if total_power <= 1e-9:
+            return False
+
+        freqs = np.fft.rfftfreq(len(pcm), d=1.0 / sample_rate)
+        speech_band = (freqs >= 180.0) & (freqs <= 4000.0)
+        band_ratio = float(np.sum(power[speech_band]) / total_power)
+        flatness = float(
+            np.exp(np.mean(np.log(power + 1e-9)))
+            / max(float(np.mean(power + 1e-9)), 1e-9)
+        )
+        return (
+            band_ratio >= self.MIN_SPEECH_BAND_RATIO
+            and flatness <= self.MAX_SPECTRAL_FLATNESS
+        )
 
     def _should_transcribe_chunk(
         self,
@@ -745,9 +1308,19 @@ class CallSession:
     ) -> bool:
         """Return True only when a chunk contains sustained speech-like activity."""
         stats = self._analyze_speech_chunk(pcm, sample_rate, fps)
-        return (
+        basic_match = (
             stats["active_ratio"] >= self.MIN_ACTIVE_SPEECH_RATIO
             and stats["longest_run"] >= self.MIN_CONSECUTIVE_SPEECH_FRAMES
+            and stats["speech_like_ratio"] >= self.MIN_SPEECH_LIKE_RATIO
+            and stats["speech_like_run"] >= self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
+        )
+        if not basic_match:
+            return False
+        if self._webrtc_vad is None:
+            return True
+        return (
+            stats["voiced_ratio"] >= self.WEBRTC_VAD_MIN_VOICED_RATIO
+            and stats["voiced_run"] >= self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
         )
 
     def _is_meaningful_interrupt(self, text: str) -> bool:
@@ -775,10 +1348,42 @@ class CallSession:
 
         task.add_done_callback(_clear)
 
+    def _compute_response_delay(self) -> float:
+        """Return how long to wait before replying after the user goes quiet.
+
+        Scales with the duration of the last accepted speech chunk: a longer
+        monologue gets a longer pause window so brief thinking gaps are not
+        mistaken for end-of-turn.  Also adds a small bonus when significant
+        background noise is present so transient noise dips don't cut off early.
+        """
+        base = self.RESPONSE_DELAY_SECONDS
+        dur = self._last_speech_duration
+        if dur > 20.0:
+            base = max(base, 5.0)
+        elif dur > 12.0:
+            base = max(base, 4.0)
+        elif dur > 6.0:
+            base = max(base, 3.0)
+        # Small bonus when noise floor is elevated (background noise context)
+        noise_ratio = self._noise_floor / max(self.SILENCE_THRESHOLD, 1e-4)
+        if noise_ratio > 1.5:
+            base += min((noise_ratio - 1.5) * 0.5, 1.5)
+        return base
+
     async def _cancel_active_response(self) -> None:
         """Cancel any in-flight response generation for this call."""
-        task = self._active_response_task
+        pending = self._pending_response_task
         current = asyncio.current_task()
+        if pending and not pending.done() and pending is not current:
+            pending.cancel()
+            try:
+                await pending
+            except asyncio.CancelledError:
+                logger.info("call %s: pending response cancelled", self.call_id[:8])
+            except Exception as e:
+                logger.debug("call %s: pending response cancel cleanup failed: %s", self.call_id[:8], e)
+
+        task = self._active_response_task
         if not task or task.done() or task is current:
             return
         task.cancel()
@@ -826,19 +1431,24 @@ class CallSession:
         audio_info = self._app.llm.audio_model_info(active_model or "chat")
         if audio_info:
             from pawlia.transcription import transcribe_pcm_via_model
-            return await transcribe_pcm_via_model(
+            text = await transcribe_pcm_via_model(
                 pcm, sample_rate, audio_info[0], audio_info[1]
+            )
+            if text:
+                return text
+            logger.info(
+                "call %s: native audio transcription returned nothing; falling back to configured STT",
+                self.call_id[:8],
             )
         return await transcribe_pcm(pcm, sample_rate, self._app.config)
 
-    async def _respond_to_transcript(self, text: str) -> None:
+    async def _respond_to_transcript(self, text: str, announce_transcript: bool = True) -> None:
         """Stream the agent response for an already transcribed utterance."""
         from pawlia.tts import synthesize_pcm
 
-        logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
-
-        # Send transcription immediately so it appears before the response
-        await self._send_cb(f"🎙️ *{text}*")
+        if announce_transcript:
+            logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
+            await self._send_cb(f"🎙️ *{text}*")
 
         # Start hold audio while waiting for agent response
         if self._tts_track:
@@ -849,18 +1459,23 @@ class CallSession:
 
         try:
             first_sentence_received = False
-            call_prompt = self._agent.build_system_prompt(mode="call")
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
 
             async def _on_sentence(sentence: str) -> None:
                 """Synthesize and enqueue one sentence for immediate TTS playback."""
                 nonlocal first_sentence_received
                 if not self._tts_track:
                     return
+                current_task = asyncio.current_task()
+                if current_task and current_task.cancelling():
+                    return
                 try:
                     tts_pcm = await synthesize_pcm(
                         sentence, self._app.config, sample_rate=48000,
                         voice_override=self._voice_override(),
                     )
+                    if current_task and current_task.cancelling():
+                        return
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info("call %s: TTS sentence (%d samples): %s",
                                     self.call_id[:8], len(tts_pcm), sentence[:60])
@@ -906,11 +1521,64 @@ class CallSession:
 
         await self._send_cb(response)
 
+    async def _queue_transcript_response(self, text: str) -> None:
+        """Show the transcript now, but reply only after the caller is quiet."""
+        logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
+        await self._send_cb(f"🎙️ *{text}*")
+        self._pending_transcripts.append(text)
+
+        current = asyncio.current_task()
+        pending = self._pending_response_task
+        if pending and not pending.done() and pending is not current:
+            pending.cancel()
+
+        task = asyncio.create_task(self._delayed_pending_response())
+        self._pending_response_task = task
+        self._track_response_task(task)
+
+    async def _delayed_pending_response(self) -> None:
+        try:
+            response_delay = self._compute_response_delay()
+            while not self._done.is_set():
+                idle_for = time.monotonic() - self._last_user_speech_at
+                if not self._speaking and idle_for >= response_delay:
+                    if self._tts_track and self._tts_track.is_playing:
+                        await asyncio.sleep(0.2)
+                        continue
+                    break
+                await asyncio.sleep(0.2)
+
+            if self._done.is_set() or not self._pending_transcripts:
+                return
+
+            text = "\n".join(self._pending_transcripts)
+            self._pending_transcripts = []
+            logger.info(
+                "call %s: replying after %.1fs quiet to %d transcript chunk(s) "
+                "(speech_dur=%.1fs noise_floor=%.4f)",
+                self.call_id[:8],
+                response_delay,
+                len(text.splitlines()),
+                self._last_speech_duration,
+                self._noise_floor,
+            )
+            await self._respond_to_transcript(text, announce_transcript=False)
+        finally:
+            if self._pending_response_task is asyncio.current_task():
+                self._pending_response_task = None
+
+    async def _drain_video_track(self, track) -> None:
+        """Discard incoming video frames so aiortc doesn't buffer them in memory."""
+        try:
+            while not self._done.is_set():
+                await track.recv()
+        except Exception:
+            pass
+
     async def _audio_pipeline(self, track) -> None:
         """Continuously read audio frames, detect speech, transcribe, respond."""
         SAMPLE_RATE = 48000
         fps = 50  # aiortc default: 20 ms frames
-        silence_threshold = int(self.SILENCE_SECONDS * fps)
         min_speech_frames = int(self.MIN_SPEECH_SECONDS * fps)
 
         speech_buffer: List[np.ndarray] = []
@@ -918,6 +1586,7 @@ class CallSession:
 
         logger.info("call %s: audio pipeline started", self.call_id[:8])
         frames_received = 0
+        media_ended = False
         try:
             while not self._done.is_set():
                 try:
@@ -929,6 +1598,7 @@ class CallSession:
                 except MediaStreamError:
                     logger.warning("call %s: MediaStreamError after %d frames — track ended",
                                    self.call_id[:8], frames_received)
+                    media_ended = True
                     break
 
                 frames_received += 1
@@ -957,23 +1627,46 @@ class CallSession:
                 elif frames_received % 50 == 0 and logger.isEnabledFor(logging.DEBUG):
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
-                    logger.debug("call %s: frame #%d rms=%.4f buf=%d silence=%d hash=%s",
-                                 self.call_id[:8], frames_received, rms,
+                    logger.debug("call %s: frame #%d rms=%.4f nf=%.4f buf=%d silence=%d hash=%s",
+                                 self.call_id[:8], frames_received, rms, self._noise_floor,
                                  len(speech_buffer), silence_count, h)
 
                 # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
                 adjusted_rms = self._agc_rms(rms)
 
+                # Update background noise floor while not accumulating speech.
+                # EMA alpha=0.02 → ~50-frame (1 s) time constant, slow enough to
+                # ignore transient spikes but fast enough to adapt to the cycling
+                # noise floor within the first few seconds of a call.
+                if not speech_buffer:
+                    self._noise_floor = 0.02 * rms + 0.98 * self._noise_floor
+
+                # silence_threshold in frames; kept at the configured value (minimum
+                # 1.2 s).  Because _is_speech_like_frame now uses an adaptive
+                # threshold that treats background noise as silence, silence_count
+                # accumulates naturally without needing to reduce this value.
+                silence_threshold = int(max(1.2, self.SILENCE_SECONDS) * fps)
+
+                speech_like_frame = self._is_speech_like_frame(
+                    pcm,
+                    SAMPLE_RATE,
+                    adjusted_rms,
+                )
+
                 # While TTS is playing, keep buffering possible interruptions, but
                 # only stop playback after the resulting transcript is meaningful.
                 if self._tts_track and self._tts_track.is_playing:
-                    if rms >= max(self.BARGEIN_RMS_THRESHOLD, self.SILENCE_THRESHOLD):
+                    if (
+                        rms >= max(self.BARGEIN_RMS_THRESHOLD, self.SILENCE_THRESHOLD)
+                        and speech_like_frame
+                    ):
                         if not speech_buffer and silence_count == 0:
                             logger.info(
                                 "call %s: possible barge-in started (rms=%.4f)",
                                 self.call_id[:8],
                                 rms,
                             )
+                            self._mark_user_speech_started()
                         speech_buffer.append(pcm)
                         silence_count = 0
                     elif speech_buffer:
@@ -989,16 +1682,19 @@ class CallSession:
                             )
                             speech_buffer = []
                             silence_count = 0
+                            self._mark_user_speech_ended()
 
                             if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
                                 chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
                                 if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
                                     logger.info(
                                         "call %s: transcribing barge-in candidate "
-                                        "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                        "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
                                         self.call_id[:8],
                                         chunk_stats["active_ratio"],
                                         int(chunk_stats["longest_run"]),
+                                        chunk_stats["speech_like_ratio"],
+                                        chunk_stats["voiced_ratio"],
                                         chunk_stats["p90_rms"],
                                     )
                                     self._mark_activity()
@@ -1009,22 +1705,23 @@ class CallSession:
                                             interrupt_playback=True,
                                         )
                                     )
-                                    self._track_response_task(task)
                                 else:
                                     logger.info(
                                         "call %s: barge-in candidate looked like noise "
-                                        "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                        "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
                                         self.call_id[:8],
                                         chunk_stats["active_ratio"],
                                         int(chunk_stats["longest_run"]),
+                                        chunk_stats["speech_like_ratio"],
+                                        chunk_stats["voiced_ratio"],
                                         chunk_stats["p90_rms"],
                                     )
                     continue
-
-                if adjusted_rms > self.SILENCE_THRESHOLD:
+                if speech_like_frame:
                     if not speech_buffer and silence_count == 0:
                         logger.info("call %s: speech started (rms=%.4f)",
                                     self.call_id[:8], rms)
+                        self._mark_user_speech_started()
                     speech_buffer.append(pcm)
                     silence_count = 0
                 elif speech_buffer:
@@ -1038,17 +1735,22 @@ class CallSession:
                                     self.call_id[:8], duration, len(chunk))
                         speech_buffer = []
                         silence_count = 0
+                        self._mark_user_speech_ended()
 
                         if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
                             chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
                             if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
+                                self._last_speech_duration = duration
                                 logger.info(
                                     "call %s: sending chunk for transcription "
-                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                    "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f noise_floor=%.4f)",
                                     self.call_id[:8],
                                     chunk_stats["active_ratio"],
                                     int(chunk_stats["longest_run"]),
+                                    chunk_stats["speech_like_ratio"],
+                                    chunk_stats["voiced_ratio"],
                                     chunk_stats["p90_rms"],
+                                    self._noise_floor,
                                 )
                                 self._mark_activity()
                                 task = asyncio.create_task(
@@ -1058,10 +1760,12 @@ class CallSession:
                             else:
                                 logger.info(
                                     "call %s: skipping chunk as background noise "
-                                    "(active_ratio=%.2f longest_run=%d p90_rms=%.4f)",
+                                    "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
                                     self.call_id[:8],
                                     chunk_stats["active_ratio"],
                                     int(chunk_stats["longest_run"]),
+                                    chunk_stats["speech_like_ratio"],
+                                    chunk_stats["voiced_ratio"],
                                     chunk_stats["p90_rms"],
                                 )
                         else:
@@ -1072,7 +1776,15 @@ class CallSession:
         finally:
             self._done.set()
             logger.info("call %s: audio pipeline ended", self.call_id[:8])
-
+            if media_ended and self.HANGUP_ON_MEDIA_END and not self._hungup:
+                logger.info(
+                    "call %s: media track ended; sending hangup to avoid stale client reconnect",
+                    self.call_id[:8],
+                )
+                try:
+                    await self._send_hangup_event()
+                finally:
+                    await self.hangup()
     async def _process_speech(
         self,
         pcm: "np.ndarray",
@@ -1107,10 +1819,13 @@ class CallSession:
                     text[:120],
                 )
                 if self._tts_track:
-                    self._tts_track.interrupt()
+                    self._tts_track.stop_after_current_sentence()
                 await self._cancel_active_response()
+                current_task = asyncio.current_task()
+                if current_task:
+                    self._track_response_task(current_task)
 
-            await self._respond_to_transcript(text)
+            await self._queue_transcript_response(text)
         except asyncio.CancelledError:
             if self._tts_track:
                 self._tts_track.stop_hold()
@@ -1120,7 +1835,6 @@ class CallSession:
 
     def _load_hold_audio(self) -> Optional["np.ndarray"]:
         """Load hold audio from config and decode to int16 mono PCM at 48 kHz.
-
         Config: ``tts.hold_audio`` — explicit audio file path.
         Returns ``None`` if not configured or the file cannot be loaded.
         """
@@ -1210,7 +1924,8 @@ class CallSession:
             logger.warning("call %s: ICE did not recover after %ds — ending call",
                            self.call_id[:8], ICE_RECONNECT_TIMEOUT)
             await self._notify_disconnect()
-            self._done.set()
+            await self._send_hangup_event()
+            await self.hangup()
 
     async def _notify_disconnect(self) -> None:
         """Send a Matrix message when the connection drops unexpectedly."""
@@ -1220,9 +1935,51 @@ class CallSession:
             logger.warning("call %s: could not send disconnect notification: %s",
                            self.call_id[:8], e)
 
+    async def _connect_timeout_watchdog(self) -> None:
+        """End calls that never establish media after the SDP answer."""
+        try:
+            await self._answer_sent.wait()
+            await asyncio.wait_for(
+                self._media_connected.wait(),
+                timeout=self.CONNECT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            if self._done.is_set() or self._hungup:
+                return
+            state = self._pc.connectionState if self._pc else "unknown"
+            ice_state = self._pc.iceConnectionState if self._pc else "unknown"
+            logger.warning(
+                "call %s: media did not connect within %.1fs "
+                "(connection=%s ice=%s); ending call",
+                self.call_id[:8],
+                self.CONNECT_TIMEOUT_SECONDS,
+                state,
+                ice_state,
+            )
+            await self._notify_disconnect()
+            await self._send_hangup_event()
+            await self.hangup()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug("call %s: connect timeout watchdog error: %s", self.call_id[:8], e)
+
     async def _watchdog(self) -> None:
         """Auto-hangup after prolonged call inactivity."""
         while not self._done.is_set():
+            # Do not count our own live response generation or playback as
+            # inactivity. Otherwise long spoken replies can trip the timeout
+            # mid-sentence and drop an otherwise healthy call.
+            if self._bot_is_active():
+                self._mark_activity()
+                try:
+                    await asyncio.wait_for(
+                        self._done.wait(),
+                        timeout=self.WATCHDOG_POLL_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+
             idle_for = time.monotonic() - self._last_activity_at
             remaining = self.CALL_INACTIVITY_SECONDS - idle_for
             if remaining <= 0:
@@ -1348,9 +2105,17 @@ class CallManager:
             logger.info("call %s: invite expired, ignoring", event.call_id[:8])
             return
 
-        if event.call_id in self._sessions:
-            logger.warning("call %s: duplicate invite, ignoring", event.call_id[:8])
-            return
+        existing = self._sessions.get(event.call_id)
+        if existing:
+            if existing.finished:
+                logger.info(
+                    "call %s: replacing finished session on duplicate invite",
+                    event.call_id[:8],
+                )
+                self._sessions.pop(event.call_id, None)
+            else:
+                logger.warning("call %s: duplicate invite, ignoring", event.call_id[:8])
+                return
 
         sdp_offer = event.offer.get("sdp", "")
         if not sdp_offer:
@@ -1416,6 +2181,7 @@ class CallManager:
             },
             ignore_unverified_devices=True,
         )
+        await session.mark_answer_sent()
         logger.info("call %s: answer sent", event.call_id[:8])
 
     async def on_candidates(self, room: "MatrixRoom", event) -> None:

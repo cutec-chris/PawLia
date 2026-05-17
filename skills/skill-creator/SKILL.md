@@ -88,8 +88,12 @@ in the body (the body is invisible to the dispatcher).
   `CRED_<NORMALIZED>` where `<NORMALIZED>` is the key uppercased with
   non-alphanumerics → `_`. Example: `api-key` → `CRED_API_KEY`.
 - `metadata.requires_config` — deployment-level settings in `config.yaml` under
-  `skill-config.<name>.*`. Not auto-injected; pass on the CLI. Skills with
-  missing config are not loaded.
+  `skill-config.<name>.*`. Skills with missing required config are not loaded.
+  The runtime injects the full per-skill config as JSON in
+  `PAWLIA_SKILL_CONFIG`. Scripts must read config from that env var instead of
+  requiring the LLM to pass URLs, timeouts, hosts, or model names as CLI args.
+  Compiled workflow placeholders such as `{url}` or `{timeout}` are also filled
+  automatically from `skill-config.<name>` when present.
 
 ## Runtime Environment
 
@@ -99,11 +103,23 @@ Scripts receive:
 |---------|-------|
 | `PAWLIA_SESSION_DIR` | Absolute path to the session root |
 | `PAWLIA_USER_ID` | Current user ID |
+| `PAWLIA_SKILL_CONFIG` | JSON object from `skill-config.<skill-name>` |
 | `CRED_<KEY>` | Each credential declared in `requires_credentials` |
 
 Placeholders in the SKILL.md body — substituted by the runner before the
 sub-agent sees them: `<scripts_dir>`, `<user_id>`, `<session_dir>`. Always
 reference scripts as `<scripts_dir>/<name>`, never relative paths.
+
+Python scripts should use:
+
+```python
+skill_config = json.loads(os.environ.get("PAWLIA_SKILL_CONFIG", "{}"))
+url = skill_config.get("url")
+```
+
+Do not teach skills to pass config values around as ordinary model-generated
+arguments. The model should provide user intent (`query`, `limit`, `project`),
+while the system supplies deployment config.
 
 ---
 
@@ -146,9 +162,32 @@ intended and flag any mismatch.
    shows the exact output shape, lists error-recovery steps in a table, and
    references any `references/` files with a note on *when* to read them.
 
-   Scripts must: parse args via `argparse` (or equivalent), read credentials
-   from `CRED_*`, output `{"success": bool, ...}` as JSON, exit 0 on success
-   and non-zero on failure.
+   Scripts must: parse user-provided args via `argparse` (or equivalent), read
+   deployment config from `PAWLIA_SKILL_CONFIG`, read credentials from `CRED_*`,
+   output `{"success": bool, ...}` as JSON, exit 0 on success and non-zero on
+   failure.
+
+   **Data vs. presentation — hard rule:** Scripts output raw structured data
+   (facts, numbers, lists, timestamps) in the JSON payload. They do NOT
+   pre-format the final answer as a user-facing string. The LLM sub-agent is
+   responsible for turning the data into a response: choosing what to highlight,
+   applying Pawlia's tone, trimming noise, and structuring the text. A script
+   that returns a pre-built wall of text locks out the LLM and makes the skill
+   impossible to adjust conversationally.
+
+   **Exception:** skills whose output is explicitly required to be verbatim
+   (e.g. a pre-formatted report) MUST say so in the SKILL.md with a clear
+   "Return verbatim" rule AND provide a `## Example output` that shows the
+   exact expected format including any links or special elements. Without the
+   example, the sub-agent will helpfully reformat — and destroy links and structure.
+
+   **`## Example output` — MANDATORY in every SKILL.md body.** It must:
+   - Show one realistic sample of what the final user-facing text looks like
+   - Explicitly mark elements that must not be changed: links, special
+     formatting, exact phrases — annotate them with a `← keep` comment or bold
+   - Be 5–20 lines; representative but not exhaustive
+   - Be updated first whenever the user requests a change to output format —
+     agree on the new example, then change the script/instructions to match it
 
 5. **Validate.** `creator.py validate --name "<name>"` — fix all `issues`,
    review `warnings`.
@@ -198,8 +237,11 @@ a working signal.
 
 ### Phase 2 — Implement (≤5 tool calls)
 
-Edit the script. Update SKILL.md only if the external contract changed
-(endpoint path, payload shape, auth flow).
+Edit the script. Update SKILL.md when the external contract changed
+(endpoint path, payload shape, auth flow) **or when the user requested
+a change to the output format** — in that case update `## Example output`
+first to reflect the desired result, then adjust scripts and instructions
+to match it.
 
 **Rule:** in Phase 2, no new probes. Every tool call must be `write_file`,
 `edit_file`, or a single targeted re-read of a file you are editing. If you

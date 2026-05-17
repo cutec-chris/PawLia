@@ -80,7 +80,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={},
-            skill_runner_factory=lambda s: None,
+            skill_runner_factory=lambda s, thread_id=None: None,
         )
 
         result = await agent.run("Hi there")
@@ -107,7 +107,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         result = await agent.run("Search for Python tutorials")
@@ -134,11 +134,36 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         await agent.run("Search for Python tutorials")
         mock_runner.run.assert_called_once_with(query="Python tutorials")
+
+    @pytest.mark.asyncio
+    async def test_recovers_text_form_skill_call(self):
+        """Text-form tool calls should be executed as real skill calls."""
+        skill = _make_skill("searxng", "Web search")
+
+        turn1 = _make_ai_message(
+            '<tool_call>{"name":"searxng","arguments":{"query":"Python tutorials"}}</tool_call>'
+        )
+        turn2 = _make_ai_message("Here are some Python tutorials: ...")
+
+        llm = _mock_llm([turn1, turn2])
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value="1. Tutorial A\n2. Tutorial B")
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"searxng": skill},
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
+        )
+
+        result = await agent.run("Search for Python tutorials")
+
+        mock_runner.run.assert_called_once_with(query="Python tutorials")
+        assert "Python tutorials" in result
 
     @pytest.mark.asyncio
     async def test_skill_delegation_repairs_alias_args(self):
@@ -157,7 +182,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         await agent.run("Search for Python tutorials")
@@ -180,7 +205,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={"web_search": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         await agent.run("Search for Python tutorials")
@@ -199,7 +224,7 @@ class TestChatAgent:
         agent = ChatAgent(
             llm=llm,
             skills={},
-            skill_runner_factory=lambda s: None,
+            skill_runner_factory=lambda s, thread_id=None: None,
         )
 
         result = await agent.run("Do something")
@@ -230,7 +255,7 @@ class TestChatAgentInterim:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
             on_interim=on_interim,
         )
 
@@ -252,7 +277,7 @@ class TestChatAgentInterim:
         agent = ChatAgent(
             llm=llm,
             skills={},
-            skill_runner_factory=lambda s: None,
+            skill_runner_factory=lambda s, thread_id=None: None,
             on_interim=on_interim,
         )
 
@@ -282,7 +307,7 @@ class TestChatAgentInterim:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
             on_interim=on_interim,
         )
 
@@ -306,7 +331,7 @@ class TestChatAgentPersist:
             agent = ChatAgent(
                 llm=llm,
                 skills={},
-                skill_runner_factory=lambda s: None,
+                skill_runner_factory=lambda s, thread_id=None: None,
                 memory=mm,
                 session=session,
             )
@@ -339,7 +364,7 @@ class TestChatAgentPersist:
             agent = ChatAgent(
                 llm=llm,
                 skills={"searxng": skill},
-                skill_runner_factory=lambda s: mock_runner,
+                skill_runner_factory=lambda s, thread_id=None: mock_runner,
                 memory=mm,
                 session=session,
             )
@@ -365,7 +390,7 @@ class TestChatAgentPersist:
             agent = ChatAgent(
                 llm=llm,
                 skills={},
-                skill_runner_factory=lambda s: None,
+                skill_runner_factory=lambda s, thread_id=None: None,
                 memory=mm,
                 session=session,
             )
@@ -379,6 +404,39 @@ class TestChatAgentPersist:
             assert messages[1].content == "prev_q"
             assert messages[2].content == "prev_a"
             assert messages[3].content == "New question"
+
+    @pytest.mark.asyncio
+    async def test_replays_skill_history_as_compact_plain_text(self):
+        """Historical tool usage should be replayed compactly, without ToolMessages."""
+        llm = _mock_llm([_make_ai_message("Response")])
+
+        skill_history = [{
+            "name": "searxng",
+            "args": {"query": "python tutorials for absolute beginners"},
+            "result": "Result line " * 80,
+        }]
+
+        session = MagicMock()
+        session.exchanges = [("prev_q", "prev_a", skill_history)]
+        memory = MagicMock()
+        agent = ChatAgent(
+            llm=llm,
+            skills={},
+            skill_runner_factory=lambda s, thread_id=None: None,
+            memory=memory,
+            session=session,
+        )
+
+        await agent.run("New question")
+
+        messages = llm.invoke.call_args[0][0]
+        assert len(messages) == 4
+        assert messages[1].content == "prev_q"
+        assert isinstance(messages[2], AIMessage)
+        assert "Earlier skill use:" in messages[2].content
+        assert "searxng: python tutorials for absolute beginners" in messages[2].content
+        assert "Result line Result line" in messages[2].content
+        assert len(messages[2].content) < 500
 
 
 class TestChatAgentMultiSkill:
@@ -406,7 +464,7 @@ class TestChatAgentMultiSkill:
         agent = ChatAgent(
             llm=llm,
             skills={"skill_a": skill_a, "skill_b": skill_b},
-            skill_runner_factory=lambda s: runners[s.name],
+            skill_runner_factory=lambda s, thread_id=None: runners[s.name],
         )
 
         result = await agent.run("Use both skills")
@@ -439,7 +497,7 @@ class TestChatAgentMultiSkill:
         agent = ChatAgent(
             llm=llm,
             skills={"skill_a": skill_a, "skill_b": skill_b},
-            skill_runner_factory=lambda s: runners[s.name],
+            skill_runner_factory=lambda s, thread_id=None: runners[s.name],
         )
 
         result = await agent.run("Use both skills")
@@ -467,7 +525,7 @@ class TestChatAgentMultiSkill:
         agent = ChatAgent(
             llm=llm,
             skills={"searxng": skill},
-            skill_runner_factory=lambda s: mock_runner,
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
         )
 
         result = await agent.run("Search for Python tutorials")
@@ -549,6 +607,23 @@ class TestSkillRunnerAgent:
         )
         result = await runner.run("do something")
         assert "fallback_output" in result
+
+    @pytest.mark.asyncio
+    async def test_recovers_bash_code_block_in_tool_mode(self):
+        """A bash code block in tool-call mode should be executed."""
+        turn1 = _make_ai_message("```bash\necho recovered_output\n```")
+        turn2 = _make_ai_message("The result is: recovered_output")
+        turn3 = _make_ai_message("The result is: recovered_output")
+
+        llm = _mock_llm([turn1, turn2, turn3])
+        skill = _make_skill()
+        tools = ToolRegistry()
+        tools.register(BashTool())
+
+        runner = SkillRunnerAgent(llm=llm, skill=skill, tool_registry=tools)
+        result = await runner.run("run command")
+
+        assert "recovered_output" in result
 
     @pytest.mark.asyncio
     async def test_no_command_fallback(self):
@@ -699,3 +774,55 @@ class TestWorkflowExecutor:
 
         tools = executor._blocks_to_tools(workflow)
         assert tools[0]["function"]["parameters"]["additionalProperties"] is False
+
+    @pytest.mark.asyncio
+    async def test_execute_does_not_reuse_previous_response_after_llm_error(self):
+        bound = MagicMock()
+        bound.ainvoke = AsyncMock(side_effect=[
+            _make_ai_message("", tool_calls=[
+                {"id": "tc1", "name": "step_a", "args": {}}
+            ]),
+            RuntimeError("model boom"),
+        ])
+        llm = MagicMock()
+        llm.bind_tools = MagicMock(return_value=bound)
+
+        class CountingBash(Tool):
+            name = "bash"
+            description = "Counting bash"
+
+            def parameters(self):
+                return {"command": {"type": "string"}}
+
+            def required_parameters(self):
+                return ["command"]
+
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, args, context=None):
+                self.calls += 1
+                return f"ran:{args['command']}"
+
+        tool = CountingBash()
+        tools = ToolRegistry()
+        tools.register(tool)
+
+        executor = WorkflowExecutor(
+            tool_registry=tools,
+            context={},
+            llm=llm,
+        )
+        workflow = Workflow(
+            id="workflow_a",
+            trigger="A",
+            max_steps=3,
+            building_blocks=[
+                BuildingBlock(id="step_a", command="echo a", description="A")
+            ],
+        )
+
+        result = await executor.execute(workflow, "do A")
+
+        assert result == "ran:echo a"
+        assert tool.calls == 1

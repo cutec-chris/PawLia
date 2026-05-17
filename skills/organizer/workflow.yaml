@@ -93,9 +93,9 @@ workflows:
   max_steps: 10
   building_blocks:
   - id: add_job
-    command: python {scripts_dir}/organizer.py add-job --name "{name}" --script "{script_path}"
-      --schedule "{schedule}" --params '{params}' --no-notify {no_notify}
-    description: Register a scheduled automation job
+    command: python {scripts_dir}/organizer.py add-job --name "{name}" --instruction
+      "{instruction}" --schedule "{schedule}"
+    description: Register a scheduled natural-language automation job
     status_desc: Füge geplante Aufgabe {name} hinzu
     verify:
       exit_code: 0

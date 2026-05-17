@@ -40,7 +40,7 @@ async def start_cli(app: "App") -> None:
 
     from pawlia.interfaces.common import (
         build_status, format_status, md_to_text, handle_model_command,
-        format_private_toggle, format_bg_enqueue,
+        format_private_toggle, format_bg_enqueue, handle_reload_command,
     )
 
     async def _on_interim(text: str) -> None:
@@ -170,11 +170,22 @@ async def start_cli(app: "App") -> None:
             args_str = user_input.strip()[len("/model"):].strip()
             result = handle_model_command(app, "cli_user", args_str)
             if result.action == "show":
-                print(f"Aktives Modell: {result.model}\n")
+                print(f"Default-Modell: {result.model}\n")
+            elif result.action == "invalid_path":
+                print("Ungültiger Model-Pfad. Erlaubt: default, chat, skill_runner, vision, compiler, skills.<name>\n")
             else:
                 if result.invalidate_agent:
                     agent = app.make_agent("cli_user", on_interim=_on_interim)
-                print(f"✓ Modell auf '{result.model}' gesetzt.\n")
+                if result.action == "cleared":
+                    print(f"✓ Model-Override '{result.path}' entfernt.\n")
+                else:
+                    print(f"✓ Model-Override '{result.path}' auf '{result.model}' gesetzt.\n")
+            continue
+
+        if user_input.strip().lower() == "/reload":
+            result = handle_reload_command(app)
+            agent = app.make_agent("cli_user", on_interim=_on_interim)
+            print(f"{md_to_text(result.message)}\n")
             continue
 
         active_fut = asyncio.current_task()

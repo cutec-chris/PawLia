@@ -2,40 +2,30 @@
 
 Config layout (YAML)::
 
-    # API-based — Groq example (any compatible endpoint works):
+    # Explicit STT fallback list (one entry means no fallback):
     transcription:
-      provider: groq
+      providers:
+        - name: lan-whisper
+          provider: local
+          base_url: http://127.0.0.1:8000/v1
+          model: whisper-large-v3-turbo
+          timeout: 12
+        - groq
+
       groq:
         api_key: YOUR_GROQ_API_KEY
         model: whisper-large-v3-turbo
         # base_url: https://api.groq.com/openai/v1   # set automatically; override if needed
         # language: de
-
-    # Other provider (OpenAI or self-hosted):
-    # transcription:
-    #   provider: openai
-    #   openai:
-    #     api_key: YOUR_API_KEY
-    #     base_url: https://api.openai.com/v1
-    #     model: whisper-1
-    #     # language: de
-
-    # Local (faster-whisper, requires FFmpeg):
-    # transcription:
-    #   provider: local
-    #   local:
-    #     model: base
-    #     device: cpu
-    #     compute_type: int8
-    #     # language: de
 """
 
-import asyncio
 import logging
 import os
 import subprocess
 import tempfile
-from typing import Any, Dict, Optional, Tuple
+import time
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("pawlia.transcription")
 
@@ -51,6 +41,22 @@ _NATIVE_AUDIO_PROMPT = (
     "Antworte NUR mit dem gesprochenen Text, ohne Erklärungen oder Formatierung."
 )
 
+_DEFAULT_PREPROCESS: Dict[str, float] = {
+    "highpass_hz": 140.0,
+    "lowpass_hz": 7000.0,
+    "denoise_strength": 1.25,
+    "denoise_floor": 0.2,
+    "adaptive_gate_percentile": 0.2,
+    "adaptive_gate_multiplier": 2.2,
+    "gate_threshold": 0.015,
+    "gate_ratio": 0.2,
+}
+
+_BLACKLIST_THRESHOLD = 3
+_BLACKLIST_COOLDOWN_SECONDS = 30 * 60
+_stt_provider_state: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+_now = time.monotonic
+
 
 async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "audio/ogg") -> Optional[str]:
     """Transcribe *audio_bytes* to text.
@@ -63,20 +69,159 @@ async def transcribe(audio_bytes: bytes, config: Dict[str, Any], mime: str = "au
         logger.warning("transcription: no config — skipping")
         return None
 
-    provider = cfg.get("provider", "groq")
-    provider_cfg = cfg.get(provider, {})
+    attempts = _transcription_attempts(cfg)
+    for idx, (provider, provider_cfg) in enumerate(attempts, start=1):
+        label = provider_cfg.get("name") or provider
+        state_key = _provider_state_key(provider, provider_cfg)
+        remaining = _blacklist_remaining_seconds(state_key)
+        if remaining > 0:
+            logger.info(
+                "transcription: skip provider '%s' temporarily blacklisted for %ds more",
+                label,
+                remaining,
+            )
+            continue
+        try:
+            text = await _transcribe_with_provider(audio_bytes, provider, provider_cfg, mime)
+        except Exception as e:
+            _note_provider_failure(state_key, str(label), e)
+            logger.error(
+                "transcription: error (provider=%s attempt=%d/%d): %s",
+                label,
+                idx,
+                len(attempts),
+                e,
+                exc_info=True,
+            )
+            continue
+        if text:
+            _note_provider_success(state_key)
+            if idx > 1:
+                logger.info(
+                    "transcription: fallback provider succeeded (provider=%s attempt=%d/%d)",
+                    label,
+                    idx,
+                    len(attempts),
+                )
+            return text
+        logger.info("transcription: provider returned no text (provider=%s attempt=%d/%d)", label, idx, len(attempts))
 
-    try:
-        if provider == "local":
-            logger.debug("transcription: using local faster-whisper (model=%s)", provider_cfg.get("model", "base"))
-            return await _transcribe_local(audio_bytes, provider_cfg, mime)
-        base_url = provider_cfg.get("base_url", _PROVIDER_BASE_URLS.get(provider, "<no base_url>")).rstrip("/")
-        model = provider_cfg.get("model", _DEFAULT_MODEL)
-        logger.info("transcription: sending to %s/audio/transcriptions (provider=%s model=%s)", base_url, provider, model)
-        return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
-    except Exception as e:
-        logger.error("transcription: error (provider=%s): %s", provider, e, exc_info=True)
-        return None
+    logger.info("transcription: all providers returned no text")
+    return None
+
+
+def _provider_state_key(provider: str, provider_cfg: Dict[str, Any]) -> Tuple[str, str, str, str]:
+    return (
+        provider,
+        str(provider_cfg.get("name") or ""),
+        str(provider_cfg.get("base_url") or _PROVIDER_BASE_URLS.get(provider, "")),
+        str(provider_cfg.get("model") or _DEFAULT_MODEL),
+    )
+
+
+def _provider_state(state_key: Tuple[str, str, str, str]) -> Dict[str, Any]:
+    return _stt_provider_state.setdefault(
+        state_key,
+        {"failures": 0, "blacklisted_until": 0.0, "last_error": None},
+    )
+
+
+def _blacklist_remaining_seconds(state_key: Tuple[str, str, str, str]) -> int:
+    state = _provider_state(state_key)
+    return max(0, int(state["blacklisted_until"] - _now()))
+
+
+def _note_provider_success(state_key: Tuple[str, str, str, str]) -> None:
+    state = _provider_state(state_key)
+    state["failures"] = 0
+    state["blacklisted_until"] = 0.0
+    state["last_error"] = None
+
+
+def _note_provider_failure(state_key: Tuple[str, str, str, str], label: str, exc: Exception) -> None:
+    state = _provider_state(state_key)
+    state["last_error"] = exc
+    state["failures"] += 1
+    if state["failures"] < _BLACKLIST_THRESHOLD:
+        return
+    state["blacklisted_until"] = _now() + _BLACKLIST_COOLDOWN_SECONDS
+    state["failures"] = 0
+    logger.warning(
+        "transcription: provider '%s' failed %d times across requests, skipping it for %d minutes",
+        label,
+        _BLACKLIST_THRESHOLD,
+        _BLACKLIST_COOLDOWN_SECONDS // 60,
+    )
+
+
+def _transcription_attempts(cfg: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """Return normalized transcription provider attempts.
+
+    Backwards compatible with ``provider: groq`` while also supporting
+    ``providers`` fallback chains.  ``providers`` may contain provider names
+    or inline provider configs, e.g. ``{"provider": "local", "base_url": ...}``.
+    """
+    configured = cfg.get("providers")
+    if configured is None:
+        configured = [cfg.get("provider", "groq")]
+    if isinstance(configured, str):
+        configured = [part.strip() for part in configured.split(",") if part.strip()]
+    elif isinstance(configured, dict):
+        configured = [configured]
+    if not isinstance(configured, Iterable):
+        logger.warning("transcription: invalid providers=%r; falling back to provider", configured)
+        configured = [cfg.get("provider", "groq")]
+    configured = [
+        part.strip() if isinstance(entry, str) else entry
+        for entry in configured
+        for part in (entry.split(",") if isinstance(entry, str) else [entry])
+        if not isinstance(entry, str) or part.strip()
+    ]
+
+    attempts: List[Tuple[str, Dict[str, Any]]] = []
+    for entry in configured:
+        if isinstance(entry, str):
+            provider = entry
+            provider_cfg = dict(cfg.get(provider, {}) or {})
+        elif isinstance(entry, dict):
+            provider = str(entry.get("provider") or entry.get("type") or cfg.get("provider", "groq"))
+            provider_cfg = dict(cfg.get(provider, {}) or {})
+            provider_cfg.update({k: v for k, v in entry.items() if k not in {"provider", "type"}})
+        else:
+            logger.warning("transcription: ignoring invalid provider entry %r", entry)
+            continue
+        if provider:
+            attempts.append((provider, provider_cfg))
+
+    if not attempts:
+        attempts.append((cfg.get("provider", "groq"), dict(cfg.get(cfg.get("provider", "groq"), {}) or {})))
+    return attempts
+
+
+async def _transcribe_with_provider(
+    audio_bytes: bytes,
+    provider: str,
+    provider_cfg: Dict[str, Any],
+    mime: str,
+) -> Optional[str]:
+    if provider == "local":
+        if provider_cfg.get("base_url"):
+            base_url = provider_cfg.get("base_url", "").rstrip("/")
+            model = provider_cfg.get("model", _DEFAULT_MODEL)
+            logger.info(
+                "transcription: sending to %s/audio/transcriptions (provider=%s model=%s)",
+                base_url,
+                provider,
+                model,
+            )
+            return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
+        logger.debug("transcription: using local faster-whisper (model=%s)", provider_cfg.get("model", "base"))
+        return await _transcribe_local(audio_bytes, provider_cfg, mime)
+
+    base_url = provider_cfg.get("base_url", _PROVIDER_BASE_URLS.get(provider, "<no base_url>")).rstrip("/")
+    model = provider_cfg.get("model", _DEFAULT_MODEL)
+    logger.info("transcription: sending to %s/audio/transcriptions (provider=%s model=%s)", base_url, provider, model)
+    return await _transcribe_api(audio_bytes, provider, provider_cfg, mime)
 
 
 def _bandpass_pcm(pcm: "np.ndarray", sample_rate: int, low_hz: float = 80.0, high_hz: float = 8000.0) -> "np.ndarray":
@@ -93,6 +238,182 @@ def _bandpass_pcm(pcm: "np.ndarray", sample_rate: int, low_hz: float = 80.0, hig
     return filtered.astype(np.float32)
 
 
+def _spectral_denoise_pcm(
+    pcm: "np.ndarray",
+    sample_rate: int,
+    strength: float = 1.25,
+    floor_ratio: float = 0.2,
+) -> "np.ndarray":
+    """Reduce stationary background noise via simple spectral subtraction.
+
+    This is intentionally lightweight and dependency-free. It works well for
+    constant hiss, fan noise and parts of broadband wind noise, though it is
+    not a full speech enhancement model.
+    """
+    import numpy as np
+
+    if len(pcm) < max(512, sample_rate // 20):
+        return pcm.astype(np.float32, copy=False)
+
+    frame_size = 1024
+    hop_size = frame_size // 2
+    if len(pcm) < frame_size:
+        frame_size = 1 << max(5, int(np.floor(np.log2(len(pcm)))))
+        hop_size = max(frame_size // 2, 1)
+    window = np.hanning(frame_size).astype(np.float32)
+    padded_len = frame_size + hop_size * int(np.ceil(max(len(pcm) - frame_size, 0) / hop_size))
+    padded = np.pad(pcm.astype(np.float32), (0, max(0, padded_len - len(pcm))))
+
+    frames = []
+    energies = []
+    for start in range(0, len(padded) - frame_size + 1, hop_size):
+        frame = padded[start : start + frame_size]
+        windowed = frame * window
+        frames.append(windowed)
+        energies.append(float(np.mean(windowed ** 2)))
+
+    if not frames:
+        return pcm.astype(np.float32, copy=False)
+
+    spectra = np.fft.rfft(np.stack(frames, axis=0), axis=1)
+    magnitudes = np.abs(spectra)
+    phases = np.angle(spectra)
+
+    noise_frame_count = max(1, min(len(energies) // 5, 12))
+    quiet_idx = np.argsort(np.asarray(energies))[:noise_frame_count]
+    noise_profile = np.median(magnitudes[quiet_idx], axis=0)
+
+    cleaned_mag = magnitudes - (strength * noise_profile[None, :])
+    cleaned_mag = np.maximum(cleaned_mag, noise_profile[None, :] * floor_ratio)
+    cleaned = cleaned_mag * np.exp(1j * phases)
+    restored_frames = np.fft.irfft(cleaned, n=frame_size, axis=1).astype(np.float32)
+
+    out = np.zeros(len(padded), dtype=np.float32)
+    norm = np.zeros(len(padded), dtype=np.float32)
+    for idx, start in enumerate(range(0, len(padded) - frame_size + 1, hop_size)):
+        out[start : start + frame_size] += restored_frames[idx] * window
+        norm[start : start + frame_size] += window ** 2
+
+    norm = np.maximum(norm, 1e-6)
+    out = out / norm
+    return out[: len(pcm)].astype(np.float32)
+
+
+def _noise_gate_pcm(
+    pcm: "np.ndarray",
+    threshold: float = 0.015,
+    attenuation_ratio: float = 0.2,
+) -> "np.ndarray":
+    """Apply a soft gate to reduce residual low-level noise between syllables."""
+    import numpy as np
+
+    abs_pcm = np.abs(pcm)
+    gate = np.where(abs_pcm >= threshold, 1.0, attenuation_ratio + (1.0 - attenuation_ratio) * (abs_pcm / max(threshold, 1e-6)))
+    return (pcm * gate.astype(np.float32)).astype(np.float32)
+
+
+def _adaptive_gate_pcm(
+    pcm: "np.ndarray",
+    sample_rate: int,
+    base_threshold: float = 0.015,
+    attenuation_ratio: float = 0.2,
+    noise_percentile: float = 0.2,
+    noise_multiplier: float = 2.2,
+) -> "np.ndarray":
+    """Apply a frame-wise soft gate based on the measured noise floor."""
+    import numpy as np
+
+    if len(pcm) < max(sample_rate // 20, 64):
+        return _noise_gate_pcm(pcm, threshold=base_threshold, attenuation_ratio=attenuation_ratio)
+
+    frame_size = max(sample_rate // 50, 64)  # ~20 ms
+    hop_size = max(frame_size // 2, 1)
+    window = np.hanning(frame_size).astype(np.float32)
+    padded_len = frame_size + hop_size * int(np.ceil(max(len(pcm) - frame_size, 0) / hop_size))
+    padded = np.pad(pcm.astype(np.float32), (0, max(0, padded_len - len(pcm))))
+
+    frame_rms = []
+    for start in range(0, len(padded) - frame_size + 1, hop_size):
+        frame = padded[start : start + frame_size] * window
+        frame_rms.append(float(np.sqrt(np.mean(frame ** 2))))
+
+    if not frame_rms:
+        return pcm.astype(np.float32, copy=False)
+
+    noise_floor = float(np.quantile(np.asarray(frame_rms, dtype=np.float32), min(max(noise_percentile, 0.0), 1.0)))
+    threshold = max(base_threshold, noise_floor * max(noise_multiplier, 1.0))
+
+    gains = []
+    for rms in frame_rms:
+        if rms >= threshold:
+            gains.append(1.0)
+            continue
+        rel = rms / max(threshold, 1e-6)
+        gains.append(attenuation_ratio + (1.0 - attenuation_ratio) * np.sqrt(rel))
+
+    gain_envelope = np.zeros(len(padded), dtype=np.float32)
+    norm = np.zeros(len(padded), dtype=np.float32)
+    for idx, start in enumerate(range(0, len(padded) - frame_size + 1, hop_size)):
+        gain_envelope[start : start + frame_size] += gains[idx]
+        norm[start : start + frame_size] += 1.0
+
+    gain_envelope = gain_envelope / np.maximum(norm, 1e-6)
+    return (padded[: len(pcm)] * gain_envelope[: len(pcm)]).astype(np.float32)
+
+
+def _preprocess_pcm_for_stt(
+    pcm: "np.ndarray",
+    sample_rate: int,
+    config: Optional[Dict[str, Any]] = None,
+) -> "np.ndarray":
+    """Preprocess PCM for more robust speech transcription in noisy environments."""
+    import numpy as np
+
+    preprocess_cfg = dict(_DEFAULT_PREPROCESS)
+    if isinstance(config, dict):
+        transcription_cfg = config.get("transcription", {})
+        if isinstance(transcription_cfg, dict):
+            user_cfg = transcription_cfg.get("preprocess", {})
+            if isinstance(user_cfg, dict):
+                for key, default in _DEFAULT_PREPROCESS.items():
+                    value = user_cfg.get(key, default)
+                    try:
+                        preprocess_cfg[key] = float(value)
+                    except (TypeError, ValueError):
+                        logger.warning("transcription: ignoring invalid preprocess.%s=%r", key, value)
+
+    pcm = _bandpass_pcm(
+        pcm,
+        sample_rate,
+        low_hz=preprocess_cfg["highpass_hz"],
+        high_hz=preprocess_cfg["lowpass_hz"],
+    )
+    pcm = _spectral_denoise_pcm(
+        pcm,
+        sample_rate,
+        strength=preprocess_cfg["denoise_strength"],
+        floor_ratio=preprocess_cfg["denoise_floor"],
+    )
+    pcm = _adaptive_gate_pcm(
+        pcm,
+        sample_rate,
+        base_threshold=preprocess_cfg["gate_threshold"],
+        attenuation_ratio=preprocess_cfg["gate_ratio"],
+        noise_percentile=preprocess_cfg["adaptive_gate_percentile"],
+        noise_multiplier=preprocess_cfg["adaptive_gate_multiplier"],
+    )
+    pcm = _noise_gate_pcm(
+        pcm,
+        threshold=preprocess_cfg["gate_threshold"],
+        attenuation_ratio=preprocess_cfg["gate_ratio"],
+    )
+
+    peak = float(np.max(np.abs(pcm)))
+    if peak > 1e-6:
+        pcm = pcm * (0.9 / peak)
+    return np.clip(pcm, -1.0, 1.0).astype(np.float32)
+
+
 async def transcribe_pcm(
     pcm_float32: "np.ndarray",
     sample_rate: int,
@@ -107,11 +428,7 @@ async def transcribe_pcm(
 
     import numpy as np
 
-    pcm_float32 = _bandpass_pcm(pcm_float32, sample_rate)
-    # Peak-normalize so Whisper gets a consistent signal level
-    peak = float(np.max(np.abs(pcm_float32)))
-    if peak > 1e-6:
-        pcm_float32 = pcm_float32 * (0.9 / peak)
+    pcm_float32 = _preprocess_pcm_for_stt(pcm_float32, sample_rate, config)
     pcm_int16 = (np.clip(pcm_float32, -1.0, 1.0) * 32767).astype(np.int16)
 
     buf = io.BytesIO()
@@ -269,7 +586,7 @@ async def transcribe_pcm_via_model(
 
     import numpy as np
 
-    pcm_float32 = _bandpass_pcm(pcm_float32, sample_rate)
+    pcm_float32 = _preprocess_pcm_for_stt(pcm_float32, sample_rate)
 
     # Resample to 16 kHz if needed — Ollama audio models require it
     if sample_rate != _MODEL_AUDIO_RATE:
@@ -315,14 +632,16 @@ async def _transcribe_api(audio_bytes: bytes, provider: str, cfg: Dict, mime: st
         data["language"] = language
 
     url = f"{base_url}/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
     async with httpx.AsyncClient() as client:
         try:
             resp = await client.post(
                 url,
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
                 files={"file": (f"audio.{ext}", audio_bytes, mime)},
                 data=data,
-                timeout=60,
+                timeout=float(cfg.get("timeout", 60)),
             )
         except httpx.ConnectError as e:
             raise ConnectionError(f"STT: could not connect to {url} — {e}") from e
@@ -362,7 +681,8 @@ async def _transcribe_local(audio_bytes: bytes, cfg: Dict, mime: str) -> Optiona
         finally:
             os.unlink(tmp_path)
 
-    return await asyncio.to_thread(_run)
+    from pawlia.utils import run_sync_in_thread
+    return await run_sync_in_thread(_run)
 
 
 # ---------------------------------------------------------------------------

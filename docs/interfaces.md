@@ -8,7 +8,7 @@ All interfaces share the same agent, memory, and skills. In server mode they all
 python -m pawlia
 ```
 
-Interactive terminal session. One session per run, identified as `cli_user`. Supports the full command set (`/thread`, `/model`, `/private`) and receives proactive notifications from the scheduler inline.
+Interactive terminal session. One session per run, identified as `cli_user`. Supports the full command set (`/thread`, `/model`, `/agent`, `/private`, `/reload`) and receives proactive notifications from the scheduler inline.
 
 Interrupt a running response with `Ctrl+C` — the current generation is cancelled and the prompt returns immediately.
 
@@ -32,7 +32,7 @@ interfaces:
 
 ### Threads (forum topics)
 
-Each forum topic gets its own isolated context window. The first message in a topic is seeded with the last 5 exchanges from the main conversation. Thread history is logged separately and does not appear in the main conversation log. Model overrides can be set per-thread independently.
+Each forum topic gets its own isolated context window. The first message in a topic is seeded with the last 5 exchanges from the main conversation. Thread history is logged separately and does not appear in the main conversation log. Agent overrides can be set per-thread independently.
 
 ### Commands
 
@@ -41,8 +41,10 @@ See [commands.md](commands.md) for the full reference. Quick overview:
 | Command | Effect |
 |---------|--------|
 | `/thread <msg>` | Run message in a new isolated thread context, reply in-thread |
-| `/model [name]` | Show or switch the active model for this context |
+| `/model [name]` | Show or switch the active chat model for this context |
+| `/agent [path] [value]` | Show or override session/thread-local `agents:` paths |
 | `/private` | Toggle private mode (threads only) |
+| `/reload` | Reload config, models, bundled skills, and scheduler settings |
 | `/background <msg>` | Queue a message for deferred background processing |
 
 ### Skill status messages
@@ -92,8 +94,10 @@ Commands use `//` as prefix instead of `/`:
 | Command | Effect |
 |---------|--------|
 | `//thread <msg>` | Respond as a Matrix thread reply (proper `m.thread` relation) |
-| `//model [name]` | Show or switch the active model |
+| `//model [name]` | Show or switch the active chat model |
+| `//agent [path] [value]` | Show or override room/thread-local `agents:` paths |
 | `//private` | Toggle private mode (thread replies only) |
+| `//reload` | Reload config, models, bundled skills, and scheduler settings |
 | `//background <msg>` | Queue a message for deferred background processing |
 
 ### VoIP (optional)
@@ -108,6 +112,11 @@ interfaces:
 
 voip:
   call_inactivity_seconds: 180
+  silence_threshold: 0.018
+  agc_window_seconds: 15.0
+  agc_target_rms: 0.10
+  agc_max_gain: 12.0
+  agc_smoothing: 0.15
 
 tts:
   provider: piper
@@ -162,6 +171,7 @@ Commands use `/` as prefix (same as CLI/Telegram):
 | `/status` | Show session status |
 | `/model [name]` | Show or switch the active model |
 | `/private` | Toggle private mode |
+| `/reload` | Reload config, models, bundled skills, and scheduler settings |
 | `/thread <msg>` | Start a new isolated thread context |
 | `/background <msg>` | Queue a message for deferred background processing |
 

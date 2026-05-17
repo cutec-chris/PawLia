@@ -22,6 +22,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 SETTABLE_SECTIONS = {"interfaces", "tts", "transcription", "skill-config", "agents"}
+VALID_AGENT_PATHS = {"default", "defaults", "chat", "skill_runner", "vision", "compiler"}
 
 _PKG_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -81,6 +82,21 @@ def _coerce(value_str: str) -> Any:
         return value_str
 
 
+def _flatten_overrides(data: dict, prefix: str = "") -> dict:
+    flat = {}
+    for key, value in (data or {}).items():
+        path = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(_flatten_overrides(value, path))
+        elif isinstance(value, str) and value.strip():
+            flat[path] = value.strip()
+    return flat
+
+
+def _valid_agent_path(path: str) -> bool:
+    return path in VALID_AGENT_PATHS or (path.startswith("skills.") and len(path.split(".")) == 2)
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -124,11 +140,11 @@ def cmd_model(args) -> None:
         if not user_id or not session_dir:
             _out({"success": False, "error": "user-id and session-dir required"})
             return
-        override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
         current = ""
-        if os.path.isfile(override_path):
-            with open(override_path, encoding="utf-8") as f:
-                current = f.read().strip()
+        agents_path = os.path.join(session_dir, user_id, "workspace", "memory", "agent_overrides.yaml")
+        if os.path.isfile(agents_path):
+            overrides = _read(agents_path)
+            current = str((overrides or {}).get("chat", "") or "").strip()
         available = {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)}
         _out({"success": True, "model": current or "(default)", "available_models": available})
         return
@@ -139,19 +155,68 @@ def cmd_model(args) -> None:
         _out({"success": False, "error": f"Unknown model '{args.name}'", "available_models": available})
         return
 
-    # set model — write config key (not resolved name) so provider info is preserved
-    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
-    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
-    if user_id and session_dir:
-        override_path = os.path.join(session_dir, user_id, "workspace", "memory", "model_override.txt")
-        os.makedirs(os.path.dirname(override_path), exist_ok=True)
-        with open(override_path, "w", encoding="utf-8") as f:
-            f.write(args.name)
-    _out({"__directive__": "set_model", "model": args.name})
+    _out({"__directive__": "set_agent_override", "path": "chat", "value": args.name})
     _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
 
 
+def cmd_agent(args) -> None:
+    config_path = _find_config()
+    models: dict = {}
+    if config_path:
+        data = _read(config_path)
+        models = data.get("models", {})
+
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+
+    memory_dir = os.path.join(session_dir, user_id, "workspace", "memory")
+    os.makedirs(memory_dir, exist_ok=True)
+    override_path = os.path.join(memory_dir, "agent_overrides.yaml")
+    overrides = _read(override_path) if os.path.isfile(override_path) else {}
+    flat = _flatten_overrides(overrides)
+
+    if not args.path:
+        _out({
+            "success": True,
+            "scope": "session",
+            "overrides": overrides,
+            "flat_overrides": flat,
+            "available_models": {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)},
+        })
+        return
+
+    if not _valid_agent_path(args.path):
+        _out({
+            "success": False,
+            "error": "Invalid agent path",
+            "valid_examples": ["default", "chat", "skill_runner", "vision", "skills.browser"],
+        })
+        return
+
+    if args.off:
+        _out({"__directive__": "set_agent_override", "path": args.path, "value": None, "thread": args.thread})
+        _out({"success": True, "path": args.path, "value": "(default)", "scope": "session"})
+        return
+
+    if not args.value:
+        _out({
+            "success": True,
+            "path": args.path,
+            "value": flat.get(args.path, "(default)"),
+            "scope": "session",
+            "available_models": {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)},
+        })
+        return
+
+    _out({"__directive__": "set_agent_override", "path": args.path, "value": args.value, "thread": args.thread})
+    _out({"success": True, "path": args.path, "value": args.value, "scope": "session"})
+
+
 _PIPER_DIR = "/app/piper"
+_PIPER_DIR_ENV_VARS = ("PAWLIA_PIPER_DIR", "PIPER_VOICE_DIR")
 
 
 def _current_tts_provider() -> str:
@@ -163,15 +228,50 @@ def _current_tts_provider() -> str:
     return (data.get("tts") or {}).get("provider") or "piper"
 
 
+def _configured_piper_dirs() -> list:
+    """Return candidate Piper model directories, in precedence order."""
+    dirs = []
+    for key in _PIPER_DIR_ENV_VARS:
+        value = os.environ.get(key)
+        if value:
+            dirs.append(value)
+
+    path = _find_config()
+    if path:
+        data = _read(path)
+        piper_cfg = (data.get("tts") or {}).get("piper") or {}
+        for key in ("voice_dir", "model_dir"):
+            value = piper_cfg.get(key)
+            if value:
+                dirs.append(value)
+        model = piper_cfg.get("model")
+        if isinstance(model, str) and (os.sep in model or "/" in model):
+            dirs.append(os.path.dirname(model))
+
+    dirs.append(_PIPER_DIR)
+
+    result = []
+    seen = set()
+    for directory in dirs:
+        directory = os.path.abspath(os.path.expanduser(str(directory)))
+        if directory and directory not in seen:
+            seen.add(directory)
+            result.append(directory)
+    return result
+
+
 def _list_piper_voices() -> list:
-    """Return Piper voice names by globbing the model dir."""
+    """Return Piper voice names by globbing configured model dirs."""
     import glob
-    if not os.path.isdir(_PIPER_DIR):
-        return []
-    return sorted(
-        os.path.basename(p)[:-len(".onnx")]
-        for p in glob.glob(os.path.join(_PIPER_DIR, "*.onnx"))
-    )
+    voices = set()
+    for directory in _configured_piper_dirs():
+        if not os.path.isdir(directory):
+            continue
+        voices.update(
+            os.path.basename(p)[:-len(".onnx")]
+            for p in glob.glob(os.path.join(directory, "*.onnx"))
+        )
+    return sorted(voices)
 
 
 def _list_edge_voices() -> list:
@@ -222,6 +322,7 @@ def cmd_voice(args) -> None:
             "voice": current or "(default)",
             "provider": provider,
             "available_voices": available,
+            "piper_dirs": _configured_piper_dirs() if provider == "piper" else None,
         })
         return
 
@@ -240,6 +341,7 @@ def cmd_voice(args) -> None:
                 ),
                 "provider": provider,
                 "available_voices": available,
+                "piper_dirs": _configured_piper_dirs() if provider == "piper" else None,
             })
             return
 
@@ -299,6 +401,7 @@ def cmd_set(args) -> None:
                     ),
                     "provider": provider,
                     "available_voices": available,
+                    "piper_dirs": _configured_piper_dirs() if provider == "piper" else None,
                 })
                 return
 
@@ -343,6 +446,14 @@ def main():
     p.add_argument("--user-id", default=None)
     p.add_argument("--session-dir", default=None)
 
+    p = sub.add_parser("agent")
+    p.add_argument("--path", default=None, help="Relative agents path, e.g. chat or skills.browser")
+    p.add_argument("--value", default=None, help="Selector value, e.g. smart,fast")
+    p.add_argument("--off", action="store_true", help="Clear the override at --path")
+    p.add_argument("--thread", default=None, help="Thread ID (omit for session-level)")
+    p.add_argument("--user-id", default=None)
+    p.add_argument("--session-dir", default=None)
+
     p = sub.add_parser("voice")
     p.add_argument("--name", default=None,
                    help="Voice name — Piper (e.g. de_DE-thorsten-low) or Edge (e.g. de-DE-KatjaNeural)")
@@ -363,7 +474,7 @@ def main():
 
     dispatch = {
         "show": cmd_show, "get": cmd_get, "set": cmd_set,
-        "model": cmd_model, "voice": cmd_voice, "private": cmd_private,
+        "model": cmd_model, "agent": cmd_agent, "voice": cmd_voice, "private": cmd_private,
     }
     try:
         dispatch[args.cmd](args)

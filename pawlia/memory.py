@@ -18,6 +18,7 @@ import shutil
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
+import yaml
 
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import ensure_dir
@@ -29,6 +30,7 @@ KEEP_RECENT_EXCHANGES = 5  # exchanges to keep intact after summarization
 SIMILARITY_THRESHOLD = 0.6  # 0-1, how similar two bot responses must be
 SIMILARITY_WINDOW = 4  # compare last N bot responses
 IDLE_TIMEOUT_SECONDS = 300  # 5 minutes
+SESSION_FORMAT_VERSION = 2
 
 
 class Session:
@@ -53,6 +55,8 @@ class Session:
 
         # Optional model override (e.g. set via /model command)
         self.model_override: Optional[str] = None
+        # Partial override of config.yaml -> agents:
+        self.agent_overrides: Dict[str, Any] = {}
 
         # Optional TTS voice override (piper voice name without .onnx)
         self.voice_override: Optional[str] = None
@@ -62,6 +66,7 @@ class Session:
 
         # Per-thread model overrides (loaded lazily by get_thread_model_override)
         self.thread_model_overrides: Dict[str, Optional[str]] = {}
+        self.thread_agent_overrides: Dict[str, Dict[str, Any]] = {}
 
         # Private mode: exchanges are kept in RAM but not written to disk.
         # Resets on restart (intentional).
@@ -161,8 +166,11 @@ class MemoryManager:
     def _summary_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "context_summary.md")
 
-    def _model_override_path(self, user_id: str) -> str:
-        return os.path.join(self._memory_dir(user_id), "model_override.txt")
+    def _session_version_path(self, user_id: str) -> str:
+        return os.path.join(self.session_dir, user_id, "session_version.txt")
+
+    def _agent_overrides_path(self, user_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), "agent_overrides.yaml")
 
     def _voice_override_path(self, user_id: str) -> str:
         return os.path.join(self._memory_dir(user_id), "voice_override.txt")
@@ -176,8 +184,234 @@ class MemoryManager:
     def _thread_daily_path(self, user_id: str, thread_id: str, date_str: str) -> str:
         return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_{date_str}.md")
 
-    def _thread_model_path(self, user_id: str, thread_id: str) -> str:
-        return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_model.txt")
+    def _thread_agent_overrides_path(self, user_id: str, thread_id: str) -> str:
+        return os.path.join(self._memory_dir(user_id), f"thread_{thread_id}_agents.yaml")
+
+    @staticmethod
+    def _read_yaml(path: str) -> Dict[str, Any]:
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _write_yaml(path: str, data: Dict[str, Any]) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
+
+    @staticmethod
+    def _thread_marker_start(thread_id: str) -> str:
+        return "<!-- PAWLIA_THREAD_SECTION -->"
+
+    @staticmethod
+    def _thread_marker_end(thread_id: str) -> str:
+        return "<!-- /PAWLIA_THREAD_SECTION -->"
+
+    @classmethod
+    def _thread_section_pattern(cls, thread_id: Optional[str] = None) -> re.Pattern[str]:
+        if thread_id is None:
+            return re.compile(
+                r"\n*## Thread [^\n]+\n<!-- PAWLIA_THREAD_SECTION -->\n?(.*?)\n<!-- /PAWLIA_THREAD_SECTION -->\n*",
+                re.DOTALL,
+            )
+        escaped = re.escape(thread_id)
+        return re.compile(
+            rf"\n*## Thread {escaped}\n<!-- PAWLIA_THREAD_SECTION -->\n?(.*?)\n<!-- /PAWLIA_THREAD_SECTION -->\n*",
+            re.DOTALL,
+        )
+
+    @staticmethod
+    def _clean_agent_overrides(data: Any) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            return {}
+
+        cleaned: Dict[str, Any] = {}
+        for key in ("default", "defaults", "chat", "skill_runner", "vision", "compiler"):
+            value = data.get(key)
+            if isinstance(value, (str, dict)) and value:
+                cleaned[key] = value
+
+        skills = data.get("skills")
+        if isinstance(skills, dict):
+            cleaned_skills = {
+                str(name): value
+                for name, value in skills.items()
+                if isinstance(value, (str, dict)) and value
+            }
+            if cleaned_skills:
+                cleaned["skills"] = cleaned_skills
+
+        return cleaned
+
+    @staticmethod
+    def _deep_merge_agent_overrides(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(base)
+        for key, value in extra.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = MemoryManager._deep_merge_agent_overrides(merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
+    @staticmethod
+    def _delete_nested_path(data: Dict[str, Any], parts: List[str]) -> None:
+        current = data
+        parents: List[Tuple[Dict[str, Any], str]] = []
+        for part in parts[:-1]:
+            child = current.get(part)
+            if not isinstance(child, dict):
+                return
+            parents.append((current, part))
+            current = child
+        current.pop(parts[-1], None)
+        if not current:
+            for parent, key in reversed(parents):
+                child = parent.get(key)
+                if isinstance(child, dict) and not child:
+                    parent.pop(key, None)
+                else:
+                    break
+
+    def _sync_legacy_model_fields(self, session: Session) -> None:
+        session.model_override = self.get_agent_override_value(session, "chat")
+        session.thread_model_overrides = {
+            thread_id: self._get_nested_override(overrides, "chat")
+            for thread_id, overrides in session.thread_agent_overrides.items()
+        }
+
+    def _read_session_version(self, user_id: str) -> int:
+        raw = self._read(self._session_version_path(user_id)).strip()
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 1
+
+    def _write_session_version(self, user_id: str, version: int) -> None:
+        with open(self._session_version_path(user_id), "w", encoding="utf-8") as f:
+            f.write(str(version))
+
+    @staticmethod
+    def _get_nested_override(data: Dict[str, Any], path: str) -> Optional[str]:
+        current: Any = data
+        for part in path.split("."):
+            if not isinstance(current, dict):
+                return None
+            current = current.get(part)
+        return current if isinstance(current, str) and current else None
+
+    def _daily_log_paths(self, user_id: str) -> List[str]:
+        memory_dir = self._memory_dir(user_id)
+        if not os.path.isdir(memory_dir):
+            return []
+        names = [
+            name for name in os.listdir(memory_dir)
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}\.md", name)
+        ]
+        return [os.path.join(memory_dir, name) for name in sorted(names)]
+
+    @classmethod
+    def _extract_main_history(cls, daily_text: str) -> str:
+        return cls._thread_section_pattern().sub("\n", daily_text).rstrip()
+
+    @classmethod
+    def _extract_thread_history(cls, daily_text: str, thread_id: str) -> str:
+        match = cls._thread_section_pattern(thread_id).search(daily_text)
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _format_exchange_entry(
+        user_text: str,
+        bot_text: str,
+        *,
+        tool_calls_info: Optional[List[Dict[str, Any]]] = None,
+        timestamp: Optional[str] = None,
+    ) -> str:
+        stamp = timestamp or datetime.now().strftime("%H:%M:%S")
+        entry = f"[{stamp}] User: {user_text}\nAssistant: {bot_text}"
+        if tool_calls_info:
+            for tc in tool_calls_info:
+                tool_json = json.dumps(tc, ensure_ascii=False)
+                entry += f"\n<!-- TOOL_CALL: {tool_json} -->"
+        return entry
+
+    @classmethod
+    def _render_thread_section(cls, thread_id: str, body: str) -> str:
+        return (
+            f"## Thread {thread_id}\n"
+            f"{cls._thread_marker_start(thread_id)}\n"
+            f"{body.strip()}\n"
+            f"{cls._thread_marker_end(thread_id)}"
+        )
+
+    @classmethod
+    def _upsert_thread_section(cls, daily_text: str, thread_id: str, block: str) -> str:
+        pattern = cls._thread_section_pattern(thread_id)
+        match = pattern.search(daily_text)
+        cleaned_block = block.strip()
+        if match:
+            current = match.group(1).strip()
+            body = f"{current}\n{cleaned_block}" if current else cleaned_block
+            replacement = cls._render_thread_section(thread_id, body)
+            return f"{daily_text[:match.start()]}{replacement}{daily_text[match.end():]}".rstrip() + "\n"
+
+        section = cls._render_thread_section(thread_id, cleaned_block)
+        if daily_text.strip():
+            return daily_text.rstrip() + "\n\n" + section + "\n"
+        return section + "\n"
+
+    @classmethod
+    def _append_main_entry_to_daily_text(cls, daily_text: str, entry: str) -> str:
+        thread_match = re.search(r"^## Thread ", daily_text, re.MULTILINE)
+        cleaned_entry = entry.strip()
+        if thread_match:
+            before = daily_text[:thread_match.start()].rstrip()
+            after = daily_text[thread_match.start():].lstrip("\n")
+            if before:
+                return before + "\n" + cleaned_entry + "\n\n" + after
+            return cleaned_entry + "\n\n" + after
+        if daily_text.strip():
+            return daily_text.rstrip() + "\n" + cleaned_entry + "\n"
+        return cleaned_entry + "\n"
+
+    def _write_daily_text(self, user_id: str, date_str: str, text: str) -> None:
+        with open(self._daily_path(user_id, date_str), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def _append_main_entry_to_daily(self, user_id: str, date_str: str, entry: str) -> None:
+        path = self._daily_path(user_id, date_str)
+        current = self._read(path)
+        self._write_daily_text(user_id, date_str, self._append_main_entry_to_daily_text(current, entry))
+
+    def _append_thread_block_to_daily(self, user_id: str, date_str: str, thread_id: str, block: str) -> None:
+        path = self._daily_path(user_id, date_str)
+        current = self._read(path)
+        self._write_daily_text(user_id, date_str, self._upsert_thread_section(current, thread_id, block))
+
+    def migrate_session(self, user_id: str) -> int:
+        """Migrate a session directory to the current on-disk log format."""
+        if self._read_session_version(user_id) >= SESSION_FORMAT_VERSION:
+            return 0
+
+        migrated = 0
+        memory_dir = self._memory_dir(user_id)
+        for name in sorted(os.listdir(memory_dir)):
+            match = re.fullmatch(r"thread_(.+)_(\d{4}-\d{2}-\d{2})\.md", name)
+            if not match:
+                continue
+            thread_id, date_str = match.groups()
+            legacy_path = os.path.join(memory_dir, name)
+            legacy_body = self._read(legacy_path).strip()
+            if legacy_body:
+                self._append_thread_block_to_daily(user_id, date_str, thread_id, legacy_body)
+                migrated += 1
+            os.remove(legacy_path)
+
+        self._write_session_version(user_id, SESSION_FORMAT_VERSION)
+        return migrated
 
     @staticmethod
     def _parse_exchanges(history: str) -> List[Tuple[str, str, Optional[List[Dict[str, Any]]]]]:
@@ -233,16 +467,20 @@ class MemoryManager:
             return self._sessions[user_id]
 
         self._memory_dir(user_id)  # ensure dirs exist
+        self.migrate_session(user_id)
         self._ensure_identity_files(self._workspace_dir(user_id))
 
         session = Session(user_id)
-        session.daily_history = self._read(self._daily_path(user_id, session.current_date_str))
+        today_text = self._read(self._daily_path(user_id, session.current_date_str))
+        session.daily_history = self._extract_main_history(today_text)
         session.user_memory = self._read(self._memory_path(user_id))
         session.summary = self._read(self._summary_path(user_id))
         session.exchanges = self._parse_exchanges(session.daily_history)
         session.exchange_count = len(session.exchanges)
-        override = self._read(self._model_override_path(user_id)).strip()
-        session.model_override = override or None
+        session.agent_overrides = self._clean_agent_overrides(
+            self._read_yaml(self._agent_overrides_path(user_id))
+        )
+        self._sync_legacy_model_fields(session)
         voice = self._read(self._voice_override_path(user_id)).strip()
         session.voice_override = voice or None
         session.private = os.path.isfile(self._private_session_path(user_id))
@@ -250,15 +488,75 @@ class MemoryManager:
         self._sessions[user_id] = session
         return session
 
-    def set_model_override(self, session: Session, model: Optional[str]) -> None:
-        """Persist a model override for this session.  Pass None to clear."""
-        session.model_override = model
-        path = self._model_override_path(session.user_id)
-        if model:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(model)
+    def get_agent_overrides(self, session: Session) -> Dict[str, Any]:
+        return dict(session.agent_overrides)
+
+    def get_thread_agent_overrides(self, session: Session, thread_id: str) -> Dict[str, Any]:
+        return self.get_agent_overrides(session)
+
+    def effective_agent_overrides(
+        self,
+        session: Session,
+        thread_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self._clean_agent_overrides(dict(session.agent_overrides))
+
+    def get_agent_override_value(
+        self,
+        session: Session,
+        path: str,
+        thread_id: Optional[str] = None,
+    ) -> Optional[str]:
+        overrides = self.effective_agent_overrides(session, thread_id) if thread_id else session.agent_overrides
+        return self._get_nested_override(overrides, path)
+
+    def set_agent_overrides(
+        self,
+        session: Session,
+        overrides: Optional[Dict[str, Any]],
+        *,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        cleaned = self._clean_agent_overrides(overrides or {})
+        session.agent_overrides = cleaned
+        path = self._agent_overrides_path(session.user_id)
+
+        if cleaned:
+            self._write_yaml(path, cleaned)
         elif os.path.exists(path):
             os.remove(path)
+        self._sync_legacy_model_fields(session)
+
+    def set_agent_override_value(
+        self,
+        session: Session,
+        path: str,
+        value: Optional[str],
+        *,
+        thread_id: Optional[str] = None,
+    ) -> None:
+        target = self.get_agent_overrides(session)
+        parts = [part for part in path.split(".") if part]
+        if not parts:
+            return
+
+        if value:
+            current = target
+            for part in parts[:-1]:
+                child = current.get(part)
+                if not isinstance(child, dict):
+                    child = {}
+                    current[part] = child
+                current = child
+            current[parts[-1]] = value
+        else:
+            self._delete_nested_path(target, parts)
+
+        self.set_agent_overrides(session, target, thread_id=thread_id)
+
+    def set_model_override(self, session: Session, model: Optional[str]) -> None:
+        """Persist a model override for this session.  Pass None to clear."""
+        self.set_agent_override_value(session, "chat", model)
 
     def set_voice_override(self, session: Session, voice: Optional[str]) -> None:
         """Persist a TTS voice override for this session.  Pass None to clear."""
@@ -279,31 +577,23 @@ class MemoryManager:
         into the model context.
         """
         if thread_id not in session.thread_contexts:
-            path = self._thread_daily_path(
-                session.user_id, thread_id, session.current_date_str
-            )
-            exchanges = self._parse_exchanges(self._read(path))
+            exchanges: List[Tuple[str, str, Optional[List[Dict[str, Any]]]]] = []
+            for path in self._daily_log_paths(session.user_id):
+                thread_history = self._extract_thread_history(self._read(path), thread_id)
+                if thread_history:
+                    exchanges.extend(self._parse_exchanges(thread_history))
             session.thread_contexts[thread_id] = exchanges
         return session.thread_contexts[thread_id]
 
     def get_thread_model_override(self, session: Session, thread_id: str) -> Optional[str]:
         """Return the model override for a thread, loading from disk on first access."""
-        if thread_id not in session.thread_model_overrides:
-            val = self._read(self._thread_model_path(session.user_id, thread_id)).strip()
-            session.thread_model_overrides[thread_id] = val or None
-        return session.thread_model_overrides[thread_id]
+        return session.model_override
 
     def set_thread_model_override(
         self, session: Session, thread_id: str, model: Optional[str]
     ) -> None:
         """Persist a model override for a specific thread.  Pass None to clear."""
-        session.thread_model_overrides[thread_id] = model
-        path = self._thread_model_path(session.user_id, thread_id)
-        if model:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(model)
-        elif os.path.exists(path):
-            os.remove(path)
+        self.set_model_override(session, model)
 
     def toggle_private_thread(self, session: Session, thread_id: str) -> bool:
         """Toggle private mode for a thread. Returns the new state."""
@@ -337,25 +627,17 @@ class MemoryManager:
         bot_text: str,
         tool_calls_info: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        """Append an exchange to a thread's log (RAM; disk skipped if private)."""
+        """Append an exchange to a thread section in the daily log."""
         exchanges = self.get_thread_context(session, thread_id)
         exchanges.append((user_text, bot_text, tool_calls_info))
         if thread_id in session.private_threads:
             return
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        entry = f"\n[{timestamp}] User: {user_text}\nAssistant: {bot_text}"
-
-        # Append tool call information as HTML comments (hidden from display)
-        if tool_calls_info:
-            for tc in tool_calls_info:
-                tool_json = json.dumps(tc, ensure_ascii=False)
-                entry += f"\n<!-- TOOL_CALL: {tool_json} -->"
-
-        path = self._thread_daily_path(
-            session.user_id, thread_id, session.current_date_str
+        entry = self._format_exchange_entry(
+            user_text,
+            bot_text,
+            tool_calls_info=tool_calls_info,
         )
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(entry)
+        self._append_thread_block_to_daily(session.user_id, session.current_date_str, thread_id, entry)
 
     def build_system_prompt(
         self,
@@ -460,14 +742,11 @@ class MemoryManager:
         ``tool_calls_info`` is a list of dicts with 'name', 'args', and 'result'
         keys representing tool calls made during this exchange.
         """
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        entry = f"\n[{timestamp}] User: {user_text}\nAssistant: {bot_text}"
-
-        # Append tool call information as HTML comments (hidden from display)
-        if tool_calls_info:
-            for tc in tool_calls_info:
-                tool_json = json.dumps(tc, ensure_ascii=False)
-                entry += f"\n<!-- TOOL_CALL: {tool_json} -->"
+        entry = self._format_exchange_entry(
+            user_text,
+            bot_text,
+            tool_calls_info=tool_calls_info,
+        )
 
         session.exchanges.append((user_text, bot_text, tool_calls_info))
         session.exchange_count += 1
@@ -481,10 +760,11 @@ class MemoryManager:
         if session.private:
             return
 
-        session.daily_history += entry
-        daily_path = self._daily_path(session.user_id, session.current_date_str)
-        with open(daily_path, "a", encoding="utf-8") as f:
-            f.write(entry)
+        session.daily_history = (
+            session.daily_history.rstrip() + "\n" + entry
+            if session.daily_history.strip() else entry
+        )
+        self._append_main_entry_to_daily(session.user_id, session.current_date_str, entry)
 
     # ------------------------------------------------------------------
     # Summarization

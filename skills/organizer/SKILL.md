@@ -137,14 +137,15 @@ python <scripts_dir>/organizer.py delete-task --task-id "<title or substring>"
 
 ### Scheduled Jobs (Automation)
 
-Jobs are stored in `automations/jobs.json` (outside the vault) since they are scheduler-internal automation config.
-
-**Automation scripts** (`.py`, `.sh`, etc.) MUST be written to `workspace/.scripts/<name>` — this directory is inside the vault so you can read and edit scripts when the user asks about them. The scheduler resolves scripts from there first, falling back to `automations/` for legacy scripts.
+Jobs are stored in `automations/jobs.json` (outside the vault) since they are scheduler-internal automation config. Jobs contain natural-language instructions that run through the normal agent/skill dispatcher when due.
 
 Add a job:
 ```
-python <scripts_dir>/organizer.py add-job --name "<name>" --script "<script_path>" --schedule "<schedule>" [--params '<JSON>'] [--no-notify]
+python <scripts_dir>/organizer.py add-job --name "<name>" --instruction "<instruction>" --schedule "<schedule>" [--no-notify | --notify-on-error]
 ```
+
+- `--no-notify`: kein Output im Feed (stille Jobs)
+- `--notify-on-error`: Output nur bei Fehler im Feed (z. B. für git-Push-Jobs)
 
 **Schedule formats:**
 - `"16:00"` — daily at 16:00

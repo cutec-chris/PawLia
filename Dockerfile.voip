@@ -13,16 +13,19 @@ RUN apk add --no-cache \
         python3-dev \
         openssl-dev \
         libffi-dev \
-        crc32c-dev
+        crc32c-dev \
+        libxml2-dev \
+        libxslt-dev
 
-COPY requirements.txt requirements-voip.txt ./
+COPY constraints.txt requirements.txt requirements-e2e.txt requirements-voip.txt ./
 
 # Installation direkt in die System-Packages
 # --break-system-packages ist in neuen Python-Versionen Pflicht
 RUN pip install --break-system-packages --no-cache-dir \
+        -c constraints.txt \
         -r requirements.txt \
-        -r requirements-voip.txt \
-        pathvalidate
+        -r requirements-e2e.txt \
+        -r requirements-voip.txt
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
 FROM alpine:edge
@@ -45,10 +48,14 @@ RUN apk add --no-cache \
         libffi \
         libstdc++ \
         crc32c \
+        libxml2 \
+        libxslt \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
 WORKDIR /app
+COPY constraints.txt constraints.txt
+ENV PIP_CONSTRAINT=/app/constraints.txt
 
 # Wir kopieren nur die installierten Python-Packages aus dem Builder
 # Anstatt des ganzen venv kopieren wir den site-packages Ordner
