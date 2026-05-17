@@ -414,6 +414,9 @@ class CallSession:
         self._agc_gain: float = 1.0    # current smoothed gain factor
         self._active_response_task: Optional[asyncio.Task] = None
         self._greeting_sent = False
+        self._answer_sent = asyncio.Event()
+        self._media_connected = asyncio.Event()
+        self._prepared_greeting: Optional[tuple[str, List[np.ndarray]]] = None
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
         # Adaptive silence detection: rolling EMA of background noise floor
@@ -817,8 +820,11 @@ class CallSession:
 
         @self._pc.on("connectionstatechange")
         async def on_conn_state():
+            state = self._pc.connectionState
             logger.info("call %s: connection state → %s",
-                        self.call_id[:8], self._pc.connectionState)
+                        self.call_id[:8], state)
+            if state == "connected":
+                self._media_connected.set()
 
         @self._pc.on("iceconnectionstatechange")
         async def on_ice_state():
@@ -882,24 +888,22 @@ class CallSession:
         asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
         # Periodic RTP receiver stats for diagnostics
         asyncio.ensure_future(self._log_receiver_stats())
-        # Greet the caller so they don't have to speak first.  If the
-        # pre-answer warmup already prepared it, the queued TTS will play as
-        # soon as media starts and this becomes a no-op.
-        if not self._greeting_sent:
-            asyncio.ensure_future(self._send_greeting())
+        # Greet the caller once signaling and media are both ready.  Warmup may
+        # prepare the LLM/TTS result ahead of time, but playback is gated here.
+        asyncio.ensure_future(self._send_greeting_when_ready())
 
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
 
     async def _run_preanswer_warmup(self) -> None:
-        """Warm STT and queue the LLM greeting before the call is answered."""
+        """Warm STT and prepare greeting audio before the call is answered."""
         if not self.PREANSWER_WARMUP_ENABLED:
             return
 
         started = time.monotonic()
         tasks = [
             asyncio.create_task(self._warm_stt_with_silence()),
-            asyncio.create_task(self._send_greeting()),
+            asyncio.create_task(self._prepare_greeting()),
         ]
         try:
             await asyncio.wait_for(
@@ -954,6 +958,10 @@ class CallSession:
         except Exception as e:
             logger.warning("call %s: STT warmup failed: %s", self.call_id[:8], e)
 
+    async def mark_answer_sent(self) -> None:
+        """Mark that Matrix accepted our SDP answer event for this call."""
+        self._answer_sent.set()
+
     async def _flush_local_candidates(self, done: asyncio.Event) -> None:
         """Wait for ICE gathering then send candidates parsed from local SDP."""
         try:
@@ -981,9 +989,73 @@ class CallSession:
         )
         logger.info("call %s: sent %d local ICE candidates", self.call_id[:8], len(candidates))
 
+    async def _prepare_greeting(self) -> None:
+        """Generate greeting text and TTS audio without playing it yet."""
+        if self._greeting_sent or self._prepared_greeting is not None:
+            return
+
+        try:
+            from pawlia.tts import synthesize_pcm
+        except ImportError:
+            logger.debug("call %s: TTS not available, skipping greeting warmup", self.call_id[:8])
+            return
+
+        try:
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
+            greeting_input = (
+                "[SYSTEM: A voice call was just accepted. "
+                "Greet the caller with a short, friendly greeting. "
+                "Keep the established persona and preferred form of address from the profile/history. "
+                "If speaking German and there is no explicit preference, use informal 'du', not formal 'Sie'. "
+                "Keep it to one or two sentences.]"
+            )
+            prepared_pcm: List[np.ndarray] = []
+
+            async def _on_sentence(sentence: str) -> None:
+                try:
+                    tts_pcm = await synthesize_pcm(
+                        sentence, self._app.config, sample_rate=48000,
+                        voice_override=self._voice_override(),
+                    )
+                    if tts_pcm is not None and len(tts_pcm):
+                        logger.info(
+                            "call %s: prepared greeting TTS (%d samples): %s",
+                            self.call_id[:8], len(tts_pcm), sentence[:60],
+                        )
+                        prepared_pcm.append(tts_pcm)
+                except Exception as e:
+                    logger.warning("call %s: greeting TTS warmup failed: %s", self.call_id[:8], e)
+
+            response = await self._agent.run_streamed(
+                greeting_input,
+                system_prompt=call_prompt,
+                thread_id=self.thread_id,
+                on_sentence=_on_sentence,
+            )
+            self._prepared_greeting = (response, prepared_pcm)
+            logger.info("call %s: greeting prepared", self.call_id[:8])
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("call %s: greeting warmup failed: %s", self.call_id[:8], e)
+
     async def _send_greeting(self) -> None:
         """Generate and play a greeting via LLM + TTS when the call is accepted."""
         if self._greeting_sent:
+            return
+
+        if self._prepared_greeting is not None:
+            response, prepared_pcm = self._prepared_greeting
+            if self._tts_track:
+                for tts_pcm in prepared_pcm:
+                    self._tts_track.enqueue_pcm_float32(tts_pcm)
+                if prepared_pcm:
+                    self._tts_track.stop_hold()
+            await self._send_cb(response)
+            self._greeting_sent = True
+            self._mark_activity()
+            self._activate_agc()
+            logger.info("call %s: prepared greeting sent", self.call_id[:8])
             return
 
         try:
@@ -1036,6 +1108,20 @@ class CallSession:
             logger.info("call %s: greeting sent", self.call_id[:8])
         except Exception as e:
             logger.warning("call %s: greeting failed: %s", self.call_id[:8], e)
+
+    async def _send_greeting_when_ready(self) -> None:
+        """Send the greeting only after signaling and media are both ready."""
+        if self._greeting_sent:
+            return
+        try:
+            await self._answer_sent.wait()
+            await self._media_connected.wait()
+            if not self._done.is_set():
+                await self._send_greeting()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("call %s: deferred greeting failed: %s", self.call_id[:8], e)
 
     async def add_candidates(self, candidates: List[Dict]) -> None:
         """Feed ICE candidates from ``m.call.candidates``."""
@@ -2023,6 +2109,7 @@ class CallManager:
             },
             ignore_unverified_devices=True,
         )
+        await session.mark_answer_sent()
         logger.info("call %s: answer sent", event.call_id[:8])
 
     async def on_candidates(self, room: "MatrixRoom", event) -> None:
