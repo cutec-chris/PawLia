@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 import tempfile
 from datetime import datetime, timedelta
 
@@ -69,8 +70,11 @@ class TestBashTool:
 
     def test_skill_config_injected_as_env(self):
         tool = BashTool()
+        command = "printf '%s' \"$PAWLIA_SKILL_CONFIG\""
+        if sys.platform == "win32":
+            command = "Write-Output $env:PAWLIA_SKILL_CONFIG"
         result = tool.execute(
-            {"command": "printf '%s' \"$PAWLIA_SKILL_CONFIG\""},
+            {"command": command},
             context={"skill_config": {"url": "http://example.test", "timeout": 12}},
         )
         config = json.loads(result)

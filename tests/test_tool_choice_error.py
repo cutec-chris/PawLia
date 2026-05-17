@@ -102,6 +102,6 @@ class TestWorkflowExecutorConfigInjection:
             {"query": "hello"},
         )
 
-        assert "/tmp/skill/scripts/search.py" in command
+        assert "/tmp/skill/scripts/search.py" in command.replace("\\", "/")
         assert '--query "hello"' in command
         assert '--url "http://example.test"' in command
