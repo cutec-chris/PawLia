@@ -69,6 +69,11 @@ _CHAT_CONTINUE_NUDGE = (
     "The task is not complete yet. If you need a skill, call it now instead of describing "
     "what you plan to do. Only answer the user once the requested work is actually done."
 )
+_WORKSPACE_GROUNDING_NUDGE = (
+    "Relevant workspace sections are listed above. Before answering factual questions about "
+    "those notes, read the most relevant section with the files skill now. Prefer `files read-section` "
+    "or reading the exact section-ref instead of answering from memory."
+)
 _MAX_CHAT_TOOL_TURNS = 16
 _MAX_CHAT_NUDGES = 3
 _REPLAY_TOOL_RESULT_LIMIT = 240
@@ -560,6 +565,19 @@ class ChatAgent(BaseAgent):
 
             if not final.tool_calls:
                 result = self.extract_text(final)
+                if self._should_nudge_for_workspace_grounding(
+                    result,
+                    has_tool_history=bool(tool_calls_info),
+                ) and nudge_count < _MAX_CHAT_NUDGES:
+                    nudge_count += 1
+                    self.logger.warning(
+                        "ChatAgent nudging model to ground answer in workspace refs (nudge %d/%d)",
+                        nudge_count,
+                        _MAX_CHAT_NUDGES,
+                    )
+                    messages = messages + [final, HumanMessage(content=_WORKSPACE_GROUNDING_NUDGE)]
+                    final, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
+                    continue
                 if self._should_nudge_for_incomplete_task(
                     result,
                     has_tool_history=bool(tool_calls_info),
@@ -1201,6 +1219,23 @@ class ChatAgent(BaseAgent):
         if _DEFERRED_PLACEHOLDER_RE.search(stripped):
             return True
         return bool(_DEFERRED_TOOL_INTENT_RE.search(stripped))
+
+    def _should_nudge_for_workspace_grounding(
+        self,
+        text: str,
+        *,
+        has_tool_history: bool,
+    ) -> bool:
+        """Require a real file read when workspace refs are available for factual answers."""
+        refs = getattr(self.session, "workspace_refs", None) if self.session else None
+        if has_tool_history or not isinstance(refs, list) or not refs:
+            return False
+        stripped = text.strip()
+        if not stripped:
+            return False
+        if stripped.endswith("?"):
+            return False
+        return True
 
     async def _invoke_with_tool_retry(
         self,

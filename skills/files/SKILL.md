@@ -34,7 +34,7 @@ Returns every file in the workspace **recursively**, with paths relative to the 
 python <scripts_dir>/files.py read --filename "<name>"
 ```
 
-`--filename` also accepts wikilink syntax — e.g. `[[topic/ios-development]]` resolves to `wiki/topics/topic/ios-development.md`, `[[person/max-mustermann]]` resolves to `wiki/topics/person/max-mustermann.md`, and `[[research/proj/abc]]` resolves as a workspace-relative path. The same wikilink syntax works for `outline`, `read-section`, and `delete`.
+`--filename` also accepts wikilink syntax — e.g. `[[topic/ios-development]]` resolves to `wiki/topics/topic/ios-development.md`, `[[person/max-mustermann]]` resolves to `wiki/topics/person/max-mustermann.md`, and `[[research/proj/abc]]` resolves as a workspace-relative path. Section anchors are supported too: `[[topic/ios-development#Tooling]]` can be passed directly to `read` and will return that section. The same wikilink syntax works for `outline`, `read-section`, and `delete`.
 
 **Default behaviour**: returns the first 150 lines. If `has_more: true` appears in the response, use `--offset` to continue reading.
 

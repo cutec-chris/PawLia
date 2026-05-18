@@ -158,8 +158,11 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
         "topics. If the conversation is heading somewhere else (small talk, "
         "follow-up, clarification, correction of an earlier mistake), ignore "
         "these refs entirely.",
-        "- Only call `files read` if a heading clearly matches the user's "
-        "current question. When in doubt, ask the user before reading.",
+        "- If a listed section clearly matches the question, prefer reading that "
+        "section first via `files read-section` (or `files read` with the exact "
+        "section-ref) before doing anything broader.",
+        "- Do not start with `browser` or loose `grep` if a relevant workspace "
+        "section is already listed here.",
         "- Never weave content from these files into a reply unless you "
         "actually read the file *and* it answers what was asked. Do not "
         "invent a topic the user did not bring up.",
