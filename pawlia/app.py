@@ -217,6 +217,15 @@ class App:
                     agent_overrides=self.memory.effective_agent_overrides(session, thread_id),
                 )
             )
+            agent._context_window_resolver = (
+                lambda agent_type, thread_id=None:
+                self.llm.context_size_for_model(
+                    self.llm.default_model_name(
+                        agent_type,
+                        agent_overrides=self.memory.effective_agent_overrides(session, thread_id),
+                    )
+                )
+            )
             # Resolve config keys (e.g. "fast") to actual model names
             agent._model_name_resolver = self.llm.resolve_model_name
             # Let the ChatAgent re-discover this user's workspace skills after each skill call

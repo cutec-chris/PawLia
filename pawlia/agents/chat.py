@@ -28,6 +28,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from pawlia.agents.base import BaseAgent, log_prompt
+from pawlia.llm import is_context_length_error
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.skills.loader import AgentSkill
 
@@ -80,6 +81,11 @@ _REPLAY_TOOL_RESULT_LIMIT = 240
 _REPLAY_TOOL_CALLS_LIMIT = 3
 _LIVE_TOOL_RESULT_LIMIT = 12_000
 _PERSIST_TOOL_RESULT_LIMIT = 2_000
+_CONTEXT_COMPLETION_RESERVE_TOKENS = 2_000
+_CONTEXT_MIN_NON_SYSTEM_KEEP = 6
+_CONTEXT_TRIMMED_TEXT_LIMIT = 1_500
+_CONTEXT_TRIMMED_TOOL_LIMIT = 4_000
+_MAX_CONTEXT_RECOVERY_RETRIES = 3
 _DEFERRED_TOOL_INTENT_RE = re.compile(
     r"(?:\b(?:let me|i(?:'ll| will| am going to)|first\s*,?\s*i(?:'ll| will)|now\s+i(?:'ll| will)|"
     r"ich\s+(?:werde|schaue|suche|pruefe|prüfe|checke|oeffne|öffne)|lass\s+mich)\b.{0,140}"
@@ -204,6 +210,8 @@ class ChatAgent(BaseAgent):
         # Called after each skill returns so that skills created at runtime
         # (e.g. by skill-creator) become available immediately.
         self._skills_refresher: Optional[Callable[[], None]] = None
+        # Optional callback returning the active context window for an agent type.
+        self._context_window_resolver: Optional[Callable[[str, Optional[str]], int]] = None
 
     def _apply_disabled_skills(self) -> None:
         """Filter self.skills against session.disabled_skills and rebind LLM tools."""
@@ -490,6 +498,82 @@ class ChatAgent(BaseAgent):
         summary = "Earlier skill use:\n" + "\n".join(lines)
         return f"{bot_text}\n\n{summary}" if bot_text else summary
 
+    @staticmethod
+    def _message_text(message: BaseMessage) -> str:
+        content = message.content
+        return content if isinstance(content, str) else str(content)
+
+    def _clone_message_with_trimmed_content(
+        self,
+        message: BaseMessage,
+        *,
+        limit: int,
+    ) -> BaseMessage:
+        text = self._message_text(message)
+        compacted = self._compact_text(text, limit=limit)
+        if compacted == text:
+            return message
+        if isinstance(message, ToolMessage):
+            return ToolMessage(content=compacted, tool_call_id=message.tool_call_id)
+        if isinstance(message, HumanMessage):
+            return HumanMessage(content=compacted)
+        if isinstance(message, AIMessage):
+            clone = AIMessage(content=compacted)
+            clone.tool_calls = getattr(message, "tool_calls", [])
+            return clone
+        return message
+
+    def _estimated_message_tokens(self, messages: List[BaseMessage]) -> int:
+        from pawlia.memory import estimate_tokens
+
+        return sum(estimate_tokens(self._message_text(message)) for message in messages)
+
+    def _context_budget_for(self, thread_id: Optional[str], *, images: bool = False) -> int:
+        if not self._context_window_resolver:
+            return 0
+        agent_type = "vision" if images else "chat"
+        try:
+            ctx = int(self._context_window_resolver(agent_type, thread_id) or 0)
+        except Exception:
+            return 0
+        return max(0, ctx - _CONTEXT_COMPLETION_RESERVE_TOKENS)
+
+    def _prepare_messages_for_context_budget(
+        self,
+        messages: List[BaseMessage],
+        *,
+        thread_id: Optional[str],
+        images: bool = False,
+    ) -> List[BaseMessage]:
+        budget = self._context_budget_for(thread_id, images=images)
+        if budget <= 0:
+            return messages
+
+        prepared: List[BaseMessage] = list(messages)
+        if self._estimated_message_tokens(prepared) <= budget:
+            return prepared
+
+        trimmed: List[BaseMessage] = []
+        for index, message in enumerate(prepared):
+            if isinstance(message, ToolMessage):
+                trimmed.append(self._clone_message_with_trimmed_content(message, limit=_CONTEXT_TRIMMED_TOOL_LIMIT))
+            elif index > 0 and isinstance(message, (HumanMessage, AIMessage)):
+                trimmed.append(self._clone_message_with_trimmed_content(message, limit=_CONTEXT_TRIMMED_TEXT_LIMIT))
+            else:
+                trimmed.append(message)
+        prepared = trimmed
+
+        if self._estimated_message_tokens(prepared) <= budget or len(prepared) <= 1:
+            return prepared
+
+        system = prepared[:1]
+        tail = prepared[1:]
+        while len(tail) > _CONTEXT_MIN_NON_SYSTEM_KEEP and self._estimated_message_tokens(system + tail) > budget:
+            drop = 2 if len(tail) - 2 >= _CONTEXT_MIN_NON_SYSTEM_KEEP else 1
+            tail = tail[drop:]
+
+        return system + tail
+
     async def run(
         self,
         user_input: str,
@@ -565,7 +649,12 @@ class ChatAgent(BaseAgent):
 
         # Turn 1: LLM decides whether to call a skill or answer directly
         active_llm = bound_llm
-        response, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
+        response, messages = await self._invoke_with_tool_retry(
+            messages,
+            llm=active_llm,
+            thread_id=thread_id,
+            images=bool(images),
+        )
 
         tool_calls_info: List[Dict[str, Any]] = []
         final = response
@@ -592,7 +681,12 @@ class ChatAgent(BaseAgent):
                         _MAX_CHAT_NUDGES,
                     )
                     messages = messages + [final, HumanMessage(content=_WORKSPACE_GROUNDING_NUDGE)]
-                    final, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
+                    final, messages = await self._invoke_with_tool_retry(
+                        messages,
+                        llm=active_llm,
+                        thread_id=thread_id,
+                        images=bool(images),
+                    )
                     continue
                 if self._should_nudge_for_incomplete_task(
                     result,
@@ -606,7 +700,12 @@ class ChatAgent(BaseAgent):
                         _MAX_CHAT_NUDGES,
                     )
                     messages = messages + [final, HumanMessage(content=_CHAT_CONTINUE_NUDGE)]
-                    final, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
+                    final, messages = await self._invoke_with_tool_retry(
+                        messages,
+                        llm=active_llm,
+                        thread_id=thread_id,
+                        images=bool(images),
+                    )
                     continue
                 break
 
@@ -668,11 +767,20 @@ class ChatAgent(BaseAgent):
                 bound_llm = self.bound_llm
                 active_llm = bound_llm
 
-            final, messages = await self._invoke_with_tool_retry(messages, llm=active_llm)
+            final, messages = await self._invoke_with_tool_retry(
+                messages,
+                llm=active_llm,
+                thread_id=thread_id,
+                images=bool(images),
+            )
         else:
             self.logger.warning("Max chat tool turns reached, forcing final response")
             final = await self._invoke(
-                messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)],
+                self._prepare_messages_for_context_budget(
+                    messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)],
+                    thread_id=thread_id,
+                    images=bool(images),
+                ),
                 llm=unbound_llm,
             )
 
@@ -758,7 +866,11 @@ class ChatAgent(BaseAgent):
         _partial_text = ""
         try:
             accumulated, raw_text = await self._stream_with_sentences(
-                messages, first_turn_llm, on_sentence,
+                messages,
+                first_turn_llm,
+                on_sentence,
+                thread_id=thread_id,
+                images=bool(images),
             )
             _partial_text = raw_text
 
@@ -769,7 +881,12 @@ class ChatAgent(BaseAgent):
             if accumulated and self._is_fake_tool_call(accumulated):
                 self.logger.warning("Fake tool call detected in streamed turn 1, retrying non-streamed")
                 retry_llm = bound_llm if allow_skills else unbound_llm
-                accumulated, messages = await self._invoke_with_tool_retry(messages, llm=retry_llm)
+                accumulated, messages = await self._invoke_with_tool_retry(
+                    messages,
+                    llm=retry_llm,
+                    thread_id=thread_id,
+                    images=bool(images),
+                )
                 raw_text = accumulated.content if isinstance(accumulated.content, str) else ""
                 _partial_text = raw_text
 
@@ -841,7 +958,12 @@ class ChatAgent(BaseAgent):
             final_response: Optional[AIMessage] = None
 
             for _turn in range(_MAX_CHAT_TOOL_TURNS):
-                next_response, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
+                next_response, messages = await self._invoke_with_tool_retry(
+                    messages,
+                    llm=bound_llm,
+                    thread_id=thread_id,
+                    images=bool(images),
+                )
 
                 if not next_response.tool_calls:
                     text = self.extract_text(next_response)
@@ -944,6 +1066,9 @@ class ChatAgent(BaseAgent):
         messages: List[BaseMessage],
         llm: Any,
         on_sentence: Optional[Callable[[str], Awaitable[None]]],
+        *,
+        thread_id: Optional[str] = None,
+        images: bool = False,
     ) -> Tuple[Any, str]:
         """Stream an LLM call, emitting complete sentences via *on_sentence*.
 
@@ -953,6 +1078,11 @@ class ChatAgent(BaseAgent):
         raw_text = ""
         emitted_len = 0  # how much of the clean text has been emitted
 
+        messages = self._prepare_messages_for_context_budget(
+            messages,
+            thread_id=thread_id,
+            images=images,
+        )
         log_prompt(messages, name=self.log_name)
 
         async for chunk in llm.astream(messages):
@@ -1259,15 +1389,44 @@ class ChatAgent(BaseAgent):
         self,
         messages: List[BaseMessage],
         llm: Any,
+        *,
+        thread_id: Optional[str] = None,
+        images: bool = False,
     ) -> Tuple[AIMessage, List[BaseMessage]]:
         """Invoke the LLM, retrying if it writes a fake tool call as text.
 
         Returns ``(response, messages)`` where *messages* may have had nudge
         entries appended during retries (for context only — not persisted).
         """
-        retry_messages = list(messages)
+        retry_messages = self._prepare_messages_for_context_budget(
+            list(messages),
+            thread_id=thread_id,
+            images=images,
+        )
+        context_retries = 0
         for attempt in range(_MAX_FAKE_TOOL_RETRIES):
-            response = await self._invoke(retry_messages, llm=llm)
+            try:
+                response = await self._invoke(retry_messages, llm=llm)
+            except Exception as exc:
+                if not is_context_length_error(exc) or context_retries >= _MAX_CONTEXT_RECOVERY_RETRIES:
+                    raise
+                compacted = self._prepare_messages_for_context_budget(
+                    retry_messages,
+                    thread_id=thread_id,
+                    images=images,
+                )
+                if compacted == retry_messages and len(retry_messages) > 1:
+                    compacted = [retry_messages[0]] + retry_messages[-_CONTEXT_MIN_NON_SYSTEM_KEEP:]
+                if compacted == retry_messages:
+                    raise
+                context_retries += 1
+                self.logger.warning(
+                    "ChatAgent compacted prompt after context-limit error (%d/%d)",
+                    context_retries,
+                    _MAX_CONTEXT_RECOVERY_RETRIES,
+                )
+                retry_messages = compacted
+                continue
             fake_calls = self._extract_fake_skill_calls(response)
             if fake_calls:
                 self.logger.warning(

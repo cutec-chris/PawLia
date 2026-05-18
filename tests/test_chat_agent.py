@@ -439,6 +439,36 @@ class TestChatAgentPersist:
         assert "Result line Result line" in messages[2].content
         assert len(messages[2].content) < 500
 
+    @pytest.mark.asyncio
+    async def test_compacts_old_history_when_context_budget_is_small(self):
+        """Old replayed exchanges should be dropped before sending an oversized prompt."""
+        llm = _mock_llm([_make_ai_message("Response")])
+
+        session = MagicMock()
+        session.workspace_refs = []
+        session.exchanges = [
+            (f"old_q_{idx} " + ("x" * 800), f"old_a_{idx} " + ("y" * 800))
+            for idx in range(5)
+        ]
+        memory = MagicMock()
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={},
+            skill_runner_factory=lambda s, thread_id=None: None,
+            memory=memory,
+            session=session,
+        )
+        agent._context_window_resolver = lambda agent_type, thread_id=None: 2500
+
+        await agent.run("Newest question")
+
+        messages = llm.invoke.call_args[0][0]
+        serialized = [getattr(msg, "content", "") for msg in messages]
+        assert any(content == "Newest question" for content in serialized)
+        assert not any(isinstance(content, str) and "old_q_0" in content for content in serialized)
+        assert not any(isinstance(content, str) and "old_a_0" in content for content in serialized)
+
 
 class TestChatAgentMultiSkill:
     @pytest.mark.asyncio
