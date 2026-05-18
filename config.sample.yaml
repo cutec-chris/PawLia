@@ -189,16 +189,16 @@ workspace:
 #     chris: cli_user          # simple name → user_id
 #     anna: anna_user
 
-# Workspace context search — on the first user message per session, PawLia runs a
-# BM25 keyword search across the workspace markdown files and injects matching
-# snippets + wikilinks into the system prompt. No indexing, no embeddings — purely
-# on-the-fly. Results are cached for the session so subsequent turns are free.
+# Workspace context search — on each substantive user message, PawLia runs a
+# BM25 keyword search across workspace markdown files and injects only concise
+# file/section pointers into the next user message. No indexing, no embeddings.
 # Enabled by default. Uncomment to tune or disable.
 # workspace-search:
 #   enabled: false      # set to false to disable
-#   top_k: 5            # max results to inject into the system prompt
-#   min_score: 0.5      # minimum fraction of the best hit score (0–1)
-#   snippet_chars: 150  # characters to show per matched section
+#   top_k: 3            # max candidate sections to inject
+#   min_score: 0.7      # minimum fraction of the best hit score (0–1)
+#   min_raw_score: 2.0  # absolute BM25 floor; weak best hits are ignored
+#   snippet_chars: 100  # characters to show per matched section
 #   exclude_dirs:       # subdirs of workspace/ to skip (raw chat logs are noisy)
 #     - memory
 #   include_root_files: true  # include loose .md files directly under workspace/

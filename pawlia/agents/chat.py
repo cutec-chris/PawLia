@@ -116,6 +116,22 @@ def _augment_with_workspace_refs(user_input: str, session: Any) -> str:
         return user_input
 
 
+def _remove_workspace_refs_from_messages(
+    messages: List[BaseMessage],
+    original_user_input: str,
+) -> List[BaseMessage]:
+    """Drop workspace-search hints after they served their routing purpose."""
+    cleaned = list(messages)
+    for idx in range(len(cleaned) - 1, -1, -1):
+        msg = cleaned[idx]
+        if not isinstance(msg, HumanMessage) or not isinstance(msg.content, str):
+            continue
+        if msg.content.startswith("## Workspace Notes Available"):
+            cleaned[idx] = HumanMessage(content=original_user_input)
+        break
+    return cleaned
+
+
 def _split_sentences(text: str) -> Tuple[List[str], str]:
     """Split *text* into complete sentences and a remainder.
 
@@ -594,6 +610,7 @@ class ChatAgent(BaseAgent):
                     continue
                 break
 
+            messages = _remove_workspace_refs_from_messages(messages, user_input)
             interim = self.extract_text(final)
             if interim and self.on_interim:
                 try:
@@ -768,6 +785,7 @@ class ChatAgent(BaseAgent):
                 return result
 
             # ---- Skill calls detected → execute (non-streamed) ----
+            messages = _remove_workspace_refs_from_messages(messages, user_input)
             messages.append(accumulated)
             tool_calls_info: List[Dict[str, Any]] = []
 

@@ -120,3 +120,28 @@ def test_workspace_search_keeps_non_wiki_paths_obsidian_compatible(tmp_path):
     assert hits
     assert hits[0].page_ref == "[[research/ops/README]]"
     assert hits[0].section_ref == "[[research/ops/README#Maintenance Window]]"
+
+
+def test_workspace_search_default_is_conservative(tmp_path):
+    workspace = tmp_path / "workspace"
+    topics = workspace / "wiki" / "topics"
+    topics.mkdir(parents=True)
+
+    for idx in range(6):
+        (topics / f"topic-{idx}.md").write_text(
+            textwrap.dedent(
+                f"""
+                # Topic {idx}
+
+                ## Shared Keyword
+
+                The relevant keyword appears in this note.
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+    hits = WorkspaceSearch(str(workspace)).search("relevant keyword")
+
+    assert len(hits) <= 3

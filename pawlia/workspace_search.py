@@ -1,8 +1,7 @@
 """On-the-fly BM25 search over workspace markdown files.
 
-Scans workspace/*.md files (excluding raw chat logs) on every call —
-no persistent index, no embeddings. Results are cached on the Session
-after the first search so subsequent turns reuse them without re-scanning.
+Scans workspace/*.md files (excluding raw chat logs) on every substantive
+message — no persistent index, no embeddings.
 """
 
 import os
@@ -32,10 +31,10 @@ _QUESTION_STARTERS = frozenset({
 })
 _TOPIC_SHIFT_THRESHOLD = 0.15  # overlap fraction below which we treat it as a new topic
 
-_DEFAULT_TOP_K = 5
-_DEFAULT_MIN_SCORE = 0.5  # fraction of best hit (0–1 normalized)
-_DEFAULT_MIN_RAW_SCORE = 1.5  # absolute BM25 score below which a "best hit" isn't a real match
-_DEFAULT_SNIPPET_CHARS = 150
+_DEFAULT_TOP_K = 3
+_DEFAULT_MIN_SCORE = 0.7  # fraction of best hit (0–1 normalized)
+_DEFAULT_MIN_RAW_SCORE = 2.0  # absolute BM25 score below which a "best hit" isn't a real match
+_DEFAULT_SNIPPET_CHARS = 100
 _DEFAULT_EXCLUDE_DIRS = {"memory", "skills"}
 
 # Stopwords stripped from BM25 queries. Without this, German filler words like
