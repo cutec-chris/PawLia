@@ -1632,7 +1632,16 @@ class CallSession:
             while not self._done.is_set():
                 idle_for = time.monotonic() - self._last_user_speech_at
                 if not self._speaking and idle_for >= response_delay:
-                    if self._tts_track and self._tts_track.is_tts_playing:
+                    tts_playing = False
+                    if self._tts_track:
+                        tts_playing = bool(
+                            getattr(
+                                self._tts_track,
+                                "is_tts_playing",
+                                getattr(self._tts_track, "is_playing", False),
+                            )
+                        )
+                    if tts_playing:
                         await asyncio.sleep(0.2)
                         continue
                     break

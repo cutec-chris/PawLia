@@ -58,6 +58,9 @@ from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
 
+_CHARS_PER_TOKEN = 4
+_CONTEXT_SKIP_RESERVE_TOKENS = 1024
+
 
 # Heuristic: how many tool-call turns to grant the SkillRunner per model.
 # Bigger / more capable models can sustain longer exploratory loops without
@@ -227,15 +230,33 @@ class _FallbackLLMWrapper:
     _BLACKLIST_THRESHOLD = 3
     _BLACKLIST_COOLDOWN_SECONDS = 30 * 60
 
-    def __init__(self, llms: List[Any], labels: List[str]):
+    def __init__(self, llms: List[Any], labels: List[str], context_sizes: List[int]):
         if not llms:
             raise ValueError("Fallback wrapper requires at least one LLM")
         self._llms = llms
         self._labels = labels
+        self._context_sizes = context_sizes
         self._now = time.monotonic
         self._failures = [0 for _ in llms]
         self._blacklisted_until = [0.0 for _ in llms]
         self._last_errors: List[Optional[Exception]] = [None for _ in llms]
+
+    @staticmethod
+    def _estimate_tokens_for_messages(messages: List[BaseMessage]) -> int:
+        total = 0
+        for message in messages:
+            content = message.content
+            text = content if isinstance(content, str) else str(content)
+            if text:
+                total += (len(text) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+        return total
+
+    def _fits_context(self, idx: int, messages: List[BaseMessage]) -> bool:
+        ctx = self._context_sizes[idx] if idx < len(self._context_sizes) else 0
+        if ctx <= 0:
+            return True
+        budget = max(1, ctx - _CONTEXT_SKIP_RESERVE_TOKENS)
+        return self._estimate_tokens_for_messages(messages) <= budget
 
     def _is_blacklisted(self, idx: int, now: float) -> bool:
         return self._blacklisted_until[idx] > now
@@ -303,6 +324,16 @@ class _FallbackLLMWrapper:
                     int(self._blacklisted_until[idx] - now),
                 )
                 continue
+            if not self._fits_context(idx, messages):
+                logger.warning(
+                    "LLM skip: model '%s' context window too small for estimated prompt, trying next fallback",
+                    self._labels[idx],
+                )
+                last_exc = RuntimeError(
+                    f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
+                )
+                saw_context_error = True
+                continue
             try:
                 result = llm.invoke(messages, **kwargs)
                 self._note_success(idx)
@@ -344,6 +375,16 @@ class _FallbackLLMWrapper:
                     int(self._blacklisted_until[idx] - now),
                 )
                 continue
+            if not self._fits_context(idx, messages):
+                logger.warning(
+                    "LLM skip: model '%s' context window too small for estimated prompt, trying next fallback",
+                    self._labels[idx],
+                )
+                last_exc = RuntimeError(
+                    f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
+                )
+                saw_context_error = True
+                continue
             try:
                 result = await llm.ainvoke(messages, **kwargs)
                 self._note_success(idx)
@@ -376,6 +417,7 @@ class _FallbackLLMWrapper:
         return _FallbackLLMWrapper(
             [llm.bind_tools(*args, **kwargs) for llm in self._llms],
             self._labels,
+            self._context_sizes,
         )
 
     async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
@@ -390,6 +432,16 @@ class _FallbackLLMWrapper:
                     self._labels[idx],
                     int(self._blacklisted_until[idx] - now),
                 )
+                continue
+            if not self._fits_context(idx, messages):
+                logger.warning(
+                    "LLM skip(stream): model '%s' context window too small for estimated prompt, trying next fallback",
+                    self._labels[idx],
+                )
+                last_exc = RuntimeError(
+                    f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
+                )
+                saw_context_error = True
                 continue
             yielded_any = False
             try:
@@ -456,7 +508,8 @@ class LLMFactory:
         if key not in self._cache:
             llms = [self._get_or_build_model(cfg) for cfg in model_cfgs]
             labels = [str(cfg.get("model", "unknown")) for cfg in model_cfgs]
-            self._cache[key] = _FallbackLLMWrapper(llms, labels)
+            context_sizes = [self.context_size_for_model(str(cfg.get("model", "unknown"))) for cfg in model_cfgs]
+            self._cache[key] = _FallbackLLMWrapper(llms, labels, context_sizes)
         return self._cache[key]
 
     def resolve_model_name(self, name: str) -> str:

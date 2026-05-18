@@ -4,6 +4,8 @@ from typing import Any, Dict, List
 
 import pytest
 
+from langchain_core.messages import HumanMessage
+
 from pawlia.llm import (
     LLMFactory,
     estimate_context_size,
@@ -264,6 +266,32 @@ def test_context_length_errors_do_not_blacklist_model(monkeypatch: pytest.Monkey
 
     assert built["m1"].calls == 4
     assert built["m2"].calls == 4
+
+
+def test_fallback_skips_models_with_too_small_context(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["agents"]["chat"] = "m1,m2"
+    config["models"]["m1"]["context_size"] = 1024
+    config["models"]["m2"]["context_size"] = 8192
+
+    built: Dict[str, _DummyLLM] = {}
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        model_name = str(model_cfg["model"])
+        llm = _DummyLLM(model_name=model_name)
+        built[model_name] = llm
+        return llm
+
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat")
+
+    result = llm.invoke([HumanMessage(content="x" * 6000)])
+
+    assert result == "ok-m2"
+    assert built["m1"].calls == 0
+    assert built["m2"].calls == 1
 
 
 def test_local_factory_skips_nonlocal_chat_models(monkeypatch: pytest.MonkeyPatch):

@@ -26,7 +26,13 @@ The `--user-id` and `--session-dir` arguments are automatically provided via env
 python <scripts_dir>/files.py list
 ```
 
-Returns every file in the workspace **recursively**, with paths relative to the workspace root (e.g. `notes/today.md`).
+Returns files in the workspace **recursively**, with paths relative to the workspace root (e.g. `notes/today.md`).
+
+Default behaviour: returns at most 200 files so the result stays compact for the model. If `has_more: true` appears in the response, continue with:
+
+```
+python <scripts_dir>/files.py list --offset 200 --limit 200
+```
 
 ## Read a file
 

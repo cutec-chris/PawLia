@@ -238,14 +238,34 @@ def _parse_headings(lines: list[str]) -> list[dict]:
 
 def cmd_list(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    offset = max(0, int(getattr(args, "offset", 0) or 0))
+    limit = max(1, int(getattr(args, "limit", 200) or 200))
     entries = []
-    for abs_path, rel_path in _walk_files(workdir):
+    all_files = list(_walk_files(workdir))
+    total = len(all_files)
+    for abs_path, rel_path in all_files[offset:offset + limit]:
         entries.append({
             "name": rel_path,
             "type": "file",
             "size": os.path.getsize(abs_path),
         })
-    _out({"success": True, "files": entries, "count": len(entries)})
+    has_more = offset + limit < total
+    payload = {
+        "success": True,
+        "files": entries,
+        "count": len(entries),
+        "total_count": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+    }
+    if has_more:
+        payload["next_offset"] = offset + limit
+        payload["hint"] = (
+            "More files available. Call list again with "
+            f"--offset {offset + limit} --limit {limit} if needed."
+        )
+    _out(payload)
 
 
 _DEFAULT_READ_LIMIT = 150
@@ -567,6 +587,8 @@ def main():
 
     p = sub.add_parser("list")
     _base(p)
+    p.add_argument("--offset", type=int, default=0, help="0-based file offset")
+    p.add_argument("--limit", type=int, default=200, help="max files to return (default: 200)")
 
     p = sub.add_parser("read")
     _base(p)
