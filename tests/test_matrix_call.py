@@ -433,6 +433,68 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
 
 
 @pytest.mark.asyncio
+async def test_process_speech_starts_hold_before_queueing_response():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    session = CallSession(
+        call_id="call-hold-start",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-hold-start",
+        client=client,
+        app=app,
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    session._tts_track = SimpleNamespace(
+        start_hold=MagicMock(),
+        stop_hold=MagicMock(),
+        is_playing=False,
+    )
+    session._queue_transcript_response = AsyncMock()
+
+    with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="Hallo da")):
+        await session._process_speech(np.zeros(4800, dtype=np.float32), 48000)
+
+    session._tts_track.start_hold.assert_called_once()
+    session._queue_transcript_response.assert_awaited_once_with("Hallo da")
+    session._tts_track.stop_hold.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_speech_stops_hold_when_transcription_is_empty():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    session = CallSession(
+        call_id="call-hold-empty",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-hold-empty",
+        client=client,
+        app=app,
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    session._tts_track = SimpleNamespace(
+        start_hold=MagicMock(),
+        stop_hold=MagicMock(),
+        is_playing=False,
+    )
+    session._queue_transcript_response = AsyncMock()
+
+    with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value=None)):
+        await session._process_speech(np.zeros(4800, dtype=np.float32), 48000)
+
+    session._tts_track.start_hold.assert_called_once()
+    session._tts_track.stop_hold.assert_called_once()
+    session._queue_transcript_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_speech_interrupts_for_meaningful_barge_in():
     app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     client = SimpleNamespace(room_typing=AsyncMock())

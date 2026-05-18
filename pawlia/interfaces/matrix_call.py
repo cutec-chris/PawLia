@@ -1911,16 +1911,24 @@ class CallSession:
         interrupt_playback: bool = False,
     ) -> None:
         """Transcribe a speech chunk and optionally use it to barge into TTS."""
+        started_hold = False
+        if not interrupt_playback and self._tts_track:
+            self._tts_track.start_hold()
+            started_hold = True
         try:
             text = await self._transcribe_speech(pcm, sample_rate)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error("call %s: transcription error: %s", self.call_id[:8], e)
+            if started_hold and self._tts_track:
+                self._tts_track.stop_hold()
             return
 
         if not text:
             logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
+            if started_hold and self._tts_track:
+                self._tts_track.stop_hold()
             return
 
         try:
