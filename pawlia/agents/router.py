@@ -239,6 +239,7 @@ class RouterAgent:
         on_skill_start: Optional[Callable[[str, str], Awaitable[None]]] = None,
         on_skill_step: Optional[Callable[[str], Awaitable[None]]] = None,
         on_skill_done: Optional[Callable[[str], Awaitable[None]]] = None,
+        allow_skills: bool = True,
     ) -> str:
         agent_type = "vision" if images else "chat"
         meta = self.describe_backend(thread_id, agent_type=agent_type)
@@ -253,6 +254,7 @@ class RouterAgent:
                 on_skill_start=on_skill_start,
                 on_skill_step=on_skill_step,
                 on_skill_done=on_skill_done,
+                allow_skills=allow_skills,
             )
 
         result = await self.run(

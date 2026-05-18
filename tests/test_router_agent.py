@@ -115,3 +115,46 @@ async def test_router_agent_uses_local_agent_for_local_backend(tmp_path):
     assert result == "lokal"
     local_agent.run.assert_awaited_once()
     assert router.list_skills() == ["browser"]
+
+
+@pytest.mark.asyncio
+async def test_router_agent_forwards_allow_skills_for_streamed_local_backend(tmp_path):
+    mm = MemoryManager(str(tmp_path))
+    session = mm.load_session("bob")
+    mm.set_agent_override_value(session, "chat", "pawlia_model")
+
+    local_agent = SimpleNamespace(
+        llm=SimpleNamespace(model_name="m-local", model="m-local", temperature=0.3),
+        run=AsyncMock(return_value="lokal"),
+        run_streamed=AsyncMock(return_value="lokal"),
+        on_interim=None,
+        on_skill_start=None,
+        on_skill_step=None,
+        on_skill_done=None,
+        on_model_change=None,
+    )
+
+    router = RouterAgent(
+        user_id="bob",
+        llm_factory=_FakeLLMFactory(),
+        memory=mm,
+        session=session,
+        skills={"browser": object()},
+        local_agent_factory=lambda: local_agent,
+        logger=SimpleNamespace(getChild=lambda _: SimpleNamespace()),
+    )
+
+    result = await router.run_streamed("Hi", allow_skills=False)
+
+    assert result == "lokal"
+    local_agent.run_streamed.assert_awaited_once_with(
+        "Hi",
+        system_prompt=None,
+        images=None,
+        thread_id=None,
+        on_sentence=None,
+        on_skill_start=None,
+        on_skill_step=None,
+        on_skill_done=None,
+        allow_skills=False,
+    )
