@@ -111,6 +111,11 @@ if _AIORTC_AVAILABLE:
             """True while TTS or hold audio is playing."""
             return not self._queue.empty() or self._hold_active
 
+        @property
+        def is_tts_playing(self) -> bool:
+            """True while spoken TTS audio is queued or mid-sentence."""
+            return not self._queue.empty() or self._current_sentence_id is not None
+
         def set_hold_audio(self, pcm_int16: np.ndarray) -> None:
             """Set the hold audio loop (int16 mono PCM at 48 kHz)."""
             self._hold_pcm = pcm_int16
@@ -1627,7 +1632,7 @@ class CallSession:
             while not self._done.is_set():
                 idle_for = time.monotonic() - self._last_user_speech_at
                 if not self._speaking and idle_for >= response_delay:
-                    if self._tts_track and self._tts_track.is_playing:
+                    if self._tts_track and self._tts_track.is_tts_playing:
                         await asyncio.sleep(0.2)
                         continue
                     break

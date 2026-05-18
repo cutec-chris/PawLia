@@ -495,6 +495,35 @@ async def test_process_speech_stops_hold_when_transcription_is_empty():
 
 
 @pytest.mark.asyncio
+async def test_delayed_pending_response_ignores_hold_audio_only_playback():
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    session = CallSession(
+        call_id="call-hold-gating",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-hold-gating",
+        client=SimpleNamespace(room_typing=AsyncMock()),
+        app=app,
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    session._tts_track = SimpleNamespace(is_tts_playing=False, is_playing=True)
+    session._respond_to_transcript = AsyncMock()
+    session._pending_transcripts = ["Hallo da"]
+    session._last_user_speech_at = 0.0
+    session._speaking = False
+    session.RESPONSE_DELAY_SECONDS = 0.0
+
+    with patch("pawlia.interfaces.matrix_call.time.monotonic", return_value=1.0):
+        await session._delayed_pending_response()
+
+    session._respond_to_transcript.assert_awaited_once_with("Hallo da", announce_transcript=False)
+    assert session._pending_transcripts == []
+
+
+@pytest.mark.asyncio
 async def test_process_speech_interrupts_for_meaningful_barge_in():
     app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     client = SimpleNamespace(room_typing=AsyncMock())
