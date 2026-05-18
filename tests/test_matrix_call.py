@@ -300,6 +300,65 @@ def test_live_frame_filter_accepts_speech_band_tone():
     assert session._is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is True
 
 
+def test_resume_speech_after_pause_requires_consecutive_frames():
+    session = CallSession(
+        call_id="call-resume-gate",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-resume-gate",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    resumed, count = session._resume_speech_after_pause(True, silence_count=10, resume_speech_count=0)
+    assert resumed is False
+    assert count == 1
+
+    resumed, count = session._resume_speech_after_pause(True, silence_count=10, resume_speech_count=count)
+    assert resumed is False
+    assert count == 2
+
+    resumed, count = session._resume_speech_after_pause(True, silence_count=10, resume_speech_count=count)
+    assert resumed is True
+    assert count == 3
+
+    resumed, count = session._resume_speech_after_pause(False, silence_count=10, resume_speech_count=2)
+    assert resumed is False
+    assert count == 0
+
+
+def test_start_speech_buffer_includes_pre_speech_frames():
+    session = CallSession(
+        call_id="call-pre-roll",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-pre-roll",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    pre = matrix_call.deque(
+        [
+            np.array([0.1, 0.2], dtype=np.float32),
+            np.array([0.3, 0.4], dtype=np.float32),
+        ]
+    )
+    trigger = np.array([0.5, 0.6], dtype=np.float32)
+
+    chunk = session._start_speech_buffer(pre, trigger)
+
+    assert len(chunk) == 3
+    assert np.array_equal(chunk[0], pre[0])
+    assert np.array_equal(chunk[1], pre[1])
+    assert np.array_equal(chunk[2], trigger)
+
+
 def test_meaningful_interrupt_accepts_keywords_and_full_sentences():
     session = CallSession(
         call_id="call-interrupt-ok",
@@ -551,6 +610,8 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
                     "max_spectral_flatness": 0.61,
                     "min_speech_like_ratio": 0.14,
                     "min_consecutive_speechlike_frames": 6,
+                    "min_resume_speech_frames": 5,
+                    "pre_speech_seconds": 0.8,
                     "webrtcvad_enabled": True,
                     "webrtcvad_mode": 3,
                     "webrtcvad_min_voiced_ratio": 0.22,
@@ -578,6 +639,8 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
         assert session.MAX_SPECTRAL_FLATNESS == pytest.approx(0.61)
         assert session.MIN_SPEECH_LIKE_RATIO == pytest.approx(0.14)
         assert session.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == 6
+        assert session.MIN_RESUME_SPEECH_FRAMES == 5
+        assert session.PRE_SPEECH_SECONDS == pytest.approx(0.8)
         assert session.WEBRTC_VAD_ENABLED is True
         assert session.WEBRTC_VAD_MODE == 3
         assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(0.22)
@@ -609,6 +672,8 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
                 "max_spectral_flatness": -0.1,
                 "min_speech_like_ratio": -1,
                 "min_consecutive_speechlike_frames": 0,
+                "min_resume_speech_frames": 0,
+                "pre_speech_seconds": -1,
                 "webrtcvad_enabled": "maybe",
                 "webrtcvad_mode": 99,
                 "webrtcvad_min_voiced_ratio": 2,
@@ -636,6 +701,8 @@ def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
     assert session.MAX_SPECTRAL_FLATNESS == pytest.approx(CallSession.MAX_SPECTRAL_FLATNESS)
     assert session.MIN_SPEECH_LIKE_RATIO == pytest.approx(CallSession.MIN_SPEECH_LIKE_RATIO)
     assert session.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
+    assert session.MIN_RESUME_SPEECH_FRAMES == CallSession.MIN_RESUME_SPEECH_FRAMES
+    assert session.PRE_SPEECH_SECONDS == pytest.approx(CallSession.PRE_SPEECH_SECONDS)
     assert session.WEBRTC_VAD_ENABLED == CallSession.WEBRTC_VAD_ENABLED
     assert session.WEBRTC_VAD_MODE == CallSession.WEBRTC_VAD_MODE
     assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(CallSession.WEBRTC_VAD_MIN_VOICED_RATIO)

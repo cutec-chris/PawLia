@@ -98,6 +98,8 @@ interfaces:
 #   max_spectral_flatness: 0.72       # reject very noise-like chunks
 #   min_speech_like_ratio: 0.08       # active + speech-like frame ratio required
 #   min_consecutive_speechlike_frames: 4
+#   min_resume_speech_frames: 3       # consecutive speech-like frames to break a running pause
+#   pre_speech_seconds: 0.4           # prepend this much audio before detected speech
 #   webrtcvad_enabled: true           # extra lightweight speech detector
 #   webrtcvad_mode: 2                 # 0..3, higher = stricter
 #   webrtcvad_min_voiced_ratio: 0.12  # voiced-frame ratio required if enabled
