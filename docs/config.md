@@ -194,7 +194,7 @@ If an agent value contains a comma-separated list, models are tried in order whe
 
 LLMs with identical configuration are reused across agent types — no redundant connections.
 
-Per-session and per-thread overrides are written to `workspace/memory/agent_overrides.yaml` and merged on top of the static `agents:` block. Set or clear them at runtime with `/model <path> <name>` (paths: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`).
+Per-session overrides are written to `session/<user>/config.yaml` under `agents:` and merged on top of the static `agents:` block. Set or clear them at runtime with `/model <path> <name>` (paths: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`). Threads inherit the same session-level selection.
 
 If an agent resolves to a Hermes-backed model, PawLia routes that conversation through Hermes instead of its own chat/skill stack.
 

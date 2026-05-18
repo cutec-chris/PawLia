@@ -120,10 +120,6 @@ class Session:
         # Per-thread exchange lists (loaded/seeded lazily by get_thread_context)
         self.thread_contexts: Dict[str, List[Tuple[str, str]]] = {}
 
-        # Per-thread model overrides (loaded lazily by get_thread_model_override)
-        self.thread_model_overrides: Dict[str, Optional[str]] = {}
-        self.thread_agent_overrides: Dict[str, Dict[str, Any]] = {}
-
         # Private mode: exchanges are kept in RAM but not written to disk.
         # Resets on restart (intentional).
         self.private: bool = False            # CLI / session-level
@@ -477,10 +473,6 @@ class MemoryManager:
 
     def _sync_legacy_model_fields(self, session: Session) -> None:
         session.model_override = self.get_agent_override_value(session, "chat")
-        session.thread_model_overrides = {
-            thread_id: self._get_nested_override(overrides, "chat")
-            for thread_id, overrides in session.thread_agent_overrides.items()
-        }
 
     def _read_session_version(self, user_id: str) -> int:
         raw = self._read(self._session_version_path(user_id)).strip()
@@ -735,15 +727,12 @@ class MemoryManager:
         path: str,
         thread_id: Optional[str] = None,
     ) -> Optional[str]:
-        overrides = self.effective_agent_overrides(session, thread_id) if thread_id else session.agent_overrides
-        return self._get_nested_override(overrides, path)
+        return self._get_nested_override(session.agent_overrides, path)
 
     def set_agent_overrides(
         self,
         session: Session,
         overrides: Optional[Dict[str, Any]],
-        *,
-        thread_id: Optional[str] = None,
     ) -> None:
         cleaned = self._clean_agent_overrides(overrides or {})
         session.agent_overrides = cleaned
@@ -755,8 +744,6 @@ class MemoryManager:
         session: Session,
         path: str,
         value: Optional[str],
-        *,
-        thread_id: Optional[str] = None,
     ) -> None:
         target = self.get_agent_overrides(session)
         parts = [part for part in path.split(".") if part]
@@ -775,7 +762,7 @@ class MemoryManager:
         else:
             self._delete_nested_path(target, parts)
 
-        self.set_agent_overrides(session, target, thread_id=thread_id)
+        self.set_agent_overrides(session, target)
 
     def set_model_override(self, session: Session, model: Optional[str]) -> None:
         """Persist a model override for this session.  Pass None to clear."""
@@ -828,13 +815,21 @@ class MemoryManager:
         return session.thread_contexts[thread_id]
 
     def get_thread_model_override(self, session: Session, thread_id: str) -> Optional[str]:
-        """Return the model override for a thread, loading from disk on first access."""
+        """Return the session-wide chat model override.
+
+        Thread-specific model overrides no longer exist; threads inherit the
+        same per-session agent selection.
+        """
         return session.model_override
 
     def set_thread_model_override(
         self, session: Session, thread_id: str, model: Optional[str]
     ) -> None:
-        """Persist a model override for a specific thread.  Pass None to clear."""
+        """Persist the session-wide chat model override.
+
+        Thread-specific model overrides no longer exist; threads inherit the
+        same per-session agent selection.
+        """
         self.set_model_override(session, model)
 
     def toggle_private_thread(self, session: Session, thread_id: str) -> bool:

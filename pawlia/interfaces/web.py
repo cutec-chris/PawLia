@@ -237,7 +237,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
             if result.invalidate_agent:
                 agent_cache.invalidate(user_id)
             if result.action == "show":
-                return web.json_response({"response": f"**Default Model ({result.ctx_label}):** `{result.model}`"})
+                return web.json_response({"response": f"**Active Chat Model ({result.ctx_label}):** `{result.model}`"})
             if result.action == "invalid_path":
                 return web.json_response({"response": "Ungültiger Model-Pfad. Erlaubt: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`."})
             if result.action == "cleared":

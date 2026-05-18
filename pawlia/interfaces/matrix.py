@@ -495,7 +495,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         room: MatrixRoom, session_id: str, args: str, thread_id: Optional[str]
     ) -> None:
         """Handle '//model [model]' or '//model [path] [model]'."""
-        ctx_label = f"Thread `{thread_id[:8]}…`" if thread_id else "Room"
+        ctx_label = "Room-Session"
         result = handle_model_command(app, session_id, args, thread_id=thread_id, ctx_label=ctx_label)
 
         if result.invalidate_agent:
@@ -513,9 +513,9 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         avail = ", ".join(f"`{m}`" for m in result.available) or "_(keine konfiguriert)_"
         if result.action == "show":
             await _reply(
-                f"**Default-Modell** [{result.ctx_label}]: `{result.model}`\n"
+                f"**Aktives Chat-Modell** [{result.ctx_label}]: `{result.model}`\n"
                 f"**Verfügbar:** {avail}\n"
-                f"_Default setzen: `//model <modell>` — Agent setzen: `//model <pfad> <modell>` — Löschen: `//model <pfad> off`_"
+                f"_Session-Chatmodell setzen: `//model <modell>` — Agent setzen: `//model <pfad> <modell>` — Löschen: `//model <pfad> off`_"
             )
         elif result.action == "invalid_path":
             await _reply("Ungültiger Model-Pfad. Erlaubt: `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`.")

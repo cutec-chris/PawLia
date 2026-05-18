@@ -48,7 +48,7 @@ Subsequent messages to that thread work exactly like any other thread: reply ins
 
 ```
 /model                       # show all active model overrides for this context
-/model <name>                # shorthand for /model chat <name>
+/model <name>                # shorthand for /model chat <name> (session-wide)
 /model <path> <name>         # override one agent role
 /model <path> off            # clear that override
 ```
@@ -72,18 +72,18 @@ Matrix prefix: `//model …`.
 
 | Interface | Scope of `/model …` |
 |-----------|---------------------|
-| Telegram  | Thread-local when sent inside a thread; session-wide otherwise |
-| Matrix    | Thread-local when sent as a thread reply; room-wide otherwise |
+| Telegram  | Session-wide |
+| Matrix    | Room/session-wide |
 | CLI       | Session-wide |
 
-Thread-local overrides do not affect the main conversation or other threads. All overrides are persisted to `workspace/memory/agent_overrides.yaml` and survive restarts.
+All overrides are persisted in `session/<user>/config.yaml` and survive restarts. Threads inherit the same session-level agent selection; only `/private` remains thread-local.
 
 ### Examples
 
 ```
 /model                            # → "chat=smart  skills.browser=fast"
 /model qwen3.5:4b                 # shorthand: agents.chat = qwen3.5:4b
-/model chat smart,fast            # explicit chat override with failover chain
+/model chat smart,fast            # explicit session chat override with failover chain
 /model default smart,fast         # change the global fallback
 /model skills.browser fast        # override one skill's model
 /model skills.browser off         # clear that override

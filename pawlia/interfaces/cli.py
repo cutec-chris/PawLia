@@ -170,7 +170,7 @@ async def start_cli(app: "App") -> None:
             args_str = user_input.strip()[len("/model"):].strip()
             result = handle_model_command(app, "cli_user", args_str)
             if result.action == "show":
-                print(f"Default-Modell: {result.model}\n")
+                print(f"Aktives Chat-Modell: {result.model}\n")
             elif result.action == "invalid_path":
                 print("Ungültiger Model-Pfad. Erlaubt: default, chat, skill_runner, vision, compiler, skills.<name>\n")
             else:

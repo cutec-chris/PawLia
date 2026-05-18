@@ -116,6 +116,58 @@ def _valid_agent_path(path: str) -> bool:
     return path in VALID_AGENT_PATHS or (path.startswith("skills.") and len(path.split(".")) == 2)
 
 
+def _read_session_agents(user_id: str, session_dir: str) -> dict:
+    return _read_session_cfg(user_id, session_dir).get("agents") or {}
+
+
+def _write_session_agents(user_id: str, session_dir: str, agents: dict) -> None:
+    data = _read_session_cfg(user_id, session_dir)
+    if agents:
+        data["agents"] = agents
+    else:
+        data.pop("agents", None)
+    _write_session_cfg(user_id, session_dir, data)
+
+
+def _delete_path(data: dict, path: str) -> None:
+    keys = path.split(".")
+    current = data
+    parents = []
+    for key in keys[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            return
+        parents.append((current, key))
+        current = child
+    current.pop(keys[-1], None)
+    if current:
+        return
+    for parent, key in reversed(parents):
+        child = parent.get(key)
+        if isinstance(child, dict) and not child:
+            parent.pop(key, None)
+        else:
+            break
+
+
+def _effective_chat_selector(config: dict, agent_overrides: dict) -> str:
+    try:
+        from pawlia.llm import LLMFactory
+
+        return LLMFactory(config).default_model_name("chat", agent_overrides=agent_overrides)
+    except Exception:
+        chat = _get_path(agent_overrides, "chat")
+        if isinstance(chat, str) and chat.strip():
+            return chat.strip()
+        agents = config.get("agents") or {}
+        if isinstance(agents, dict):
+            for path in ("chat", "default", "defaults"):
+                value = agents.get(path)
+                if isinstance(value, str) and value.strip():
+                    return value.strip().split(",")[0].strip()
+        return "(unresolved)"
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -153,19 +205,22 @@ def cmd_model(args) -> None:
         models = data.get("models", {})
 
     if not args.name:
-        # show: current override + available model keys
         user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
         session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
         if not user_id or not session_dir:
             _out({"success": False, "error": "user-id and session-dir required"})
             return
-        current = ""
-        agents_path = os.path.join(session_dir, user_id, "workspace", "memory", "agent_overrides.yaml")
-        if os.path.isfile(agents_path):
-            overrides = _read(agents_path)
-            current = str((overrides or {}).get("chat", "") or "").strip()
+        overrides = _read_session_agents(user_id, session_dir)
+        current = str(_get_path(overrides, "chat") or "").strip()
         available = {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)}
-        _out({"success": True, "model": current or "(default)", "available_models": available})
+        effective = _effective_chat_selector(data if config_path else {}, overrides)
+        _out({
+            "success": True,
+            "model": current or "(session default)",
+            "session_override": current or None,
+            "effective_model": effective,
+            "available_models": available,
+        })
         return
 
     # Name must be a known config key
@@ -173,6 +228,16 @@ def cmd_model(args) -> None:
         available = {key: cfg.get("model", key) for key, cfg in models.items() if isinstance(cfg, dict)}
         _out({"success": False, "error": f"Unknown model '{args.name}'", "available_models": available})
         return
+
+    user_id = args.user_id or os.environ.get("PAWLIA_USER_ID")
+    session_dir = args.session_dir or os.environ.get("PAWLIA_SESSION_DIR")
+    if not user_id or not session_dir:
+        _out({"success": False, "error": "user-id and session-dir required"})
+        return
+
+    overrides = _read_session_agents(user_id, session_dir)
+    _set_path(overrides, "chat", args.name)
+    _write_session_agents(user_id, session_dir, overrides)
 
     _out({"__directive__": "set_agent_override", "path": "chat", "value": args.name})
     _out({"success": True, "model": args.name, "message": f"Model auf '{args.name}' gesetzt."})
@@ -191,10 +256,7 @@ def cmd_agent(args) -> None:
         _out({"success": False, "error": "user-id and session-dir required"})
         return
 
-    memory_dir = os.path.join(session_dir, user_id, "workspace", "memory")
-    os.makedirs(memory_dir, exist_ok=True)
-    override_path = os.path.join(memory_dir, "agent_overrides.yaml")
-    overrides = _read(override_path) if os.path.isfile(override_path) else {}
+    overrides = _read_session_agents(user_id, session_dir)
     flat = _flatten_overrides(overrides)
 
     if not args.path:
@@ -216,7 +278,9 @@ def cmd_agent(args) -> None:
         return
 
     if args.off:
-        _out({"__directive__": "set_agent_override", "path": args.path, "value": None, "thread": args.thread})
+        _delete_path(overrides, args.path)
+        _write_session_agents(user_id, session_dir, overrides)
+        _out({"__directive__": "set_agent_override", "path": args.path, "value": None})
         _out({"success": True, "path": args.path, "value": "(default)", "scope": "session"})
         return
 
@@ -230,7 +294,9 @@ def cmd_agent(args) -> None:
         })
         return
 
-    _out({"__directive__": "set_agent_override", "path": args.path, "value": args.value, "thread": args.thread})
+    _set_path(overrides, args.path, args.value)
+    _write_session_agents(user_id, session_dir, overrides)
+    _out({"__directive__": "set_agent_override", "path": args.path, "value": args.value})
     _out({"success": True, "path": args.path, "value": args.value, "scope": "session"})
 
 
@@ -601,7 +667,6 @@ def main():
     p.add_argument("--path", default=None, help="Relative agents path, e.g. chat or skills.browser")
     p.add_argument("--value", default=None, help="Selector value, e.g. smart,fast")
     p.add_argument("--off", action="store_true", help="Clear the override at --path")
-    p.add_argument("--thread", default=None, help="Thread ID (omit for session-level)")
     p.add_argument("--user-id", default=None)
     p.add_argument("--session-dir", default=None)
 

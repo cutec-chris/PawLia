@@ -5,28 +5,36 @@ from pawlia.memory import MemoryManager
 
 
 def _app(tmp_path):
-    return SimpleNamespace(
-        config={
-            "models": {
-                "fast": {},
-                "deep": {},
-            },
+    from pawlia.llm import LLMFactory
+
+    config = {
+        "models": {
+            "fast": {"model": "m-fast", "provider": "test"},
+            "deep": {"model": "m-deep", "provider": "test"},
         },
+        "providers": {
+            "test": {"apiBase": "http://test", "apiKey": "test"},
+        },
+        "agents": {"default": "fast"},
+    }
+    return SimpleNamespace(
+        config=config,
+        llm=LLMFactory(config),
         memory=MemoryManager(str(tmp_path)),
     )
 
 
-def test_model_one_arg_sets_default_override(tmp_path):
+def test_model_one_arg_sets_chat_override(tmp_path):
     app = _app(tmp_path)
 
     result = handle_model_command(app, "u1", "fast")
     session = app.memory.load_session("u1")
 
     assert result.action == "set"
-    assert result.path == "default"
+    assert result.path == "chat"
     assert result.model == "fast"
-    assert app.memory.get_agent_override_value(session, "default") == "fast"
-    assert app.memory.get_agent_override_value(session, "chat") is None
+    assert app.memory.get_agent_override_value(session, "chat") == "fast"
+    assert app.memory.get_agent_override_value(session, "default") is None
 
 
 def test_model_two_args_sets_agent_override(tmp_path):
@@ -64,7 +72,7 @@ def test_model_invalid_two_arg_path_is_rejected(tmp_path):
     assert app.memory.get_agent_overrides(session) == {}
 
 
-def test_model_one_arg_off_clears_default_override(tmp_path):
+def test_model_one_arg_off_clears_chat_override(tmp_path):
     app = _app(tmp_path)
     handle_model_command(app, "u1", "fast")
 
@@ -72,5 +80,15 @@ def test_model_one_arg_off_clears_default_override(tmp_path):
     session = app.memory.load_session("u1")
 
     assert result.action == "cleared"
-    assert result.path == "default"
-    assert app.memory.get_agent_override_value(session, "default") is None
+    assert result.path == "chat"
+    assert app.memory.get_agent_override_value(session, "chat") is None
+
+
+def test_model_show_resolves_global_chat_model_when_no_override(tmp_path):
+    app = _app(tmp_path)
+
+    result = handle_model_command(app, "u1", "")
+
+    assert result.action == "show"
+    assert result.path == "chat"
+    assert result.model == "fast (global)"

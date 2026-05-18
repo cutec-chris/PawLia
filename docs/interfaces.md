@@ -41,8 +41,8 @@ See [commands.md](commands.md) for the full reference. Quick overview:
 | Command | Effect |
 |---------|--------|
 | `/thread <msg>` | Run message in a new isolated thread context, reply in-thread |
-| `/model [name]` | Show or switch the active chat model for this context |
-| `/model <path> <name>` | Override a specific agent role (`chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`, `default`) |
+| `/model [name]` | Show or switch the active session chat model |
+| `/model <path> <name>` | Override a specific session agent role (`chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>`, `default`) |
 | `/status` | Show session status (active model, idle, exchange count, threads) |
 | `/private` | Toggle private mode (threads only) |
 | `/reload` | Reload config, models, bundled skills, and scheduler settings |
@@ -97,8 +97,8 @@ Commands use `//` as prefix instead of `/`:
 | Command | Effect |
 |---------|--------|
 | `//thread <msg>` | Respond as a Matrix thread reply (proper `m.thread` relation) |
-| `//model [name]` | Show or switch the active chat model |
-| `//model <path> <name>` | Override a specific agent role for the room/thread |
+| `//model [name]` | Show or switch the active room/session chat model |
+| `//model <path> <name>` | Override a specific session agent role for the room |
 | `//status` | Show session status |
 | `//private` | Toggle private mode (thread replies only) |
 | `//reload` | Reload config, models, bundled skills, and scheduler settings |

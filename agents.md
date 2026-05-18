@@ -166,7 +166,7 @@ session/{user_id}/
 │   │   ├── 2026-03-15.md           # daily chat log (main + embedded thread sections)
 │   │   ├── memory.md                # persistent user facts
 │   │   ├── context_summary.md       # LLM-generated conversation summary
-│   │   └── agent_overrides.yaml     # session-level agent/model overrides
+│   ├── config.yaml                  # session-level overrides (agents, tts, disabled_skills, user)
 │   ├── calendar/                   # Full Calendar plugin events
 │   │   └── 2026-04-10 Meeting.md   # one .md per event (frontmatter)
 │   ├── tasks.md                    # Obsidian Tasks plugin format

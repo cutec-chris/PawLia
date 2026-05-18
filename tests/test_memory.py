@@ -177,19 +177,18 @@ class TestMemoryManager:
             mm.set_agent_override_value(session, "default", "smart,fast")
             mm.set_agent_override_value(session, "skills.browser", "groq-fast,fast")
             mm.set_agent_override_value(session, "chat", "smart")
-            mm.set_agent_override_value(session, "chat", "vision-fast", thread_id="t1")
 
             assert mm.get_agent_override_value(session, "default") == "smart,fast"
             assert mm.get_agent_override_value(session, "skills.browser") == "groq-fast,fast"
-            assert mm.get_agent_override_value(session, "chat", thread_id="t1") == "vision-fast"
+            assert mm.get_agent_override_value(session, "chat") == "smart"
             assert mm.effective_agent_overrides(session, "t1")["default"] == "smart,fast"
-            assert mm.effective_agent_overrides(session, "t1")["chat"] == "vision-fast"
+            assert mm.effective_agent_overrides(session, "t1")["chat"] == "smart"
 
             mm2 = self._make_mm(tmpdir)
             session2 = mm2.load_session("u1")
             assert mm2.get_agent_override_value(session2, "default") == "smart,fast"
             assert mm2.get_agent_override_value(session2, "skills.browser") == "groq-fast,fast"
-            assert mm2.get_agent_override_value(session2, "chat", thread_id="t1") == "vision-fast"
+            assert mm2.get_agent_override_value(session2, "chat") == "smart"
 
     def test_set_model_override_updates_chat_agent_override(self):
         with tempfile.TemporaryDirectory() as tmpdir:

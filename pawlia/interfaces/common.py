@@ -99,24 +99,36 @@ def handle_model_command(
     The caller is responsible for formatting and sending the response,
     and for invalidating the agent cache if ``result.invalidate_agent``.
 
-    ``/model <model>`` sets the default model selector.  ``/model <path>
+    ``/model <model>`` sets the chat model selector.  ``/model <path>
     <model>`` sets a specific agent selector.
     """
     session = app.memory.load_session(user_id)
     if ctx_label is None:
-        ctx_label = f"Thread {thread_id}" if thread_id else "Main"
+        ctx_label = "Session"
     available = list_available_models(app)
+    llm_factory = getattr(app, "llm", None)
 
     if not args.strip():
-        current = app.memory.get_agent_override_value(session, "default", thread_id=thread_id) or "(default)"
-        return ModelCommandResult("show", current, ctx_label, path="default", available=available)
+        current = app.memory.get_agent_override_value(session, "chat")
+        if current:
+            return ModelCommandResult("show", current, ctx_label, path="chat", available=available)
+        if llm_factory is not None:
+            effective = llm_factory.default_model_name(
+                "chat",
+                agent_overrides=app.memory.effective_agent_overrides(session),
+            )
+        else:
+            agents = app.config.get("agents") or {}
+            effective = str(agents.get("chat") or agents.get("default") or agents.get("defaults") or "(unresolved)")
+            effective = effective.split(",")[0].strip() if effective else "(unresolved)"
+        return ModelCommandResult("show", f"{effective} (global)", ctx_label, path="chat", available=available)
 
     first, sep, rest = args.strip().partition(" ")
     if sep:
         path = first.strip()
         new_model = rest.strip()
     else:
-        path = "default"
+        path = "chat"
         new_model = first.strip()
 
     if not _is_valid_agent_path(path):
@@ -126,13 +138,13 @@ def handle_model_command(
         )
 
     if new_model.lower() in _CLEAR_TOKENS:
-        app.memory.set_agent_override_value(session, path, None, thread_id=thread_id)
+        app.memory.set_agent_override_value(session, path, None)
         return ModelCommandResult(
             "cleared", "(default)", ctx_label,
             path=path, available=available, invalidate_agent=True,
         )
 
-    app.memory.set_agent_override_value(session, path, new_model, thread_id=thread_id)
+    app.memory.set_agent_override_value(session, path, new_model)
     return ModelCommandResult(
         "set", new_model, ctx_label,
         path=path, available=available, invalidate_agent=True,

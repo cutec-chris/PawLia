@@ -1,6 +1,6 @@
 ---
 name: config
-description: Read and write pawlia configuration settings (interfaces, TTS, transcription, agents, skill-config), override session-local agent selection at runtime, and toggle private mode. Use this to enable/disable features, change providers, adjust interface settings, configure skill parameters, change active agent models, or enable/disable private mode.
+description: Read and write pawlia configuration settings (interfaces, TTS, transcription, agents, skill-config), override session-local agent selection at runtime, and toggle private mode. Use this to enable/disable features, change providers, adjust interface settings, configure skill parameters, change active session models, or enable/disable private mode.
 license: MIT
 metadata:
   author: Christian Ulrich
@@ -69,15 +69,15 @@ python <scripts_dir>/config.py set --path skill-config.memory.idle_minutes --val
 
 **TTS validation:** writes to `tts.provider`, `tts.piper.model`, and `tts.edge.voice` are validated — an unknown value is rejected with a list of valid options instead of being written. A wrong voice silently breaks TTS in the VoIP call, so always pick from the returned `available_voices`. To force a value not in the list (e.g. an English Edge voice), append `--force`.
 
-## Switch the active chat model (runtime shorthand)
+## Switch the active chat model (session shorthand)
 
-Show the current model:
+Show the current session override and the effective active chat model:
 
 ```
 python <scripts_dir>/config.py model
 ```
 
-Switch to a different model (takes effect immediately, no restart needed):
+Switch to a different model for this session (takes effect immediately, no restart needed):
 
 ```
 python <scripts_dir>/config.py model --name qwen3.5:latest
@@ -85,6 +85,8 @@ python <scripts_dir>/config.py model --name qwen3.5:latest
 
 This is shorthand for overriding `agents.chat`.
 The model name must match a key in the `models` section of config.yaml.
+
+This is shorthand for overriding `session.agents.chat`.
 
 ## Override runtime `agents:` selection
 
@@ -107,12 +109,6 @@ Set an override path:
 python <scripts_dir>/config.py agent --path chat --value smart,fast
 python <scripts_dir>/config.py agent --path default --value smart,fast
 python <scripts_dir>/config.py agent --path skills.browser --value fast
-```
-
-Thread-local override:
-
-```
-python <scripts_dir>/config.py agent --thread abc123 --path chat --value hermes
 ```
 
 Clear one override path:
@@ -268,4 +264,4 @@ All commands return JSON. On success: `{"success": true, ...}`. On error: `{"suc
 
 After `set`, the response includes `"value_read_back"` — the value actually written to disk. Always compare it against what you intended to set and report any discrepancy to the user.
 
-**Note:** Changes to config.yaml (via `set`) take effect after the next restart. The `model`, `agent`, `voice`, and `disabled-skills` commands take effect immediately without restart.
+**Note:** Changes to config.yaml (via `set`) take effect after the next restart. The `model`, `agent`, `voice`, and `disabled-skills` commands take effect immediately without restart. Model and agent overrides are session-wide; only `private --thread` remains thread-local.

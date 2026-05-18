@@ -220,9 +220,9 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         avail = ", ".join(f"<code>{m}</code>" for m in result.available) or "<i>(keine konfiguriert)</i>"
         if result.action == "show":
             await update.message.reply_text(
-                f"<b>Default-Modell</b> [{result.ctx_label}]: <code>{result.model}</code>\n"
+                f"<b>Aktives Chat-Modell</b> [{result.ctx_label}]: <code>{result.model}</code>\n"
                 f"<b>Verfügbar:</b> {avail}\n"
-                f"<i>Default setzen: /model &lt;modell&gt; — Agent setzen: /model &lt;pfad&gt; &lt;modell&gt; — Löschen: /model &lt;pfad&gt; off</i>",
+                f"<i>Session-Chatmodell setzen: /model &lt;modell&gt; — Agent setzen: /model &lt;pfad&gt; &lt;modell&gt; — Löschen: /model &lt;pfad&gt; off</i>",
                 parse_mode=ParseMode.HTML,
             )
         elif result.action == "invalid_path":

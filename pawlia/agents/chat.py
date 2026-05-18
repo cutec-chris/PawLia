@@ -976,28 +976,21 @@ class ChatAgent(BaseAgent):
             if directive == "set_model":
                 model = obj.get("model")
                 if model and self.memory and self.session:
-                    if thread_id:
-                        self.memory.set_thread_model_override(self.session, thread_id, model)
-                        self.logger.info("Directive: thread '%s' model override set to '%s'", thread_id, model)
-                    else:
-                        self.memory.set_model_override(self.session, model)
-                        self.logger.info("Directive: model override set to '%s'", model)
+                    self.memory.set_model_override(self.session, model)
+                    self.logger.info("Directive: session model override set to '%s'", model)
                     if self.on_model_change:
                         self.on_model_change(model)
             elif directive == "set_agent_override":
                 path = str(obj.get("path", "") or "").strip()
                 value = obj.get("value")
                 if path and self.memory and self.session:
-                    target_thread = obj.get("thread") or thread_id
                     self.memory.set_agent_override_value(
                         self.session,
                         path,
                         str(value).strip() if isinstance(value, str) and str(value).strip() else None,
-                        thread_id=target_thread,
                     )
                     self.logger.info(
-                        "Directive: %s agent override '%s' -> %r",
-                        f"thread '{target_thread}'" if target_thread else "session",
+                        "Directive: session agent override '%s' -> %r",
                         path,
                         value,
                     )
