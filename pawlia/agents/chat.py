@@ -666,6 +666,7 @@ class ChatAgent(BaseAgent):
         on_skill_start: Optional[SkillStartCallback] = None,
         on_skill_step: Optional[InterimCallback] = None,
         on_skill_done: Optional[InterimCallback] = None,
+        allow_skills: bool = True,
     ) -> str:
         """Like :meth:`run` but streams the LLM and calls *on_sentence* per sentence.
 
@@ -704,6 +705,7 @@ class ChatAgent(BaseAgent):
                 ))
 
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
+        first_turn_llm = bound_llm if allow_skills else unbound_llm
 
         augmented_input = _augment_with_workspace_refs(user_input, self.session)
 
@@ -721,7 +723,7 @@ class ChatAgent(BaseAgent):
         _partial_text = ""
         try:
             accumulated, raw_text = await self._stream_with_sentences(
-                messages, bound_llm, on_sentence,
+                messages, first_turn_llm, on_sentence,
             )
             _partial_text = raw_text
 
@@ -731,11 +733,18 @@ class ChatAgent(BaseAgent):
             # If the streamed response is a fake tool call, retry non-streamed
             if accumulated and self._is_fake_tool_call(accumulated):
                 self.logger.warning("Fake tool call detected in streamed turn 1, retrying non-streamed")
-                accumulated, messages = await self._invoke_with_tool_retry(messages, llm=bound_llm)
+                retry_llm = bound_llm if allow_skills else unbound_llm
+                accumulated, messages = await self._invoke_with_tool_retry(messages, llm=retry_llm)
                 raw_text = accumulated.content if isinstance(accumulated.content, str) else ""
                 _partial_text = raw_text
 
             if not accumulated or not getattr(accumulated, "tool_calls", None):
+                result = self.strip_thinking(raw_text)
+                await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
+                return result
+
+            if not allow_skills:
+                self.logger.warning("run_streamed received tool calls while allow_skills=False; ignoring tool calls")
                 result = self.strip_thinking(raw_text)
                 await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
                 return result

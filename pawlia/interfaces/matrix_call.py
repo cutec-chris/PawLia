@@ -1062,6 +1062,7 @@ class CallSession:
                 system_prompt=call_prompt,
                 thread_id=self.thread_id,
                 on_sentence=_on_sentence,
+                allow_skills=False,
             )
             self._prepared_greeting = (response, prepared_pcm)
             logger.info("call %s: greeting prepared", self.call_id[:8])
@@ -1146,6 +1147,7 @@ class CallSession:
                 system_prompt=call_prompt,
                 thread_id=self.thread_id,
                 on_sentence=_on_sentence,
+                allow_skills=False,
             )
             if self._done.is_set() or self._hungup:
                 logger.info("call %s: greeting completed after hangup — not posting to room", self.call_id[:8])
