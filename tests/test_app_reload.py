@@ -67,3 +67,12 @@ def test_handle_reload_command_reports_restart_only_settings(monkeypatch, tmp_pa
     assert "Konfiguration neu geladen" in result.message
     assert "session_dir changed" in result.message
     assert "Prozess neu starten" in result.message
+
+
+def test_app_normalizes_relative_session_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr("pawlia.app.SkillLoader.discover", lambda *args, **kwargs: {})
+
+    app = App(_config(session_dir="session"), config_path=str(tmp_path / "config.yaml"))
+
+    assert app.session_dir.endswith("/session")
+    assert app.session_dir.startswith("/")

@@ -105,6 +105,8 @@ All interfaces follow the same pattern: get a router via `app.make_agent(user_id
 
 Server mode (`--mode server`) starts all configured interfaces in parallel via `asyncio.gather`.
 
+**End-to-end API evaluation workflow:** For full-system tests, run PawLia in `--mode server` with `interfaces.openai` enabled and send normal chat turns to `POST /v1/chat/completions`. This path exercises the real `RouterAgent`/`ChatAgent`, memory, workspace search, and skill stack exactly as external clients would use it. For stable multi-turn sessions, keep the same `X-User-Id` header (or `user` field) across requests; do not test individual skill scripts directly if the goal is to validate the integrated agent behavior.
+
 Each interface registers a notification callback with the Scheduler for proactive messages:
 - **CLI**: Overwrites current prompt line, prints notification, reprints `You: `
 - **Telegram**: Sends via `bot.send_message()` to tracked `chat_id`
@@ -199,11 +201,12 @@ block with relevant workspace content (see Workspace Search below).
 
 Identity files (`soul.md`, `identity.md`, `user.md`) are copied as templates from `pawlia/prompts/` on first use. `bootstrap.md` is removed once all three identity files are filled and differ from their templates.
 
-**Workspace Search** (`pawlia/workspace_search.py`): On the **first user turn** of each session, `ChatAgent` runs a BM25 keyword search across all workspace markdown files and caches the results as `session.workspace_refs`. Subsequent turns reuse the cache — no re-scan. Results are injected into the system prompt as a `## Workspace-Referenzen` block so the model knows what's available and can navigate further via the files skill.
+**Workspace Search** (`pawlia/workspace_search.py`): On each **substantive user turn**, `ChatAgent` runs a BM25 keyword search across the workspace's navigable markdown knowledge sources and stores the current hits as `session.workspace_refs`. Results are injected into the user message as a `## Workspace Notes Available` block so the model knows what's available and can navigate further via the files skill.
 
-- **Scope:** `workspace/wiki/topics/`, `workspace/research/`, loose `.md` files at workspace root. Excludes `workspace/memory/` (raw chat logs — the Dream Wiki is the distilled version) and all identity files.
-- **Algorithm:** BM25 via `rank_bm25`; falls back to simple term-frequency if the library is absent. Sections are split by ATX headings, scored individually.
-- **Injection format:** Each hit renders as `[[wikilink]] (path) — **Heading**\n  > snippet`. The files skill resolves `[[wikilink]]` syntax to workspace paths (slug → `wiki/topics/{slug}.md`, path-style `[[a/b]]` → `a/b.md`).
+- **Scope:** `workspace/wiki/topics/`, `workspace/research/`, loose `.md` files at workspace root. Excludes `workspace/memory/` (raw chat logs — the Dream Wiki is the distilled version) and all identity files. This search stays available even when a different memory backend is configured.
+- **Algorithm:** BM25 via `rank_bm25`; falls back to simple term-frequency if the library is absent. Retrieval units are Markdown sections (ATX headings, or paragraph chunks for long headingless files) rather than whole files.
+- **Ranking boosts:** heading matches, page-title/path matches, `## Related` sections, and lightly linked wiki pages receive small additive boosts. No embeddings are used.
+- **Injection format:** Each hit renders as an Obsidian-compatible section ref such as `[[topic/slug#Heading]]`, `[[person/max#Heading]]`, or `[[path/to/file#Heading]]` plus a file-level `files read` suggestion. The files skill resolves path-style wikilinks to workspace paths.
 - **Config** (`workspace-search:` in `config.yaml`): `enabled`, `top_k` (default 5), `min_score` (0–1, fraction of best hit), `snippet_chars`, `exclude_dirs`, `include_root_files`.
 
 **Summarization triggers:**

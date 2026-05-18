@@ -36,7 +36,9 @@ class App:
 
         # Session directory (same location as legacy system)
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.session_dir = config.get("session_dir", os.path.join(pkg_dir, "session"))
+        self.session_dir = os.path.abspath(
+            config.get("session_dir", os.path.join(pkg_dir, "session"))
+        )
         self.memory = MemoryManager(self.session_dir, logger=self.logger.getChild("memory"))
         self._pkg_dir = pkg_dir
         self._skills_lock = threading.Lock()
@@ -82,7 +84,9 @@ class App:
         self.config = new_config
         warnings: List[str] = []
 
-        new_session_dir = new_config.get("session_dir", old_session_dir)
+        new_session_dir = os.path.abspath(
+            new_config.get("session_dir", old_session_dir)
+        )
         if new_session_dir != old_session_dir:
             warnings.append(
                 "session_dir changed in config but stays unchanged until process restart"

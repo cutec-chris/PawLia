@@ -487,8 +487,14 @@ workspace/wiki/                   # In the Obsidian vault
   index.md                        # Catalog of all pages
   log.md                          # Chronological audit log
   topics/
-    projekt-thalia.md             # One wiki page per topic/entity
-    linux-admin.md
+    person/
+      max-mustermann.md
+    object/
+      balu.md
+    project/
+      projekt-thalia.md
+    topic/
+      linux-admin.md
 
 memory_index/                     # Outside the vault (internal tracking)
   dreamed_files.json              # Which logs have been processed
@@ -541,9 +547,9 @@ workspace-search:
 | `min_score` | Score floor as a fraction of the best hit's score. |
 | `snippet_chars` | Characters of context shown next to each hit. |
 | `exclude_dirs` | Directories under `workspace/` to skip (always includes `memory/`). |
-| `include_root_files` | Include loose `.md` files at the workspace root in addition to `wiki/topics/` and `research/`. |
+| `include_root_files` | Include loose `.md` files at the workspace root in addition to `wiki/topics/` (including type subfolders like `topic/`, `person/`, `object/`) and `research/`. |
 
-The search prefers `rank_bm25` when installed; otherwise it falls back to a simple term-frequency scorer. Identity files (`soul.md`, `identity.md`, `user.md`, `memory.md`, `bootstrap.md`) and raw chat logs (`workspace/memory/`) are always excluded — the Dream Wiki under `workspace/wiki/topics/` is the distilled, searchable layer.
+The search prefers `rank_bm25` when installed; otherwise it falls back to a simple term-frequency scorer. Retrieval runs on Markdown sections, with small boosts for heading matches and related/link-rich sections. Identity files (`soul.md`, `identity.md`, `user.md`, `memory.md`, `bootstrap.md`) and raw chat logs (`workspace/memory/`) are always excluded — the Dream Wiki under `workspace/wiki/topics/` is the distilled, searchable layer.
 
 ## CalDAV (Radicale / Nextcloud sync)
 

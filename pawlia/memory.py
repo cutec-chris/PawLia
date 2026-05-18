@@ -135,9 +135,6 @@ class Session:
         self.pending_topic_heading: Optional[str] = None
 
 
-_DEFAULT_READ_QUERY = "<keywords>"
-
-
 def _format_workspace_refs(hits: list, user_query: str = "") -> str:
     """Format workspace hits as minimal pointers — model must call `files read`.
 
@@ -149,7 +146,6 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
     research/*/README.md hits are deduped against their project's content files
     so each project appears once with one ready-to-use read call.
     """
-    read_query = _read_query_for(user_query)
     lines = [
         "## Workspace Notes Available",
         "These wiki files were keyword-matched against the user's recent "
@@ -197,55 +193,41 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
 
     for project_dir, (readme_ref, description) in research_readmes.items():
         content_hit = research_content.get(project_dir)
-        content_ref = content_hit.wikilink_ref if content_hit else readme_ref
+        content_ref = content_hit.page_ref if content_hit else readme_ref
         entry = f"- **{readme_ref}** — {description or project_dir}"
         if content_hit and content_hit.heading:
-            entry += f" *(matched section: {content_hit.heading})*"
-        entry += f"\n  → `files read --query \"{read_query}\" {content_ref}`"
+            entry += f" *(matched section: {content_hit.section_ref})*"
+        entry += f"\n  → `{_workspace_read_suggestion(content_hit, content_ref)}`"
         lines.append(entry)
         rendered_projects.add(project_dir)
 
     for project_dir, hit in research_content.items():
         if project_dir in rendered_projects:
             continue
-        ref = hit.wikilink_ref
+        ref = hit.section_ref
         entry = f"- **{ref}** *(research/{project_dir})*"
-        if hit.heading:
-            entry += f" *(section: {hit.heading})*"
-        entry += f"\n  → `files read --query \"{read_query}\" {ref}`"
+        entry += f"\n  → `{_workspace_read_suggestion(hit, hit.page_ref)}`"
         lines.append(entry)
 
     for hit in other_hits:
-        ref = hit.wikilink_ref
+        ref = hit.section_ref
         entry = f"- **{ref}**"
-        if hit.heading:
-            entry += f" *(section: {hit.heading})*"
-        entry += f"\n  → `files read --query \"{read_query}\" {ref}`"
+        entry += f"\n  → `{_workspace_read_suggestion(hit, hit.page_ref)}`"
         lines.append(entry)
 
     return "\n".join(lines)
 
 
-def _read_query_for(user_query: str) -> str:
-    """Distill the user message into a 3–6 word `files read` --query value.
-
-    Falls back to a placeholder if the message is too short to extract content
-    words. Keeps the call site simple — caller passes the raw user input.
-    """
-    text = (user_query or "").strip()
-    if not text:
-        return _DEFAULT_READ_QUERY
-    tokens = [t for t in re.findall(r"\w+", text.lower()) if len(t) >= 4]
-    seen: set = set()
-    distilled: list = []
-    for t in tokens:
-        if t in seen:
-            continue
-        seen.add(t)
-        distilled.append(t)
-        if len(distilled) >= 6:
-            break
-    return " ".join(distilled) if distilled else _DEFAULT_READ_QUERY
+def _workspace_read_suggestion(hit: Optional[Any], page_ref: str) -> str:
+    """Return the most grounded files-skill follow-up for a workspace hit."""
+    heading = getattr(hit, "heading", "") if hit is not None else ""
+    if heading:
+        escaped_heading = str(heading).replace('"', '\\"')
+        return (
+            f'files read-section --filename "{page_ref}" '
+            f'--section "{escaped_heading}"'
+        )
+    return f'files read --filename "{page_ref}"'
 
 
 class MemoryManager:

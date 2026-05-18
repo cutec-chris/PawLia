@@ -70,6 +70,15 @@ def _extract_last_user_message(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _request_user_id(request: web.Request, body: Dict[str, Any], default: str) -> str:
+    """Resolve the PawLia session user ID for API requests."""
+    return str(
+        request.headers.get("X-User-Id")
+        or body.get("user")
+        or default
+    )
+
+
 def _openai_chunk(cid: str, model: str, delta_content: str, finish: Optional[str] = None) -> bytes:
     chunk: Dict[str, Any] = {
         "id": cid,
@@ -147,7 +156,7 @@ async def start_openai_compat(app: "App", cfg: Dict[str, Any]) -> None:
         messages: List[Dict[str, Any]] = body.get("messages") or []
         stream: bool = bool(body.get("stream", False))
         model_id: str = str(body.get("model") or "")
-        user_id: str = model_id or str(body.get("user") or "openai_api_user")
+        user_id: str = _request_user_id(request, body, "openai_api_user")
 
         user_input = _extract_last_user_message(messages)
         if not user_input:
@@ -265,7 +274,7 @@ async def start_openai_compat(app: "App", cfg: Dict[str, Any]) -> None:
         messages: List[Dict[str, Any]] = body.get("messages") or []
         stream: bool = body.get("stream", True)
         model_id: str = str(body.get("model") or "")
-        user_id = model_id or "ollama_api_user"
+        user_id = _request_user_id(request, body, "ollama_api_user")
 
         user_input = _extract_last_user_message(messages)
         if not user_input:
