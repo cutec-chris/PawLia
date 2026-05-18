@@ -25,6 +25,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 import yaml
 
 from pawlia.automation import ChecklistProcessor, JobRunner, TaskReminderProcessor
+from pawlia.memory import _format_workspace_refs, estimate_tokens
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import load_json, save_json
 
@@ -35,6 +36,8 @@ EVENT_REMINDER_MINUTES = 15  # notify this many minutes before an event
 IDLE_SUMMARIZE_MIN = 5
 IDLE_BACKGROUND_MIN = 10
 IDLE_MEMORY_MIN = 20
+_SUMMARY_COMPLETION_RESERVE_TOKENS = 2048
+_SUMMARY_USER_TURN_RESERVE_TOKENS = 1024
 
 NotifyCallback = Callable[[str, str], Coroutine[Any, Any, None]]
 
@@ -316,7 +319,26 @@ class Scheduler:
         try:
             overrides = self._app.memory.effective_agent_overrides(session, None)
             model_name = self._app.llm.default_model_name("chat", agent_overrides=overrides)
-            return self._app.llm.summary_threshold_tokens(model_name)
+            threshold = self._app.llm.summary_threshold_tokens(model_name)
+            ctx = self._app.llm.context_size_for_model(model_name)
+
+            skills = self._app._build_user_skills(session.user_id, session.disabled_skills)
+            chat_prompt = self._app.memory.build_system_prompt(session, skills=skills, mode="chat")
+            call_prompt = self._app.memory.build_system_prompt(session, skills=skills, mode="call")
+            prompt_overhead = max(estimate_tokens(chat_prompt), estimate_tokens(call_prompt))
+
+            if session.workspace_refs:
+                prompt_overhead += estimate_tokens(_format_workspace_refs(session.workspace_refs))
+
+            safe_history_budget = max(
+                1,
+                ctx
+                - prompt_overhead
+                - _SUMMARY_USER_TURN_RESERVE_TOKENS
+                - _SUMMARY_COMPLETION_RESERVE_TOKENS,
+            )
+
+            return min(threshold, safe_history_budget)
         except Exception:
             return 0
 

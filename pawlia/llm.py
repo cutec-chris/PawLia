@@ -73,6 +73,22 @@ _CAPABLE_NAME_HINTS = (
     "llama-3.3", "llama-4",
 )
 
+_CONTEXT_ERROR_HINTS = (
+    "context_length_exceeded",
+    "prompt exceeds max length",
+    "maximum context length",
+    "maximum context",
+    "context window",
+    "please reduce the length of the messages or completion",
+    "too many tokens",
+)
+
+
+def is_context_length_error(exc: BaseException) -> bool:
+    """Return True when *exc* indicates a prompt/context window overflow."""
+    text = str(exc).lower()
+    return any(hint in text for hint in _CONTEXT_ERROR_HINTS)
+
 
 def estimate_max_tool_turns(model_name: str) -> int:
     """Heuristic budget for SkillRunner tool-call loops, derived from model name.
@@ -230,8 +246,16 @@ class _FallbackLLMWrapper:
         self._last_errors[idx] = None
 
     def _note_failure(self, idx: int, exc: Exception) -> None:
-        now = self._now()
         self._last_errors[idx] = exc
+
+        if is_context_length_error(exc):
+            logger.warning(
+                "LLM context limit: model '%s' rejected the prompt as too large",
+                self._labels[idx],
+            )
+            return
+
+        now = self._now()
         self._failures[idx] += 1
         if self._failures[idx] >= self._BLACKLIST_THRESHOLD:
             self._blacklisted_until[idx] = now + self._BLACKLIST_COOLDOWN_SECONDS
@@ -268,6 +292,7 @@ class _FallbackLLMWrapper:
 
     def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        saw_context_error = False
         self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
             now = self._now()
@@ -285,18 +310,30 @@ class _FallbackLLMWrapper:
             except Exception as exc:
                 last_exc = exc
                 self._note_failure(idx, exc)
+                saw_context_error = saw_context_error or is_context_length_error(exc)
             if idx < len(self._llms) - 1:
-                logger.warning(
-                    "LLM fallback: model '%s' failed (%s), trying '%s'",
-                    self._labels[idx],
-                    last_exc,
-                    self._labels[idx + 1],
-                )
+                if last_exc is not None and is_context_length_error(last_exc):
+                    logger.warning(
+                        "LLM fallback: model '%s' hit context limit (%s), trying '%s'",
+                        self._labels[idx],
+                        last_exc,
+                        self._labels[idx + 1],
+                    )
+                else:
+                    logger.warning(
+                        "LLM fallback: model '%s' failed (%s), trying '%s'",
+                        self._labels[idx],
+                        last_exc,
+                        self._labels[idx + 1],
+                    )
+            elif saw_context_error:
+                logger.warning("LLM context limit: all fallback models rejected the prompt as too large")
         assert last_exc is not None
         raise last_exc
 
     async def ainvoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        saw_context_error = False
         self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
             now = self._now()
@@ -314,13 +351,24 @@ class _FallbackLLMWrapper:
             except Exception as exc:
                 last_exc = exc
                 self._note_failure(idx, exc)
+                saw_context_error = saw_context_error or is_context_length_error(exc)
             if idx < len(self._llms) - 1:
-                logger.warning(
-                    "LLM fallback: model '%s' failed (%s), trying '%s'",
-                    self._labels[idx],
-                    last_exc,
-                    self._labels[idx + 1],
-                )
+                if last_exc is not None and is_context_length_error(last_exc):
+                    logger.warning(
+                        "LLM fallback: model '%s' hit context limit (%s), trying '%s'",
+                        self._labels[idx],
+                        last_exc,
+                        self._labels[idx + 1],
+                    )
+                else:
+                    logger.warning(
+                        "LLM fallback: model '%s' failed (%s), trying '%s'",
+                        self._labels[idx],
+                        last_exc,
+                        self._labels[idx + 1],
+                    )
+            elif saw_context_error:
+                logger.warning("LLM context limit: all fallback models rejected the prompt as too large")
         assert last_exc is not None
         raise last_exc
 
@@ -332,6 +380,7 @@ class _FallbackLLMWrapper:
 
     async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
+        saw_context_error = False
         self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
             now = self._now()
@@ -354,13 +403,24 @@ class _FallbackLLMWrapper:
                 if yielded_any:
                     raise
                 last_exc = exc
+                saw_context_error = saw_context_error or is_context_length_error(exc)
                 if idx < len(self._llms) - 1:
-                    logger.warning(
-                        "LLM fallback(stream): model '%s' failed (%s), trying '%s'",
-                        self._labels[idx],
-                        exc,
-                        self._labels[idx + 1],
-                    )
+                    if is_context_length_error(exc):
+                        logger.warning(
+                            "LLM fallback(stream): model '%s' hit context limit (%s), trying '%s'",
+                            self._labels[idx],
+                            exc,
+                            self._labels[idx + 1],
+                        )
+                    else:
+                        logger.warning(
+                            "LLM fallback(stream): model '%s' failed (%s), trying '%s'",
+                            self._labels[idx],
+                            exc,
+                            self._labels[idx + 1],
+                        )
+                elif saw_context_error:
+                    logger.warning("LLM context limit: all fallback models rejected the prompt as too large")
         assert last_exc is not None
         raise last_exc
 

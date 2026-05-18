@@ -12,6 +12,7 @@ from pawlia.memory import (
     MAX_EXCHANGES_BEFORE_SUMMARY,
     MemoryManager,
     Session,
+    estimate_session_tokens,
 )
 
 
@@ -118,7 +119,6 @@ class TestMemoryManager:
             user_dir = os.path.join(tmpdir, "u_broken_symlink")
             os.makedirs(user_dir)
             workspace_link = os.path.join(user_dir, "workspace")
-
             try:
                 os.symlink(os.path.join(tmpdir, "missing_workspace"), workspace_link, target_is_directory=True)
             except (NotImplementedError, OSError) as exc:
@@ -128,6 +128,24 @@ class TestMemoryManager:
 
             with pytest.raises(NotADirectoryError, match="symlink but is not a usable directory"):
                 mm.load_session("u_broken_symlink")
+
+    def test_estimate_session_tokens_counts_replayed_exchanges_after_summary(self):
+        session = Session("user1")
+        session.summary = "short summary"
+        session.daily_history = ""
+        session.user_memory = "remember this"
+        session.exchanges = [
+            (
+                "frage",
+                "antwort",
+                [{"name": "memory", "args": {"query": "Expert Schmidt"}, "result": "wiki hit"}],
+            )
+        ]
+
+        tokens = estimate_session_tokens(session)
+
+        assert tokens > 0
+        assert tokens >= 8
 
     def test_append_exchange(self):
         with tempfile.TemporaryDirectory() as tmpdir:

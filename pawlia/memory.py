@@ -68,9 +68,39 @@ def estimate_tokens(text: str) -> int:
 
 def estimate_session_tokens(session: "Session") -> int:
     """Rough token footprint of the model context built from a Session."""
+    replay_tokens = 0
+    for exchange in session.exchanges:
+        if len(exchange) == 2:
+            user_text, bot_text = exchange  # type: ignore[misc]
+            tool_calls_info = None
+        else:
+            user_text, bot_text, tool_calls_info = exchange  # type: ignore[misc]
+
+        replay_tokens += estimate_tokens(str(user_text or ""))
+        replay_tokens += estimate_tokens(str(bot_text or ""))
+
+        if not tool_calls_info:
+            continue
+
+        for tc in tool_calls_info[:3]:
+            name = str(tc.get("name", "") or "")
+            args = tc.get("args", {})
+            if isinstance(args, dict):
+                query = str(args.get("query", "") or "")
+            else:
+                query = str(args or "")
+            result = str(tc.get("result", "") or "")
+
+            replay_tokens += estimate_tokens(name[:32])
+            replay_tokens += estimate_tokens(query[:100])
+            replay_tokens += estimate_tokens(result[:240])
+
+        if len(tool_calls_info) > 3:
+            replay_tokens += estimate_tokens(f"{len(tool_calls_info) - 3} more tool calls")
+
     return (
         estimate_tokens(session.summary)
-        + estimate_tokens(session.daily_history)
+        + max(estimate_tokens(session.daily_history), replay_tokens)
         + estimate_tokens(session.user_memory)
     )
 
