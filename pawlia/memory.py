@@ -969,7 +969,7 @@ class MemoryManager:
         """Build additional instructions for special conversation modes."""
         if mode == "call":
             return load_system_prompt("calls/live_call.md")
-        return ""
+        return load_system_prompt("chat/text_chat.md")
 
     @staticmethod
     def _build_skill_instructions(

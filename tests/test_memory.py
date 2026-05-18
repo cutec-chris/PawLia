@@ -534,6 +534,8 @@ class TestBuildSystemPrompt:
             prompt = mm.build_system_prompt(session)
 
             assert "Conversation Mode: Phone Call" not in prompt
+            assert "Conversation Mode: Text Chat" in prompt
+            assert "bullet lists" in prompt
 
 
 class TestBootstrapCopying:
