@@ -2,6 +2,11 @@
 
 Guide for AI agents and developers working on PawLia.
 
+## Local Test Environment
+
+Run Python tests from the repository virtual environment, not the system Python.
+Use `.venv/bin/python -m pytest ...` (or `.venv/bin/pytest ...`) for test runs.
+
 ## Three-Tier Agent System
 
 ```
