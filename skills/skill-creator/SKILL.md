@@ -276,4 +276,45 @@ Phase 1, what you changed in Phase 2, what still fails. Do not keep looping
 | `test` | creator.py | Run the skill's harness with real credentials/env |
 | `compile` | creator.py | LLM-compile SKILL.md → workflow.yaml |
 | `package` | creator.py | Create `.skill` zip |
+| `implement` | creator.py | Generate scripts via coding backend (aider/opencode/llm) |
+| `fix` | creator.py | Debug and fix a broken script via coding backend |
 | `set` / `list` / `delete` / `check` | credentials.py | Manage credentials |
+
+---
+
+## Implement (coding backend)
+
+Use when a skill has been scaffolded (`init`) and the SKILL.md describes what
+the scripts should do, but the actual code still needs to be written — or when
+existing scripts need a substantial rewrite.
+
+```
+python <scripts_dir>/creator.py implement --name "<name>" --task "<what to implement>"
+```
+
+If `--task` is omitted, the backend implements all scripts described in SKILL.md.
+
+The command auto-detects the best available coding backend:
+
+| Backend | How | When |
+|---------|-----|------|
+| **aider** | `aider --message ... --yes` CLI | `aider` in PATH |
+| **opencode** | `opencode run ...` CLI | `opencode` in PATH |
+| **llm** | Direct LLM call via config `agents.coder` | Always available (fallback) |
+
+Override per-skill via `skill-config.skill-creator.coding_backend` in config.yaml,
+or globally via `coding.backend`.
+
+After `implement`, run `validate` and `compile` separately.
+
+## Fix (coding backend)
+
+Use when a skill's script fails with a specific error. The backend receives the
+failing command, error output, and the full skill context, then edits the script
+in-place.
+
+```
+python <scripts_dir>/creator.py fix --name "<name>" --error "<error message>" --command "<failing command>"
+```
+
+After `fix`, run the harness (`test`) to verify the fix worked.

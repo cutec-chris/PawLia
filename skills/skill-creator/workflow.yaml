@@ -70,3 +70,12 @@ workflows:
     command: python {scripts_dir}/credentials.py delete --key "{key}"
     description: Delete a stored credential by key name.
     status_desc: Lösche Credential "{key}"
+  - id: implement_skill
+    command: python {scripts_dir}/creator.py implement --name "{name}" --task "{task}"
+    description: Implement or rewrite skill scripts using coding backend (aider/opencode/llm).
+    status_desc: Implementiere Skill "{name}"
+  - id: fix_skill
+    command: python {scripts_dir}/creator.py fix --name "{name}" --error "{error}"
+      --failed-cmd "{command}"
+    description: Debug and fix a failing skill script using coding backend.
+    status_desc: Repariere Skill "{name}"

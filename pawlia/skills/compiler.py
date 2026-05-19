@@ -25,6 +25,9 @@ from pawlia.utils import collect_skill_dirs, parse_frontmatter
 logger = logging.getLogger(__name__)
 
 
+_ANGLE_PLACEHOLDER_RE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_]*)>")
+
+
 def _extract_yaml(text: str) -> str:
     """Extract YAML from LLM output, stripping think tags and markdown fences."""
     from pawlia.agents.base import BaseAgent
@@ -65,6 +68,44 @@ def _build_user_prompt(
         f"## Available scripts: {', '.join(scripts) if scripts else '(none)'}",
     ]
     return "\n".join(parts)
+
+
+def _normalize_placeholders(value: Any) -> Any:
+    """Recursively normalize <param> placeholders to {param}."""
+    if isinstance(value, str):
+        return _ANGLE_PLACEHOLDER_RE.sub(r"{\1}", value)
+    if isinstance(value, list):
+        return [_normalize_placeholders(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_placeholders(v) for k, v in value.items()}
+    return value
+
+
+def _lint_compiled_workflow(
+    compiled: CompiledWorkflow,
+    *,
+    today: str,
+    scripts: list[str],
+) -> list[str]:
+    """Return semantic issues that should trigger a compiler retry."""
+    issues: list[str] = []
+
+    if compiled.compiled_at != today:
+        issues.append(f"compiled_at must be {today}, got {compiled.compiled_at}")
+
+    for workflow in compiled.workflows:
+        for block in workflow.building_blocks:
+            command = block.command or ""
+            if "[" in command or "]" in command:
+                issues.append(
+                    f"block {block.id} uses markdown-style optional syntax in command: {command}"
+                )
+            if scripts and not any(script in command for script in scripts):
+                issues.append(
+                    f"block {block.id} command does not reference a known script: {command}"
+                )
+
+    return issues
 
 
 async def compile_skill(
@@ -147,7 +188,7 @@ async def compile_skill(
 
         # Parse and validate
         try:
-            data = yaml.safe_load(raw)
+            data = _normalize_placeholders(yaml.safe_load(raw))
             compiled = CompiledWorkflow(**data)
         except Exception as exc:
             logger.error(
@@ -155,6 +196,29 @@ async def compile_skill(
                 skill_name, attempt, exc, raw[-500:],
             )
             if attempt < max_retries:
+                continue
+            return None
+
+        issues = _lint_compiled_workflow(compiled, today=today, scripts=scripts)
+        if issues:
+            logger.error(
+                "Semantic compiler issues for '%s' (attempt %d): %s",
+                skill_name,
+                attempt,
+                "; ".join(issues),
+            )
+            if attempt < max_retries:
+                messages = messages + [
+                    HumanMessage(
+                        content=(
+                            "Your previous YAML was schema-valid but semantically invalid. "
+                            "Regenerate it and fix these issues exactly:\n- "
+                            + "\n- ".join(issues)
+                            + "\nDo not use bracketed optional shell syntax like [--foo ...]. "
+                            "Every command must be directly executable as written."
+                        )
+                    )
+                ]
                 continue
             return None
 

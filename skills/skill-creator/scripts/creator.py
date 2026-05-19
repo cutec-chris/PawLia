@@ -709,6 +709,91 @@ def cmd_compile(args):
     }, ensure_ascii=False))
 
 
+# ── Implement / Fix (coding backends) ──────────────────────────────────
+
+def _load_root_config() -> dict:
+    """Load the root config.yaml for coding backend selection."""
+    config_path = os.environ.get("PAWLIA_CONFIG_PATH")
+    candidates = [Path(config_path)] if config_path else []
+    candidates.extend([PROJECT_ROOT / "config.yaml", PROJECT_ROOT / "config.yml"])
+    for candidate in candidates:
+        if not candidate or not candidate.is_file():
+            continue
+        try:
+            with open(candidate, encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+    return {}
+
+
+def cmd_implement(args):
+    """Implement skill scripts using a coding backend (aider/opencode/llm)."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from pawlia.coding import run_implement
+
+    name = args.name
+    skill_path = _find_skill(name)
+    if not skill_path:
+        print(json.dumps({
+            "success": False,
+            "error": f"Skill '{name}' not found (checked workspace + bundled)",
+        }))
+        sys.exit(1)
+
+    config = _load_root_config()
+    task = args.task or "Implement all scripts and a harness for this skill"
+    result = run_implement(skill_path, task, config)
+
+    print(json.dumps({
+        "success": result.get("ok", False),
+        "name": name,
+        "backend": result.get("backend", "unknown"),
+        "files_written": result.get("files_written", []),
+        "files_modified": result.get("files_modified", []),
+        "output": (result.get("output") or "")[-1500:],
+        "error": result.get("error", ""),
+    }, ensure_ascii=False))
+
+    if not result.get("ok"):
+        sys.exit(1)
+
+
+def cmd_fix(args):
+    """Fix a broken skill script using a coding backend."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from pawlia.coding import run_fix
+
+    name = args.name
+    skill_path = _find_skill(name)
+    if not skill_path:
+        print(json.dumps({
+            "success": False,
+            "error": f"Skill '{name}' not found (checked workspace + bundled)",
+        }))
+        sys.exit(1)
+
+    config = _load_root_config()
+    error = args.error or ""
+    command = args.failed_cmd or ""
+    result = run_fix(skill_path, error, command, config)
+
+    print(json.dumps({
+        "success": result.get("ok", False),
+        "name": name,
+        "backend": result.get("backend", "unknown"),
+        "files_written": result.get("files_written", []),
+        "files_modified": result.get("files_modified", []),
+        "output": (result.get("output") or "")[-1500:],
+        "error": result.get("error", ""),
+    }, ensure_ascii=False))
+
+    if not result.get("ok"):
+        sys.exit(1)
+
+
 # ── CLI ────────────────────────────────────────────────────────────────
 
 def main():
@@ -747,6 +832,17 @@ def main():
     p_test.add_argument("--name", required=True, help="Skill name to test")
     p_test.add_argument("--timeout", type=int, default=60, help="Harness timeout in seconds (default: 60)")
 
+    # implement
+    p_impl = sub.add_parser("implement", help="Implement skill scripts via coding backend (aider/opencode/llm)")
+    p_impl.add_argument("--name", required=True, help="Skill name")
+    p_impl.add_argument("--task", help="Task description (default: implement all scripts)")
+
+    # fix
+    p_fix = sub.add_parser("fix", help="Fix a broken skill script via coding backend")
+    p_fix.add_argument("--name", required=True, help="Skill name")
+    p_fix.add_argument("--error", help="Error output from the failing command")
+    p_fix.add_argument("--failed-cmd", help="The command that failed")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -761,6 +857,10 @@ def main():
         cmd_compile(args)
     elif args.command == "test":
         cmd_test(args)
+    elif args.command == "implement":
+        cmd_implement(args)
+    elif args.command == "fix":
+        cmd_fix(args)
     else:
         parser.print_help()
         sys.exit(1)
