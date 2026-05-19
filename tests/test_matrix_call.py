@@ -97,6 +97,61 @@ async def test_process_speech_uses_call_system_prompt():
     assert send_cb.await_args_list[1].args[0] == "Kurze Antwort"
 
 
+@pytest.mark.asyncio
+async def test_process_speech_ignores_standalone_stt_hallucination():
+    pcm = MagicMock()
+    pcm.__len__.return_value = 48000
+
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    agent = MagicMock()
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-hallucination",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-hallucination",
+        client=client,
+        app=app,
+        cfg={},
+        agent=agent,
+        send_cb=send_cb,
+    )
+
+    session._tts_track = SimpleNamespace(
+        start_hold=MagicMock(),
+        stop_hold=MagicMock(),
+        enqueue_pcm_float32=MagicMock(),
+        is_playing=False,
+    )
+
+    with patch("pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value="Vielen Dank.")):
+        await session._process_speech(pcm, 48000)
+
+    send_cb.assert_not_awaited()
+    agent.run_streamed.assert_not_called()
+    session._tts_track.stop_hold.assert_called_once()
+
+
+def test_standalone_stt_hallucination_filter_keeps_real_sentences():
+    session = CallSession(
+        call_id="call-hallucination-filter",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-hallucination-filter",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+    assert session._looks_like_standalone_stt_hallucination("Vielen Dank.") is True
+    assert session._looks_like_standalone_stt_hallucination("Untertitelung des ZDF, 2020") is True
+    assert session._looks_like_standalone_stt_hallucination("Ja, danke, das meinte ich.") is False
+    assert session._looks_like_standalone_stt_hallucination("Ja, du, tschüss.") is False
+
+
 def test_mark_activity_updates_last_activity_timestamp():
     session = CallSession(
         call_id="call-activity",

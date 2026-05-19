@@ -66,6 +66,15 @@ _INTERRUPT_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+_STANDALONE_STT_HALLUCINATION_RE = re.compile(
+    r"^(?:"
+    r"(?:vielen\s+dank|danke(?:\s+schön)?)"
+    r"|(?:tschüss|auf\s+wiedersehen)"
+    r"|(?:untertitelung\s+des\s+zdf(?:,\s*\d{4})?)"
+    r")\.?$",
+    re.IGNORECASE,
+)
+
 
 def _build_webrtc_vad(mode: int):
     """Create a WebRTC VAD instance when the optional dependency is available."""
@@ -1428,6 +1437,13 @@ class CallSession:
             return True
         return False
 
+    def _looks_like_standalone_stt_hallucination(self, text: str) -> bool:
+        """Filter common Whisper fallback phrases from non-speech chunks."""
+        normalized = " ".join((text or "").strip().split())
+        if not normalized:
+            return False
+        return bool(_STANDALONE_STT_HALLUCINATION_RE.fullmatch(normalized))
+
     def _track_response_task(self, task: asyncio.Task) -> None:
         """Remember the currently active speech-response task."""
         self._active_response_task = task
@@ -1941,6 +1957,16 @@ class CallSession:
 
         if not text:
             logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
+            if started_hold and self._tts_track:
+                self._tts_track.stop_hold()
+            return
+
+        if self._looks_like_standalone_stt_hallucination(text):
+            logger.info(
+                "call %s: ignoring likely standalone STT hallucination: %s",
+                self.call_id[:8],
+                text[:120],
+            )
             if started_hold and self._tts_track:
                 self._tts_track.stop_hold()
             return
