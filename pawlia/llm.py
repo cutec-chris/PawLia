@@ -843,7 +843,10 @@ class LLMFactory:
                 kwargs["keep_alive"] = keep_alive
             if num_ctx is not None:
                 kwargs["num_ctx"] = num_ctx
-            return ChatOllama(**kwargs)
+            llm = ChatOllama(**kwargs)
+            if think is False:
+                llm = _NoThinkWrapper(llm)
+            return llm
 
         extra_body: Dict[str, Any] = {}
         if isinstance(think, int):

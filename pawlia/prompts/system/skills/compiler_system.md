@@ -45,3 +45,11 @@ workflows:
 8. Include goal_check for multi-step interactive skills. Skip for simple lookups.
 9. Be COMPACT. No quotes around strings unless YAML requires them. Omit optional fields that are null/empty.
 10. PREFER fewer workflows. If all commands belong to the same script, use ONE workflow with all building_blocks. Only split into multiple workflows when the procedures are truly independent (different scripts, different triggers).
+11. NEVER copy documentation notation like `[--optional ...]` into a command. Output only directly executable command templates.
+12. NEVER invent fallback blocks like `echo ...` unless that exact command appears in the SKILL.md.
+13. `compiled_at` MUST equal the provided current date exactly.
+14. max_steps: Set to the actual number of steps the workflow needs. Use 1 for single-command skills. Use 3-5 for typical multi-step flows. Never default to 10.
+15. description and trigger: Write in the SAME language as the SKILL.md. If SKILL.md is English, write English. Only status_desc must be German.
+16. command quoting: Quote string placeholders like "{name}". Do NOT quote numeric/integer placeholders like {depth} or {limit}.
+17. compiled_by: Use your exact model identifier (e.g. "qwen3.5:latest"), not a made-up name.
+18. env_params: When a SKILL.md describes passing multi-line content (file content, long text), add those parameter names to env_params instead of embedding them in the command string.

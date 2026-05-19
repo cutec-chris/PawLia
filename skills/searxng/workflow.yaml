@@ -1,16 +1,16 @@
 skill: searxng
 version: '2.0'
-compiled_at: '2026-03-26'
-compiled_by: workflow_compiler
+compiled_at: '2026-05-19'
+compiled_by: glm-5.1
 workflows:
-- id: web_search
-  trigger: When performing a web search with specified query parameters
+- id: web-search
+  trigger: User wants to search the web for information using SearXNG.
   max_steps: 1
   building_blocks:
-  - id: run_search
+  - id: search
     command: python {scripts_dir}/search.py --query "{query}" --limit {limit}
-    description: Execute SearXNG web search with the configured SearXNG URL
-    status_desc: Suche im Web nach {query}
+    description: Search the web using SearXNG with query and result limit.
+    status_desc: Suche nach "{query}"
     verify:
       exit_code: 0
       output_not_contains:
