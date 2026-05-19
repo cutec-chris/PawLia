@@ -283,6 +283,61 @@ class DreamWikiBackend:
 
     # ── Wiki catalog ──────────────────────────────────────────────────────────
 
+    def _iter_topic_files(self) -> list[str]:
+        if not os.path.isdir(self._topics_dir):
+            return []
+        files: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(self._topics_dir):
+            dirnames.sort()
+            for fname in sorted(filenames):
+                if fname.endswith(".md"):
+                    files.append(os.path.join(dirpath, fname))
+        return files
+
+    def _topic_path(self, slug: str, entity_type: str = "topic") -> str:
+        return os.path.join(self._topics_dir, entity_type, f"{slug}.md")
+
+    def _find_topic_path(self, slug: str, entity_type: Optional[str] = None) -> Optional[str]:
+        if entity_type:
+            typed = self._topic_path(slug, entity_type)
+            if os.path.exists(typed):
+                return typed
+        flat = os.path.join(self._topics_dir, f"{slug}.md")
+        if os.path.exists(flat):
+            return flat
+        for path in self._iter_topic_files():
+            if os.path.basename(path) == f"{slug}.md":
+                return path
+        return None
+
+    def _slug_target(self, slug: str, entity_type: Optional[str] = None) -> str:
+        path = self._find_topic_path(slug, entity_type)
+        if not path:
+            return slug
+        rel = os.path.relpath(path, self._topics_dir).replace(os.sep, "/")
+        return rel[:-3] if rel.endswith(".md") else rel
+
+    def _ensure_topic_layout(self) -> None:
+        """Move flat topic pages into type-based subdirectories when possible."""
+        if not os.path.isdir(self._topics_dir):
+            return
+        for fname in sorted(os.listdir(self._topics_dir)):
+            src = os.path.join(self._topics_dir, fname)
+            if not os.path.isfile(src) or not fname.endswith(".md"):
+                continue
+            try:
+                with open(src, encoding="utf-8") as f:
+                    content = f.read()
+                fm = self._parse_frontmatter(content) or {}
+            except Exception:
+                continue
+            entity_type = fm.get("type", "topic")
+            dst = self._topic_path(fname[:-3], entity_type)
+            if src == dst or os.path.exists(dst):
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.replace(src, dst)
+
     def _get_wiki_catalog(self) -> dict[str, str]:
         """Return {slug: title} for all existing wiki pages.
 
@@ -292,17 +347,12 @@ class DreamWikiBackend:
         added/removed). For in-place title edits, callers can drop the cache
         via _invalidate_catalog_cache().
         """
+        self._ensure_topic_layout()
         if not os.path.isdir(self._topics_dir):
             return {}
-        dir_mtime = os.path.getmtime(self._topics_dir)
-        if self._catalog_cache is not None and dir_mtime == self._catalog_cache_mtime:
-            return self._catalog_cache
         catalog: dict[str, str] = {}
-        for fname in os.listdir(self._topics_dir):
-            if not fname.endswith(".md"):
-                continue
-            slug = fname[:-3]
-            filepath = os.path.join(self._topics_dir, fname)
+        for filepath in self._iter_topic_files():
+            slug = os.path.splitext(os.path.basename(filepath))[0]
             try:
                 with open(filepath, encoding="utf-8") as f:
                     content = f.read()
@@ -318,8 +368,6 @@ class DreamWikiBackend:
             except Exception:
                 title = slug
             catalog[slug] = title
-        self._catalog_cache = catalog
-        self._catalog_cache_mtime = dir_mtime
         return catalog
 
     def _invalidate_catalog_cache(self) -> None:
@@ -367,13 +415,14 @@ class DreamWikiBackend:
         # Group pages by type for a structured index
         typed: dict[str, list[tuple[str, str]]] = {}
         for slug, title in sorted(catalog.items()):
-            filepath = os.path.join(self._topics_dir, f"{slug}.md")
+            filepath = self._find_topic_path(slug)
             entity_type = "topic"
             try:
-                with open(filepath, encoding="utf-8") as f:
-                    fm = self._parse_frontmatter(f.read())
-                if fm and fm.get("type"):
-                    entity_type = fm["type"]
+                if filepath:
+                    with open(filepath, encoding="utf-8") as f:
+                        fm = self._parse_frontmatter(f.read())
+                    if fm and fm.get("type"):
+                        entity_type = fm["type"]
             except Exception:
                 pass
             typed.setdefault(entity_type, []).append((slug, title))
@@ -449,8 +498,8 @@ class DreamWikiBackend:
         if catalog and slug in catalog:
             title = catalog[slug]
         else:
-            filepath = os.path.join(self._topics_dir, f"{slug}.md")
-            if os.path.exists(filepath):
+            filepath = self._find_topic_path(slug)
+            if filepath and os.path.exists(filepath):
                 try:
                     with open(filepath, encoding="utf-8") as f:
                         fm = self._parse_frontmatter(f.read())
@@ -458,23 +507,25 @@ class DreamWikiBackend:
                         title = fm["title"]
                 except Exception:
                     pass
+        target = self._slug_target(slug)
         if self._link_format == "wikilink":
-            return f"[[{slug}|{title}]]" if title != slug else f"[[{slug}]]"
-        return f"[{title}]({slug}.md)"
+            return f"[[{target}|{title}]]" if title != slug else f"[[{target}]]"
+        return f"[{title}]({target}.md)"
 
     def _index_link(self, slug: str, title: str) -> str:
         """Build a link for use in index.md (one level above topics/)."""
+        target = self._slug_target(slug)
         if self._link_format == "wikilink":
-            return f"[[{slug}|{title}]]" if title != slug else f"[[{slug}]]"
-        return f"[{title}](topics/{slug}.md)"
+            return f"[[{target}|{title}]]" if title != slug else f"[[{target}]]"
+        return f"[{title}](topics/{target}.md)"
 
     def _has_link(self, text: str, slug: str) -> bool:
         """Check whether text already contains a link to slug in any format."""
-        return (
-            f"]({slug}.md)" in text
-            or f"[[{slug}]]" in text
-            or f"[[{slug}|" in text
-        )
+        return bool(re.search(
+            rf"\]\((?:[^)]*/)?{re.escape(slug)}\.md\)"
+            rf"|\[\[(?:[^\]|#]*/)?{re.escape(slug)}(?:[#|\]])",
+            text,
+        ))
 
     def _adapt_prompt_for_link_format(self, prompt: str) -> str:
         """Replace markdown-link instructions with wikilink instructions when configured."""
@@ -505,8 +556,10 @@ class DreamWikiBackend:
                            tags: list[str] | None = None,
                            links: list[str] | None = None,
                            entity_type: str = "topic") -> None:
-        filepath = os.path.join(self._topics_dir, f"{slug}.md")
-        os.makedirs(self._topics_dir, exist_ok=True)
+        filepath = self._find_topic_path(slug, entity_type)
+        if not filepath:
+            filepath = self._topic_path(slug, entity_type)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
         catalog = self._get_wiki_catalog()
         link_section = ""
@@ -561,8 +614,10 @@ class DreamWikiBackend:
 
         page_summaries = []
         for slug, title in sorted(catalog.items()):
-            filepath = os.path.join(self._topics_dir, f"{slug}.md")
+            filepath = self._find_topic_path(slug)
             try:
+                if not filepath:
+                    continue
                 with open(filepath, encoding="utf-8") as f:
                     content = f.read()
                 summary = content[:500]
@@ -607,14 +662,14 @@ class DreamWikiBackend:
             if not keep_slug or not merge_slugs:
                 continue
 
-            keep_path = os.path.join(self._topics_dir, f"{keep_slug}.md")
-            if not os.path.exists(keep_path):
+            keep_path = self._find_topic_path(keep_slug)
+            if not keep_path or not os.path.exists(keep_path):
                 logger.warning("DreamWikiBackend: consolidate keep target missing: %s", keep_slug)
                 continue
 
             for m_slug in merge_slugs:
-                merge_path = os.path.join(self._topics_dir, f"{m_slug}.md")
-                if not os.path.exists(merge_path):
+                merge_path = self._find_topic_path(m_slug)
+                if not merge_path or not os.path.exists(merge_path):
                     continue
                 try:
                     with open(merge_path, encoding="utf-8") as f:
@@ -637,10 +692,7 @@ class DreamWikiBackend:
                         rf"|\[[^\]]*\]\({re.escape(m_slug)}\.md\)"
                     )
                     replacement = self._md_link(keep_slug, {keep_slug: keep_title})
-                    for fname in os.listdir(self._topics_dir):
-                        if not fname.endswith(".md"):
-                            continue
-                        fpath = os.path.join(self._topics_dir, fname)
+                    for fpath in self._iter_topic_files():
                         try:
                             with open(fpath, encoding="utf-8") as f:
                                 fc = f.read()
@@ -672,8 +724,8 @@ class DreamWikiBackend:
             to_slug = ml.get("to", "")
             if not from_slug or not to_slug:
                 continue
-            fpath = os.path.join(self._topics_dir, f"{from_slug}.md")
-            if os.path.exists(fpath) and to_slug in catalog:
+            fpath = self._find_topic_path(from_slug)
+            if fpath and os.path.exists(fpath) and to_slug in catalog:
                 try:
                     with open(fpath, encoding="utf-8") as f:
                         fc = f.read()
@@ -771,45 +823,30 @@ class DreamWikiBackend:
         if not os.path.isdir(self._topics_dir):
             return "No documents indexed yet."
 
-        topic_files = sorted(
-            f for f in os.listdir(self._topics_dir) if f.endswith(".md")
-        )
-        if not topic_files:
-            return "No documents indexed yet."
+        from pawlia.workspace_search import WorkspaceSearch
 
-        query_words = set(re.split(r"\W+", question.lower())) - _STOP_WORDS - {""}
+        workspace_root = os.path.dirname(self._wiki_dir)
+        hits = WorkspaceSearch(
+            workspace_root,
+            config={
+                "top_k": 6,
+                "min_score": 0.35,
+                "include_root_files": False,
+                "exclude_dirs": ["memory", "skills", "research"],
+            },
+        ).search(question)
 
-        scored: list[tuple[int, str, str]] = []
-        for fname in topic_files:
-            filepath = os.path.join(self._topics_dir, fname)
-            try:
-                with open(filepath, encoding="utf-8") as f:
-                    content = f.read()
-            except Exception:
-                continue
+        if not hits:
+            return "No relevant information found."
 
-            name_part = fname[:-3].replace("-", " ")
-            search_text = name_part + " " + content.lower()
-            score = sum(1 for w in query_words if w in search_text)
-            score += sum(2 for w in query_words if w in name_part)
-            # Boost for linked references (both md links and legacy wikilinks)
-            content_lower = content.lower()
-            score += sum(3 for w in query_words
-                         if f"]({w}" in content_lower or f"[[{w}" in content_lower)
-            scored.append((score, fname, content))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        has_matches = any(s > 0 for s, _, _ in scored)
         results: list[str] = []
         total = 0
-        for score, _fname, content in scored:
-            if has_matches and score == 0:
+        for hit in hits:
+            part = f"{hit.section_ref} ({hit.path})\n{hit.snippet}"
+            if total + len(part) > self._MAX_RESULT_CHARS:
                 break
-            if total + len(content) > self._MAX_RESULT_CHARS:
-                break
-            results.append(content)
-            total += len(content)
+            results.append(part)
+            total += len(part)
 
         if not results:
             return "No relevant information found."

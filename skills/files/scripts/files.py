@@ -96,6 +96,27 @@ def _walk_files(workdir: str):
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _WIKILINK_INPUT_RE = re.compile(r"^\[\[([^\]|]+)(?:\|[^\]]+)?\]\]$")
+_WIKI_TOPIC_DIRS = {"person", "place", "object", "project", "topic"}
+
+
+def _split_filename_section(filename: str) -> tuple[str, str | None]:
+    """Split a file reference into path-like part and optional heading anchor."""
+    text = filename.strip()
+    m = _WIKILINK_INPUT_RE.match(text)
+    if m:
+        ref = m.group(1).strip()
+        if "#" in ref:
+            base, section = ref.split("#", 1)
+            return f"[[{base}]]", section.strip() or None
+        return filename, None
+
+    if "#" in text:
+        base, section = text.split("#", 1)
+        base = base.strip()
+        if base.endswith(".md") or "/" in base:
+            return base, section.strip() or None
+
+    return filename, None
 
 
 def _resolve_wikilink(workdir: str, filename: str) -> str:
@@ -115,7 +136,15 @@ def _resolve_wikilink(workdir: str, filename: str) -> str:
 
     # Path-style reference (contains slash)
     if "/" in ref:
-        return ref if ref.endswith(".md") else ref + ".md"
+        candidate = ref if ref.endswith(".md") else ref + ".md"
+        if os.path.isfile(os.path.join(workdir, candidate)):
+            return candidate
+        first = ref.split("/", 1)[0]
+        if first in _WIKI_TOPIC_DIRS and not ref.startswith("wiki/topics/"):
+            typed_candidate = f"wiki/topics/{candidate}"
+            if os.path.isfile(os.path.join(workdir, typed_candidate)):
+                return typed_candidate
+        return candidate
 
     # Slug-style: wiki/topics first
     wiki_candidate = f"wiki/topics/{ref}.md"
@@ -131,6 +160,48 @@ def _resolve_wikilink(workdir: str, filename: str) -> str:
 
     # Nothing found — return wiki/topics guess (will produce "not found" naturally)
     return wiki_candidate
+
+
+def _load_section(filepath: str, filename: str, section: str) -> dict:
+    with open(filepath, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    headings = _parse_headings(lines)
+    target = section.lstrip("#").strip()
+    matches = [h for h in headings if h["title"] == target]
+    if not matches:
+        ci_matches = [h for h in headings if h["title"].lower() == target.lower()]
+        if not ci_matches:
+            return {
+                "success": False,
+                "error": f"Section '{section}' not found in '{filename}'.",
+                "available_sections": [h["title"] for h in headings],
+            }
+        matches = ci_matches
+    if len(matches) > 1:
+        return {
+            "success": False,
+            "error": (
+                f"Section '{section}' is ambiguous ({len(matches)} matches at lines "
+                f"{[m['line'] for m in matches]}). Heading titles must be unique to use read_section."
+            ),
+        }
+
+    head = matches[0]
+    start = head["line"] - 1
+    end = len(lines)
+    for h in headings:
+        if h["line"] > head["line"] and h["level"] <= head["level"]:
+            end = h["line"] - 1
+            break
+    return {
+        "success": True,
+        "filename": filename,
+        "section": head["title"],
+        "level": head["level"],
+        "start_line": start + 1,
+        "end_line": end,
+        "content": "".join(lines[start:end]),
+    }
 
 
 def _parse_headings(lines: list[str]) -> list[dict]:
@@ -167,14 +238,34 @@ def _parse_headings(lines: list[str]) -> list[dict]:
 
 def cmd_list(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    offset = max(0, int(getattr(args, "offset", 0) or 0))
+    limit = max(1, int(getattr(args, "limit", 200) or 200))
     entries = []
-    for abs_path, rel_path in _walk_files(workdir):
+    all_files = list(_walk_files(workdir))
+    total = len(all_files)
+    for abs_path, rel_path in all_files[offset:offset + limit]:
         entries.append({
             "name": rel_path,
             "type": "file",
             "size": os.path.getsize(abs_path),
         })
-    _out({"success": True, "files": entries, "count": len(entries)})
+    has_more = offset + limit < total
+    payload = {
+        "success": True,
+        "files": entries,
+        "count": len(entries),
+        "total_count": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": has_more,
+    }
+    if has_more:
+        payload["next_offset"] = offset + limit
+        payload["hint"] = (
+            "More files available. Call list again with "
+            f"--offset {offset + limit} --limit {limit} if needed."
+        )
+    _out(payload)
 
 
 _DEFAULT_READ_LIMIT = 150
@@ -220,7 +311,8 @@ def _filter_by_query(lines: list, query: str) -> tuple:
 
 def cmd_read(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
-    args.filename = _resolve_wikilink(workdir, args.filename)
+    filename, section = _split_filename_section(args.filename)
+    args.filename = _resolve_wikilink(workdir, filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -232,6 +324,12 @@ def cmd_read(args) -> None:
     if os.path.isdir(filepath):
         _out({"success": False, "error": f"'{args.filename}' is a directory."})
         return
+
+    # Section refs like [[page#Heading]] resolve directly to the section content.
+    if section and args.query is None and args.offset is None and args.limit is None:
+        _out(_load_section(filepath, args.filename, section))
+        return
+
     with open(filepath, "r", encoding="utf-8") as f:
         content = f.read()
 
@@ -281,7 +379,8 @@ def cmd_read(args) -> None:
 
 def cmd_outline(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
-    args.filename = _resolve_wikilink(workdir, args.filename)
+    filename, _section = _split_filename_section(args.filename)
+    args.filename = _resolve_wikilink(workdir, filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -304,7 +403,8 @@ def cmd_outline(args) -> None:
 
 def cmd_read_section(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
-    args.filename = _resolve_wikilink(workdir, args.filename)
+    filename, embedded_section = _split_filename_section(args.filename)
+    args.filename = _resolve_wikilink(workdir, filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -313,55 +413,13 @@ def cmd_read_section(args) -> None:
     if not os.path.isfile(filepath):
         _out({"success": False, "error": f"File '{args.filename}' not found."})
         return
-    with open(filepath, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    headings = _parse_headings(lines)
-    target = args.section.lstrip("#").strip()
-    matches = [h for h in headings if h["title"] == target]
-    if not matches:
-        # Fall back to case-insensitive comparison so the LLM doesn't have to nail the case
-        ci_matches = [h for h in headings if h["title"].lower() == target.lower()]
-        if not ci_matches:
-            available = [h["title"] for h in headings]
-            _out({
-                "success": False,
-                "error": f"Section '{args.section}' not found in '{args.filename}'.",
-                "available_sections": available,
-            })
-            return
-        matches = ci_matches
-    if len(matches) > 1:
-        _out({
-            "success": False,
-            "error": (
-                f"Section '{args.section}' is ambiguous ({len(matches)} matches at lines "
-                f"{[m['line'] for m in matches]}). Heading titles must be unique to use read_section."
-            ),
-        })
-        return
-    head = matches[0]
-    start = head["line"] - 1  # 0-based, include the heading line itself
-    # End at the next heading with level <= head['level']
-    end = len(lines)
-    for h in headings:
-        if h["line"] > head["line"] and h["level"] <= head["level"]:
-            end = h["line"] - 1
-            break
-    section_text = "".join(lines[start:end])
-    _out({
-        "success": True,
-        "filename": args.filename,
-        "section": head["title"],
-        "level": head["level"],
-        "start_line": start + 1,
-        "end_line": end,
-        "content": section_text,
-    })
+    _out(_load_section(filepath, args.filename, embedded_section or args.section))
 
 
 def cmd_delete(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
-    args.filename = _resolve_wikilink(workdir, args.filename)
+    filename, _section = _split_filename_section(args.filename)
+    args.filename = _resolve_wikilink(workdir, filename)
     try:
         filepath = _safe_path(workdir, args.filename)
     except ValueError as e:
@@ -479,6 +537,8 @@ def cmd_grep(args) -> None:
         return
 
     if args.filename:
+        filename, _section = _split_filename_section(args.filename)
+        args.filename = _resolve_wikilink(workdir, filename)
         try:
             filepath = _safe_path(workdir, args.filename)
         except ValueError as e:
@@ -527,6 +587,8 @@ def main():
 
     p = sub.add_parser("list")
     _base(p)
+    p.add_argument("--offset", type=int, default=0, help="0-based file offset")
+    p.add_argument("--limit", type=int, default=200, help="max files to return (default: 200)")
 
     p = sub.add_parser("read")
     _base(p)

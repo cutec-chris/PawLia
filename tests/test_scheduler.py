@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import pytest
 import yaml
 
+from pawlia.llm import LLMFactory
+from pawlia.memory import MemoryManager
 from pawlia.scheduler import Scheduler, _next_occurrence
 
 
@@ -339,3 +341,46 @@ class TestSchedulerCallbacks:
     async def test_no_session_dir(self):
         scheduler = Scheduler("/nonexistent/path")
         await scheduler._check_all()
+
+
+class TestSchedulerSummarizationThreshold:
+    def test_summary_threshold_reserves_prompt_overhead(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "providers": {
+                    "test": {
+                        "backend": "pawlia",
+                        "apiBase": "http://example.test/v1",
+                        "apiKey": "x",
+                    }
+                },
+                "models": {
+                    "m1": {
+                        "model": "gpt-oss-test",
+                        "provider": "test",
+                        "context_size": 4096,
+                        "summarize_at_fraction": 0.95,
+                    }
+                },
+                "agents": {"default": "m1"},
+            }
+
+            memory = MemoryManager(tmpdir)
+            session = memory.load_session("test_user")
+
+            class _App:
+                def __init__(self):
+                    self.memory = memory
+                    self.llm = LLMFactory(config)
+
+                def _build_user_skills(self, user_id, disabled=None):
+                    return {}
+
+            scheduler = Scheduler(tmpdir, config=config)
+            scheduler.set_app(_App())
+
+            unclamped = scheduler._app.llm.summary_threshold_tokens("m1")
+            clamped = scheduler._summary_threshold_for(session)
+
+            assert clamped > 0
+            assert clamped < unclamped

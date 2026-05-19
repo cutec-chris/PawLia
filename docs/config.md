@@ -257,6 +257,8 @@ voip:
   max_spectral_flatness: 0.72
   min_speech_like_ratio: 0.08
   min_consecutive_speechlike_frames: 4
+  min_resume_speech_frames: 3
+  pre_speech_seconds: 0.4
   webrtcvad_enabled: true
   webrtcvad_mode: 2
   webrtcvad_min_voiced_ratio: 0.12
@@ -283,6 +285,8 @@ voip:
 | `voip.max_spectral_flatness` | Upper limit for how noise-like active frames may be before they are rejected as non-speech |
 | `voip.min_speech_like_ratio` | Minimum share of frames that must simultaneously be active and speech-like before a chunk is sent to STT |
 | `voip.min_consecutive_speechlike_frames` | Minimum sustained run of speech-like frames required before a chunk is sent to STT |
+| `voip.min_resume_speech_frames` | Consecutive speech-like frames required to break an in-progress pause once silence has already started accumulating |
+| `voip.pre_speech_seconds` | Audio lead-in to prepend before detected speech so STT keeps the beginnings of words |
 | `voip.webrtcvad_enabled` | Enable an additional lightweight WebRTC speech detector before sending audio to STT |
 | `voip.webrtcvad_mode` | WebRTC VAD aggressiveness from `0` (lenient) to `3` (strict) |
 | `voip.webrtcvad_min_voiced_ratio` | Minimum share of frames WebRTC VAD must classify as voiced before a chunk is sent to STT |
@@ -300,6 +304,10 @@ voip:
 ### Adaptive silence detection
 
 The pipeline tracks a rolling EMA of the background noise floor (measured during inter-speech periods). The frame-level silence gate then raises the effective threshold to `max(silence_threshold, noise_floor × 2)` so that steady background noise — road noise, cycling, wind — falls below the effective threshold and counts as silence. This prevents speech chunks from growing indefinitely when the raw RMS never drops all the way to zero.
+
+Once a pause has started, PawLia also requires a short run of consecutive speech-like frames before that pause is considered broken again. This avoids single noisy spikes from resetting the silence timer and delaying end-of-speech by several more seconds.
+
+When a new speech chunk starts, PawLia also prepends a short rolling pre-buffer from immediately before the trigger frame. This helps STT keep soft or fast word onsets that begin just before the VAD crosses its threshold.
 
 `silence_threshold` remains the configurable floor; the adaptive part only ever raises it, never lowers it.
 
@@ -487,8 +495,14 @@ workspace/wiki/                   # In the Obsidian vault
   index.md                        # Catalog of all pages
   log.md                          # Chronological audit log
   topics/
-    projekt-thalia.md             # One wiki page per topic/entity
-    linux-admin.md
+    person/
+      max-mustermann.md
+    object/
+      balu.md
+    project/
+      projekt-thalia.md
+    topic/
+      linux-admin.md
 
 memory_index/                     # Outside the vault (internal tracking)
   dreamed_files.json              # Which logs have been processed
@@ -541,9 +555,9 @@ workspace-search:
 | `min_score` | Score floor as a fraction of the best hit's score. |
 | `snippet_chars` | Characters of context shown next to each hit. |
 | `exclude_dirs` | Directories under `workspace/` to skip (always includes `memory/`). |
-| `include_root_files` | Include loose `.md` files at the workspace root in addition to `wiki/topics/` and `research/`. |
+| `include_root_files` | Include loose `.md` files at the workspace root in addition to `wiki/topics/` (including type subfolders like `topic/`, `person/`, `object/`) and `research/`. |
 
-The search prefers `rank_bm25` when installed; otherwise it falls back to a simple term-frequency scorer. Identity files (`soul.md`, `identity.md`, `user.md`, `memory.md`, `bootstrap.md`) and raw chat logs (`workspace/memory/`) are always excluded — the Dream Wiki under `workspace/wiki/topics/` is the distilled, searchable layer.
+The search prefers `rank_bm25` when installed; otherwise it falls back to a simple term-frequency scorer. Retrieval runs on Markdown sections, with small boosts for heading matches and related/link-rich sections. Identity files (`soul.md`, `identity.md`, `user.md`, `memory.md`, `bootstrap.md`) and raw chat logs (`workspace/memory/`) are always excluded — the Dream Wiki under `workspace/wiki/topics/` is the distilled, searchable layer.
 
 ## CalDAV (Radicale / Nextcloud sync)
 

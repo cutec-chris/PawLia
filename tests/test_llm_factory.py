@@ -4,7 +4,14 @@ from typing import Any, Dict, List
 
 import pytest
 
-from pawlia.llm import LLMFactory, estimate_context_size, estimate_max_tool_turns
+from langchain_core.messages import HumanMessage
+
+from pawlia.llm import (
+    LLMFactory,
+    estimate_context_size,
+    estimate_max_tool_turns,
+    is_context_length_error,
+)
 
 
 class _DummyLLM:
@@ -218,6 +225,73 @@ def test_agent_model_blacklist_expires_after_cooldown(monkeypatch: pytest.Monkey
 
     for _ in range(4):
         assert llm.invoke([]) == "ok-m2"
+
+
+def test_context_length_error_is_detected() -> None:
+    exc = RuntimeError(
+        "Error code: 400 - {'error': {'message': 'Please reduce the length of the messages or completion.', "
+        "'code': 'context_length_exceeded'}}"
+    )
+
+    assert is_context_length_error(exc) is True
+
+
+def test_context_length_errors_do_not_blacklist_model(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["agents"]["chat"] = "m1,m2"
+
+    built: Dict[str, _DummyLLM] = {}
+
+    class _ContextFailLLM(_DummyLLM):
+        def invoke(self, messages: List[Any], **kwargs: Any) -> str:
+            self.calls += 1
+            raise RuntimeError(
+                "Error code: 400 - {'error': {'message': 'Please reduce the length of the messages or completion.', "
+                "'code': 'context_length_exceeded'}}"
+            )
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        model_name = str(model_cfg["model"])
+        llm = _ContextFailLLM(model_name=model_name) if model_name == "m1" else _DummyLLM(model_name=model_name)
+        built[model_name] = llm
+        return llm
+
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat")
+
+    for _ in range(4):
+        assert llm.invoke([]) == "ok-m2"
+
+    assert built["m1"].calls == 4
+    assert built["m2"].calls == 4
+
+
+def test_fallback_skips_models_with_too_small_context(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["agents"]["chat"] = "m1,m2"
+    config["models"]["m1"]["context_size"] = 1024
+    config["models"]["m2"]["context_size"] = 8192
+
+    built: Dict[str, _DummyLLM] = {}
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        model_name = str(model_cfg["model"])
+        llm = _DummyLLM(model_name=model_name)
+        built[model_name] = llm
+        return llm
+
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat")
+
+    result = llm.invoke([HumanMessage(content="x" * 6000)])
+
+    assert result == "ok-m2"
+    assert built["m1"].calls == 0
+    assert built["m2"].calls == 1
 
 
 def test_local_factory_skips_nonlocal_chat_models(monkeypatch: pytest.MonkeyPatch):

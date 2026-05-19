@@ -65,6 +65,20 @@ _CAPTCHA_MARKERS = (
 )
 
 
+def _slugify_filename(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:80] or "document"
+
+
+def _filename_stem_for_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    path = urllib.parse.unquote(parsed.path or "").strip("/")
+    if not path:
+        return "document"
+    last = path.split("/")[-1]
+    return _slugify_filename(last.replace("_", " ").replace(":", " "))
+
+
 def _load_skill_config() -> dict:
     raw = os.environ.get("PAWLIA_SKILL_CONFIG")
     if raw:
@@ -318,7 +332,8 @@ async def _scrape_and_save(project_path: pathlib.Path, url: str) -> dict:
     """Scrape a URL, convert to markdown, save to workspace. No RAG backend."""
     headers = {"User-Agent": USER_AGENT}
     url_hash = hashlib.sha1(url.encode()).hexdigest()
-    filename = project_path / f"{url_hash}.md"
+    stem = _filename_stem_for_url(url)
+    filename = project_path / f"{stem}--{url_hash[:8]}.md"
 
     video_id = _get_video_id(url)
 

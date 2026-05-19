@@ -14,6 +14,7 @@ from pawlia.tools.base import Tool, ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.skills.executor import WorkflowExecutor
 from pawlia.skills.workflow_schema import BuildingBlock, Workflow
+from pawlia.workspace_search import SearchHit
 
 
 def _make_ai_message(content: str, tool_calls=None) -> AIMessage:
@@ -438,6 +439,36 @@ class TestChatAgentPersist:
         assert "Result line Result line" in messages[2].content
         assert len(messages[2].content) < 500
 
+    @pytest.mark.asyncio
+    async def test_compacts_old_history_when_context_budget_is_small(self):
+        """Old replayed exchanges should be dropped before sending an oversized prompt."""
+        llm = _mock_llm([_make_ai_message("Response")])
+
+        session = MagicMock()
+        session.workspace_refs = []
+        session.exchanges = [
+            (f"old_q_{idx} " + ("x" * 800), f"old_a_{idx} " + ("y" * 800))
+            for idx in range(5)
+        ]
+        memory = MagicMock()
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={},
+            skill_runner_factory=lambda s, thread_id=None: None,
+            memory=memory,
+            session=session,
+        )
+        agent._context_window_resolver = lambda agent_type, thread_id=None: 2500
+
+        await agent.run("Newest question")
+
+        messages = llm.invoke.call_args[0][0]
+        serialized = [getattr(msg, "content", "") for msg in messages]
+        assert any(content == "Newest question" for content in serialized)
+        assert not any(isinstance(content, str) and "old_q_0" in content for content in serialized)
+        assert not any(isinstance(content, str) and "old_a_0" in content for content in serialized)
+
 
 class TestChatAgentMultiSkill:
     @pytest.mark.asyncio
@@ -538,6 +569,44 @@ class TestChatAgentMultiSkill:
             and "If you need a skill, call it now" in msg.content
             for msg in second_call_messages
         )
+
+    @pytest.mark.asyncio
+    async def test_workspace_refs_are_removed_after_first_tool_choice(self):
+        """Workspace candidates should not stay in context after routing to a skill."""
+        skill = _make_skill("files", "Workspace files")
+        turn1 = _make_ai_message("", tool_calls=[
+            {"id": "c1", "name": "files", "args": {"query": "read --filename note.md"}},
+        ])
+        turn2 = _make_ai_message("Found it.")
+        llm = _mock_llm([turn1, turn2])
+
+        runner = MagicMock()
+        runner.run = AsyncMock(return_value="note contents")
+        session = MagicMock()
+        session.workspace_refs = [
+            SearchHit(
+                path="note.md",
+                heading="",
+                section_ref="[[note]]",
+                page_ref="[[note]]",
+                snippet="note contents",
+                score=1.0,
+            )
+        ]
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"files": skill},
+            skill_runner_factory=lambda s, thread_id=None: runner,
+            session=session,
+        )
+
+        await agent.run("Bitte lies die Notiz")
+
+        second_call_messages = llm.invoke.call_args_list[1][0][0]
+        human_messages = [m for m in second_call_messages if isinstance(m, HumanMessage)]
+        assert human_messages[-1].content == "Bitte lies die Notiz"
+        assert all("Workspace Notes Available" not in m.content for m in human_messages)
 
 
 class TestSkillRunnerAgent:

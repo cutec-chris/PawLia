@@ -68,9 +68,39 @@ def estimate_tokens(text: str) -> int:
 
 def estimate_session_tokens(session: "Session") -> int:
     """Rough token footprint of the model context built from a Session."""
+    replay_tokens = 0
+    for exchange in session.exchanges:
+        if len(exchange) == 2:
+            user_text, bot_text = exchange  # type: ignore[misc]
+            tool_calls_info = None
+        else:
+            user_text, bot_text, tool_calls_info = exchange  # type: ignore[misc]
+
+        replay_tokens += estimate_tokens(str(user_text or ""))
+        replay_tokens += estimate_tokens(str(bot_text or ""))
+
+        if not tool_calls_info:
+            continue
+
+        for tc in tool_calls_info[:3]:
+            name = str(tc.get("name", "") or "")
+            args = tc.get("args", {})
+            if isinstance(args, dict):
+                query = str(args.get("query", "") or "")
+            else:
+                query = str(args or "")
+            result = str(tc.get("result", "") or "")
+
+            replay_tokens += estimate_tokens(name[:32])
+            replay_tokens += estimate_tokens(query[:100])
+            replay_tokens += estimate_tokens(result[:240])
+
+        if len(tool_calls_info) > 3:
+            replay_tokens += estimate_tokens(f"{len(tool_calls_info) - 3} more tool calls")
+
     return (
         estimate_tokens(session.summary)
-        + estimate_tokens(session.daily_history)
+        + max(estimate_tokens(session.daily_history), replay_tokens)
         + estimate_tokens(session.user_memory)
     )
 
@@ -135,9 +165,6 @@ class Session:
         self.pending_topic_heading: Optional[str] = None
 
 
-_DEFAULT_READ_QUERY = "<keywords>"
-
-
 def _format_workspace_refs(hits: list, user_query: str = "") -> str:
     """Format workspace hits as minimal pointers — model must call `files read`.
 
@@ -149,7 +176,6 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
     research/*/README.md hits are deduped against their project's content files
     so each project appears once with one ready-to-use read call.
     """
-    read_query = _read_query_for(user_query)
     lines = [
         "## Workspace Notes Available",
         "These wiki files were keyword-matched against the user's recent "
@@ -162,8 +188,11 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
         "topics. If the conversation is heading somewhere else (small talk, "
         "follow-up, clarification, correction of an earlier mistake), ignore "
         "these refs entirely.",
-        "- Only call `files read` if a heading clearly matches the user's "
-        "current question. When in doubt, ask the user before reading.",
+        "- If a listed section clearly matches the question, prefer reading that "
+        "section first via `files read-section` (or `files read` with the exact "
+        "section-ref) before doing anything broader.",
+        "- Do not start with `browser` or loose `grep` if a relevant workspace "
+        "section is already listed here.",
         "- Never weave content from these files into a reply unless you "
         "actually read the file *and* it answers what was asked. Do not "
         "invent a topic the user did not bring up.",
@@ -197,55 +226,41 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
 
     for project_dir, (readme_ref, description) in research_readmes.items():
         content_hit = research_content.get(project_dir)
-        content_ref = content_hit.wikilink_ref if content_hit else readme_ref
+        content_ref = content_hit.page_ref if content_hit else readme_ref
         entry = f"- **{readme_ref}** — {description or project_dir}"
         if content_hit and content_hit.heading:
-            entry += f" *(matched section: {content_hit.heading})*"
-        entry += f"\n  → `files read --query \"{read_query}\" {content_ref}`"
+            entry += f" *(matched section: {content_hit.section_ref})*"
+        entry += f"\n  → `{_workspace_read_suggestion(content_hit, content_ref)}`"
         lines.append(entry)
         rendered_projects.add(project_dir)
 
     for project_dir, hit in research_content.items():
         if project_dir in rendered_projects:
             continue
-        ref = hit.wikilink_ref
+        ref = hit.section_ref
         entry = f"- **{ref}** *(research/{project_dir})*"
-        if hit.heading:
-            entry += f" *(section: {hit.heading})*"
-        entry += f"\n  → `files read --query \"{read_query}\" {ref}`"
+        entry += f"\n  → `{_workspace_read_suggestion(hit, hit.page_ref)}`"
         lines.append(entry)
 
     for hit in other_hits:
-        ref = hit.wikilink_ref
+        ref = hit.section_ref
         entry = f"- **{ref}**"
-        if hit.heading:
-            entry += f" *(section: {hit.heading})*"
-        entry += f"\n  → `files read --query \"{read_query}\" {ref}`"
+        entry += f"\n  → `{_workspace_read_suggestion(hit, hit.page_ref)}`"
         lines.append(entry)
 
     return "\n".join(lines)
 
 
-def _read_query_for(user_query: str) -> str:
-    """Distill the user message into a 3–6 word `files read` --query value.
-
-    Falls back to a placeholder if the message is too short to extract content
-    words. Keeps the call site simple — caller passes the raw user input.
-    """
-    text = (user_query or "").strip()
-    if not text:
-        return _DEFAULT_READ_QUERY
-    tokens = [t for t in re.findall(r"\w+", text.lower()) if len(t) >= 4]
-    seen: set = set()
-    distilled: list = []
-    for t in tokens:
-        if t in seen:
-            continue
-        seen.add(t)
-        distilled.append(t)
-        if len(distilled) >= 6:
-            break
-    return " ".join(distilled) if distilled else _DEFAULT_READ_QUERY
+def _workspace_read_suggestion(hit: Optional[Any], page_ref: str) -> str:
+    """Return the most grounded files-skill follow-up for a workspace hit."""
+    heading = getattr(hit, "heading", "") if hit is not None else ""
+    if heading:
+        escaped_heading = str(heading).replace('"', '\\"')
+        return (
+            f'files read-section --filename "{page_ref}" '
+            f'--section "{escaped_heading}"'
+        )
+    return f'files read --filename "{page_ref}"'
 
 
 class MemoryManager:
@@ -954,7 +969,7 @@ class MemoryManager:
         """Build additional instructions for special conversation modes."""
         if mode == "call":
             return load_system_prompt("calls/live_call.md")
-        return ""
+        return load_system_prompt("chat/text_chat.md")
 
     @staticmethod
     def _build_skill_instructions(

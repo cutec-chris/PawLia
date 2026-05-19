@@ -26,7 +26,13 @@ The `--user-id` and `--session-dir` arguments are automatically provided via env
 python <scripts_dir>/files.py list
 ```
 
-Returns every file in the workspace **recursively**, with paths relative to the workspace root (e.g. `notes/today.md`).
+Returns files in the workspace **recursively**, with paths relative to the workspace root (e.g. `notes/today.md`).
+
+Default behaviour: returns at most 200 files so the result stays compact for the model. If `has_more: true` appears in the response, continue with:
+
+```
+python <scripts_dir>/files.py list --offset 200 --limit 200
+```
 
 ## Read a file
 
@@ -34,7 +40,7 @@ Returns every file in the workspace **recursively**, with paths relative to the 
 python <scripts_dir>/files.py read --filename "<name>"
 ```
 
-`--filename` also accepts wikilink syntax — e.g. `[[ios-development]]` resolves to `wiki/topics/ios-development.md`, and `[[research/proj/abc]]` resolves as a workspace-relative path. The same wikilink syntax works for `outline`, `read-section`, and `delete`.
+`--filename` also accepts wikilink syntax — e.g. `[[topic/ios-development]]` resolves to `wiki/topics/topic/ios-development.md`, `[[person/max-mustermann]]` resolves to `wiki/topics/person/max-mustermann.md`, and `[[research/proj/abc]]` resolves as a workspace-relative path. Section anchors are supported too: `[[topic/ios-development#Tooling]]` can be passed directly to `read` and will return that section. The same wikilink syntax works for `outline`, `read-section`, and `delete`.
 
 **Default behaviour**: returns the first 150 lines. If `has_more: true` appears in the response, use `--offset` to continue reading.
 

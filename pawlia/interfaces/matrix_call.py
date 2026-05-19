@@ -23,6 +23,7 @@ Dependencies: aiortc, av, numpy  (optional: edge-tts or piper for TTS)
 """
 
 import asyncio
+from collections import deque
 import fractions
 import logging
 import os
@@ -109,6 +110,11 @@ if _AIORTC_AVAILABLE:
         def is_playing(self) -> bool:
             """True while TTS or hold audio is playing."""
             return not self._queue.empty() or self._hold_active
+
+        @property
+        def is_tts_playing(self) -> bool:
+            """True while spoken TTS audio is queued or mid-sentence."""
+            return not self._queue.empty() or self._current_sentence_id is not None
 
         def set_hold_audio(self, pcm_int16: np.ndarray) -> None:
             """Set the hold audio loop (int16 mono PCM at 48 kHz)."""
@@ -351,6 +357,13 @@ class CallSession:
     MAX_SPECTRAL_FLATNESS = 0.72
     MIN_SPEECH_LIKE_RATIO = 0.08
     MIN_CONSECUTIVE_SPEECHLIKE_FRAMES = 4
+    # Require a short sustained return to speech before a pause is treated as
+    # broken. This prevents single noisy frames from stretching a chunk for
+    # many extra seconds.
+    MIN_RESUME_SPEECH_FRAMES = 3
+    # Keep a small lead-in before detected speech so STT does not miss word
+    # onsets that arrive just before the VAD is confident enough to start.
+    PRE_SPEECH_SECONDS = 0.4
     WEBRTC_VAD_ENABLED = True
     WEBRTC_VAD_MODE = 2
     WEBRTC_VAD_MIN_VOICED_RATIO = 0.12
@@ -551,6 +564,18 @@ class CallSession:
             "min_consecutive_speechlike_frames",
             self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES,
             minimum=1,
+        )
+        self.MIN_RESUME_SPEECH_FRAMES = self._get_int_config(
+            voip_cfg,
+            "min_resume_speech_frames",
+            self.MIN_RESUME_SPEECH_FRAMES,
+            minimum=1,
+        )
+        self.PRE_SPEECH_SECONDS = self._get_float_config(
+            voip_cfg,
+            "pre_speech_seconds",
+            self.PRE_SPEECH_SECONDS,
+            minimum=0.0,
         )
         self.WEBRTC_VAD_ENABLED = self._get_bool_config(
             voip_cfg,
@@ -1366,6 +1391,28 @@ class CallSession:
             and stats["voiced_run"] >= self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
         )
 
+    def _resume_speech_after_pause(
+        self,
+        speech_like_frame: bool,
+        silence_count: int,
+        resume_speech_count: int,
+    ) -> tuple[bool, int]:
+        """Require a short sustained return before breaking an in-progress pause."""
+        if not speech_like_frame or silence_count <= 0:
+            return False, 0
+        resume_speech_count += 1
+        return resume_speech_count >= self.MIN_RESUME_SPEECH_FRAMES, resume_speech_count
+
+    def _start_speech_buffer(
+        self,
+        pre_speech_buffer: "deque[np.ndarray]",
+        pcm: "np.ndarray",
+    ) -> List["np.ndarray"]:
+        """Seed a new speech chunk with a small pre-roll before the trigger frame."""
+        chunk = list(pre_speech_buffer)
+        chunk.append(pcm)
+        return chunk
+
     def _is_meaningful_interrupt(self, text: str) -> bool:
         """Return True when a transcript is strong enough to justify barge-in."""
         normalized = " ".join((text or "").strip().split())
@@ -1585,7 +1632,16 @@ class CallSession:
             while not self._done.is_set():
                 idle_for = time.monotonic() - self._last_user_speech_at
                 if not self._speaking and idle_for >= response_delay:
-                    if self._tts_track and self._tts_track.is_playing:
+                    tts_playing = False
+                    if self._tts_track:
+                        tts_playing = bool(
+                            getattr(
+                                self._tts_track,
+                                "is_tts_playing",
+                                getattr(self._tts_track, "is_playing", False),
+                            )
+                        )
+                    if tts_playing:
                         await asyncio.sleep(0.2)
                         continue
                     break
@@ -1623,9 +1679,12 @@ class CallSession:
         SAMPLE_RATE = 48000
         fps = 50  # aiortc default: 20 ms frames
         min_speech_frames = int(self.MIN_SPEECH_SECONDS * fps)
+        pre_speech_frames = int(max(0.0, self.PRE_SPEECH_SECONDS) * fps)
 
         speech_buffer: List[np.ndarray] = []
+        pre_speech_buffer: "deque[np.ndarray]" = deque(maxlen=max(pre_speech_frames, 1))
         silence_count = 0
+        resume_speech_count = 0
 
         logger.info("call %s: audio pipeline started", self.call_id[:8])
         frames_received = 0
@@ -1677,6 +1736,9 @@ class CallSession:
                 # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
                 adjusted_rms = self._agc_rms(rms)
 
+                if not speech_buffer and pre_speech_frames > 0:
+                    pre_speech_buffer.append(pcm)
+
                 # Update background noise floor while not accumulating speech.
                 # EMA alpha=0.02 → ~50-frame (1 s) time constant, slow enough to
                 # ignore transient spikes but fast enough to adapt to the cycling
@@ -1710,10 +1772,22 @@ class CallSession:
                                 rms,
                             )
                             self._mark_user_speech_started()
-                        speech_buffer.append(pcm)
-                        silence_count = 0
+                            speech_buffer = self._start_speech_buffer(pre_speech_buffer, pcm)
+                        else:
+                            speech_buffer.append(pcm)
+                        resume_confirmed, resume_speech_count = self._resume_speech_after_pause(
+                            speech_like_frame,
+                            silence_count,
+                            resume_speech_count,
+                        )
+                        if resume_confirmed:
+                            silence_count = 0
+                            resume_speech_count = 0
+                        elif silence_count == 0:
+                            resume_speech_count = 0
                     elif speech_buffer:
                         silence_count += 1
+                        resume_speech_count = 0
                         speech_buffer.append(pcm)
 
                         if silence_count >= silence_threshold:
@@ -1724,7 +1798,9 @@ class CallSession:
                                 self.call_id[:8], duration, len(chunk),
                             )
                             speech_buffer = []
+                            pre_speech_buffer.clear()
                             silence_count = 0
+                            resume_speech_count = 0
                             self._mark_user_speech_ended()
 
                             if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
@@ -1765,10 +1841,22 @@ class CallSession:
                         logger.info("call %s: speech started (rms=%.4f)",
                                     self.call_id[:8], rms)
                         self._mark_user_speech_started()
-                    speech_buffer.append(pcm)
-                    silence_count = 0
+                        speech_buffer = self._start_speech_buffer(pre_speech_buffer, pcm)
+                    else:
+                        speech_buffer.append(pcm)
+                    resume_confirmed, resume_speech_count = self._resume_speech_after_pause(
+                        speech_like_frame,
+                        silence_count,
+                        resume_speech_count,
+                    )
+                    if resume_confirmed:
+                        silence_count = 0
+                        resume_speech_count = 0
+                    elif silence_count == 0:
+                        resume_speech_count = 0
                 elif speech_buffer:
                     silence_count += 1
+                    resume_speech_count = 0
                     speech_buffer.append(pcm)  # keep trailing silence for context
 
                     if silence_count >= silence_threshold:
@@ -1777,7 +1865,9 @@ class CallSession:
                         logger.info("call %s: speech ended — %.1fs, %d samples",
                                     self.call_id[:8], duration, len(chunk))
                         speech_buffer = []
+                        pre_speech_buffer.clear()
                         silence_count = 0
+                        resume_speech_count = 0
                         self._mark_user_speech_ended()
 
                         if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
@@ -1835,16 +1925,24 @@ class CallSession:
         interrupt_playback: bool = False,
     ) -> None:
         """Transcribe a speech chunk and optionally use it to barge into TTS."""
+        started_hold = False
+        if not interrupt_playback and self._tts_track:
+            self._tts_track.start_hold()
+            started_hold = True
         try:
             text = await self._transcribe_speech(pcm, sample_rate)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error("call %s: transcription error: %s", self.call_id[:8], e)
+            if started_hold and self._tts_track:
+                self._tts_track.stop_hold()
             return
 
         if not text:
             logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
+            if started_hold and self._tts_track:
+                self._tts_track.stop_hold()
             return
 
         try:
