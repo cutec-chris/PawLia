@@ -14,6 +14,7 @@ All notifications (reminders, script results, etc.) are routed through the LLM f
 |---------|---------|---------|---------------|
 | Simple reminders | `workspace/tasks.md` (🔔 prefix + ⏳ scheduled date) | Fixed time or relative (`10m`, `2h`) | Only for formatting output |
 | Calendar events | `workspace/calendar/<date> <title>.md` (Full Calendar frontmatter) | 15 min before start | Only for formatting output |
+| Event reminders | Event frontmatter `reminders:` + derived `checklist:` items | Relative to event start | Only for formatting output |
 | Event checklists | Event frontmatter `checklist:` + `scheduler_state.json` | Relative to event start | Only for formatting output |
 | Task reminders | `workspace/tasks.md` (📅 due date) + `scheduler_state.json` | Relative to due date | Only for formatting output |
 | Scheduled jobs | `automations/jobs.json` | Cron-like schedule | Only for formatting output |
@@ -66,7 +67,7 @@ Events are stored as individual Markdown files with YAML frontmatter compatible 
 "Termin am Freitag 14 Uhr, Kundenpräsentation in Hamburg"
 ```
 
-The LLM creates the event with a checklist via the organizer skill.
+The LLM creates the event via the organizer skill. Normal user-facing reminders belong in `reminders`; automation and preparation steps belong in `checklist`.
 
 ### File format (`workspace/calendar/2026-03-21 Kundenpräsentation Hamburg.md`)
 
@@ -80,6 +81,9 @@ startTime: '14:00'
 endTime: '16:00'
 location: Hamburg Innenstadt
 type: single
+reminders:
+- minutes_before: 60
+  message: 'In 60 Minuten: {title} in {location}.'
 checklist:
 - id: chk-a1b2c3d4
   message: 'Morgen: {title} in {location}. Unterlagen vorbereiten!'
@@ -102,7 +106,7 @@ Kundenpräsentation für Projekt Alpha.
 - [ ] route_plan.py (-90m)
 ```
 
-The frontmatter contains both standard Full Calendar fields and the `checklist` automation config. The body is for human-readable notes — the checklist in the body is informational, the scheduler reads only from frontmatter.
+The frontmatter contains both standard Full Calendar fields and the event-specific automation config. `reminders` represent the user-visible event reminders. `checklist` contains automation/preparation items. The body is for human-readable notes — the checklist in the body is informational, the scheduler reads only from frontmatter.
 
 ### Full Calendar frontmatter fields
 
@@ -121,6 +125,19 @@ The frontmatter contains both standard Full Calendar fields and the `checklist` 
 ### Event notifications
 
 The scheduler automatically notifies 15 minutes before an event starts. The notification state is tracked in `scheduler_state.json` (not in the .md file).
+
+### Event reminders
+
+Event reminders are stored directly in the event frontmatter as `reminders:`. At write time, the organizer also derives scheduler-compatible checklist entries from them so the existing checklist processor can fire them.
+
+```yaml
+reminders:
+- minutes_before: 40
+  message: In 40 Minuten: Parcours beginnt um 17:00 Uhr.
+  notify: true
+```
+
+Use `reminders` for plain notifications tied to the event. Use `checklist` only when the event needs preparation steps or scripts.
 
 ### Event ID
 

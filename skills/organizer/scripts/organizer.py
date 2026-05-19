@@ -237,6 +237,22 @@ def _event_filename(date_str: str, title: str) -> str:
     return f"{date_part} {safe_title}.md"
 
 
+def _event_reminder_to_checklist_item(reminder: dict, title: str) -> dict:
+    minutes = reminder.get("minutes_before")
+    if minutes in (None, ""):
+        raise ValueError("Event reminder is missing minutes_before.")
+    minutes = int(minutes)
+    message = reminder.get("message") or f"In {minutes} Minuten: {title}"
+    return {
+        "id": f"rem-{uuid.uuid4().hex[:8]}",
+        "trigger": "relative",
+        "trigger_offset": f"-{minutes}m",
+        "message": message,
+        "notify": reminder.get("notify", True),
+        "source": "event_reminder",
+    }
+
+
 def _write_event_md(filepath: str, event: dict) -> None:
     """Write an event as a Full Calendar compatible Markdown file."""
     start_str = event["start"]
@@ -284,6 +300,8 @@ def _write_event_md(filepath: str, event: dict) -> None:
         fm["location"] = event["location"]
     if event.get("completed"):
         fm["completed"] = event["completed"]
+    if event.get("reminders"):
+        fm["reminders"] = event["reminders"]
     if rrule:
         fm.update(_recurrence_fields_from_rrule(
             rrule,
@@ -367,6 +385,7 @@ def _read_event_md(filepath: str) -> dict | None:
         "end": end,
         "description": description,
         "location": fm.get("location", ""),
+        "reminders": fm.get("reminders", []),
         "checklist": fm.get("checklist", []),
         "type": fm.get("type", "single"),
         "rrule": fm.get("rrule", ""),
@@ -575,9 +594,25 @@ def cmd_add_event(args) -> None:
             _out({"success": False, "error": "Invalid checklist JSON."})
             return
 
+    reminders = []
+    if args.reminders:
+        try:
+            reminders = json.loads(_strip_quotes(args.reminders))
+        except json.JSONDecodeError:
+            _out({"success": False, "error": "Invalid reminders JSON."})
+            return
+
     for item in checklist:
         if "id" not in item:
             item["id"] = f"chk-{uuid.uuid4().hex[:8]}"
+
+    try:
+        reminder_checklist = [_event_reminder_to_checklist_item(rem, args.title) for rem in reminders]
+    except (TypeError, ValueError) as e:
+        _out({"success": False, "error": str(e)})
+        return
+
+    checklist.extend(reminder_checklist)
 
     try:
         rrule = _build_rrule(
@@ -597,6 +632,7 @@ def cmd_add_event(args) -> None:
         "end": args.end or "",
         "description": args.description or "",
         "location": args.location or "",
+        "reminders": reminders,
         "checklist": checklist,
     }
     if rrule:
@@ -622,6 +658,8 @@ def cmd_add_event(args) -> None:
         msg += " as recurring event"
     if checklist:
         msg += f" with {len(checklist)} checklist items"
+    if reminders:
+        msg += f" and {len(reminders)} reminders"
     _out({"success": True, "message": msg + ".", "event_id": filename})
 
 
@@ -936,6 +974,7 @@ def main():
     p.add_argument("--description")
     p.add_argument("--location")
     p.add_argument("--checklist", help="JSON array of checklist items")
+    p.add_argument("--reminders", help="JSON array of event reminders")
     p.add_argument("--recurrence", choices=["none", "daily", "weekly", "monthly", "yearly"], default="none")
     p.add_argument("--recurrence-days", help="Weekly days, e.g. 'TU,TH' or 'dienstag donnerstag'")
     p.add_argument("--recurrence-until", help="Last recurrence date as YYYY-MM-DD")

@@ -4,7 +4,7 @@ description: "Personal planner for reminders, calendar events, and tasks. Use wh
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "3.0"
+  version: "3.1"
 ---
 
 # Organizer
@@ -50,12 +50,29 @@ Events are stored as individual Markdown files with Full Calendar compatible YAM
 
 Add an event:
 ```
-python <scripts_dir>/organizer.py add-event --title "<title>" --start "<ISO8601>" [--end "<ISO8601>"] [--description "<desc>"] [--location "<loc>"] [--checklist '<JSON>'] [--recurrence none|daily|weekly|monthly|yearly] [--recurrence-days "TU,TH"] [--recurrence-until YYYY-MM-DD] [--recurrence-count N]
+python <scripts_dir>/organizer.py add-event --title "<title>" --start "<ISO8601>" [--end "<ISO8601>"] [--description "<desc>"] [--location "<loc>"] [--reminders '<JSON>'] [--checklist '<JSON>'] [--recurrence none|daily|weekly|monthly|yearly] [--recurrence-days "TU,TH"] [--recurrence-until YYYY-MM-DD] [--recurrence-count N]
 ```
 
 Recurring events are first-class calendar events. Use `--recurrence weekly` for weekly appointments instead of creating scheduler jobs. For weekly events, `--recurrence-days` accepts RRULE day codes (`MO,TU,WE,TH,FR,SA,SU`) or German/English weekday names. The event file stores both FullCalendar-compatible frontmatter (`type: recurring`, `daysOfWeek`, `startRecur`, `endRecur`) and an `rrule` field for CalDAV/Radicale export.
 
-The `--checklist` parameter accepts a JSON array of automation items stored in frontmatter. Each item can reference a script that the system executes automatically at the right time.
+Use `--reminders` for normal user-facing event reminders like "40 minutes before Parkour". These are stored in the event frontmatter as `reminders` and also translated into scheduler-compatible checklist items internally so they actually fire.
+
+**Event reminder format:**
+```json
+[
+  {
+    "minutes_before": 40,
+    "message": "In 40 Minuten: Parcours beginnt um 17:00 Uhr.",
+    "notify": true
+  }
+]
+```
+
+- `minutes_before`: whole minutes before the event start
+- `message`: optional notification text
+- `notify`: optional, defaults to `true`
+
+The `--checklist` parameter is for automation and preparation steps stored in frontmatter. Each item can reference a script that the system executes automatically at the right time.
 
 **Checklist item format:**
 ```json
@@ -83,7 +100,10 @@ The `--checklist` parameter accepts a JSON array of automation items stored in f
 - `params`: passed to the script as AUTOMATION_PARAMS env var (JSON)
 - `notify`: whether to send the result to the user (default: true)
 
-**IMPORTANT:** When creating events with a location, ALWAYS create a checklist with appropriate reminders and preparation steps.
+**IMPORTANT:**
+- When the user asks for a reminder tied to an event, use `--reminders`.
+- Use `--checklist` only for automation/preparation steps or advanced scripted workflows.
+- When creating events with a location, usually add both: `--reminders` for the user notification and `--checklist` for preparation steps when useful.
 
 List events:
 ```
