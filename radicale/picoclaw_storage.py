@@ -51,7 +51,7 @@ import uuid
 
 import vobject
 import yaml
-from icalendar import Calendar, Event, vDate, vDatetime
+from icalendar import Calendar, Event, vDate, vDatetime, vRecur
 
 import radicale.item as radicale_item
 from radicale.storage import BaseCollection, BaseStorage
@@ -134,6 +134,7 @@ def _md_to_ical(filepath: str, href: str) -> Optional[str]:
     end_time = str(fm.get("endTime", "")) if fm.get("endTime") else ""
     end_date_str = str(fm.get("endDate", date_str)) if fm.get("endDate") else date_str
     location = fm.get("location", "")
+    rrule = str(fm.get("rrule", "") or "")
 
     try:
         if all_day or not start_time:
@@ -172,6 +173,11 @@ def _md_to_ical(filepath: str, href: str) -> Optional[str]:
         ev.add("location", location)
     if body:
         ev.add("description", body)
+    if rrule:
+        try:
+            ev.add("rrule", vRecur.from_ical(rrule))
+        except Exception:
+            ev.add("rrule", rrule)
     ev.add("dtstamp", datetime.now(timezone.utc))
     cal.add_component(ev)
 
@@ -199,6 +205,7 @@ def _ical_to_md(ical_text: str) -> Optional[Tuple[str, dict]]:
         dtend_prop = component.get("DTEND")
         description = str(component.get("DESCRIPTION", ""))
         location = str(component.get("LOCATION", ""))
+        rrule_prop = component.get("RRULE")
 
         if dtstart_prop is None:
             return None
@@ -228,11 +235,19 @@ def _ical_to_md(ical_text: str) -> Optional[Tuple[str, dict]]:
                     if end_date_s != date_str:
                         end_date = end_date_s
 
+        rrule = ""
+        if rrule_prop:
+            try:
+                raw = rrule_prop.to_ical()
+                rrule = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            except Exception:
+                rrule = str(rrule_prop)
+
         fm: dict = {
             "title": summary,
             "date": date_str,
             "allDay": all_day,
-            "type": "single",
+            "type": "recurring" if rrule else "single",
             "uid": uid,
         }
         if not all_day and start_time:
@@ -243,6 +258,19 @@ def _ical_to_md(ical_text: str) -> Optional[Tuple[str, dict]]:
             fm["endDate"] = end_date
         if location:
             fm["location"] = location
+        if rrule:
+            fm["rrule"] = rrule
+            fm["startRecur"] = date_str
+            byday = _rrule_part(rrule, "BYDAY")
+            if byday:
+                fm["daysOfWeek"] = [
+                    _RRULE_TO_FULLCALENDAR_DAY[d]
+                    for d in byday.split(",")
+                    if d in _RRULE_TO_FULLCALENDAR_DAY
+                ]
+            until = _rrule_part(rrule, "UNTIL")
+            if len(until) >= 8:
+                fm["endRecur"] = f"{until[:4]}-{until[4:6]}-{until[6:8]}"
 
         content = f"---\n{yaml.dump(fm, allow_unicode=True, default_flow_style=False).rstrip()}\n---\n"
         if description:
@@ -258,6 +286,25 @@ def _ical_to_md(ical_text: str) -> Optional[Tuple[str, dict]]:
         return content, meta
 
     return None
+
+
+_RRULE_TO_FULLCALENDAR_DAY = {
+    "SU": 0,
+    "MO": 1,
+    "TU": 2,
+    "WE": 3,
+    "TH": 4,
+    "FR": 5,
+    "SA": 6,
+}
+
+
+def _rrule_part(rrule: str, key: str) -> str:
+    prefix = key.upper() + "="
+    for part in (rrule or "").split(";"):
+        if part.upper().startswith(prefix):
+            return part[len(prefix):]
+    return ""
 
 
 # ---------------------------------------------------------------------------

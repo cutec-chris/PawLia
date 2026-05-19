@@ -50,8 +50,10 @@ Events are stored as individual Markdown files with Full Calendar compatible YAM
 
 Add an event:
 ```
-python <scripts_dir>/organizer.py add-event --title "<title>" --start "<ISO8601>" [--end "<ISO8601>"] [--description "<desc>"] [--location "<loc>"] [--checklist '<JSON>']
+python <scripts_dir>/organizer.py add-event --title "<title>" --start "<ISO8601>" [--end "<ISO8601>"] [--description "<desc>"] [--location "<loc>"] [--checklist '<JSON>'] [--recurrence none|daily|weekly|monthly|yearly] [--recurrence-days "TU,TH"] [--recurrence-until YYYY-MM-DD] [--recurrence-count N]
 ```
+
+Recurring events are first-class calendar events. Use `--recurrence weekly` for weekly appointments instead of creating scheduler jobs. For weekly events, `--recurrence-days` accepts RRULE day codes (`MO,TU,WE,TH,FR,SA,SU`) or German/English weekday names. The event file stores both FullCalendar-compatible frontmatter (`type: recurring`, `daysOfWeek`, `startRecur`, `endRecur`) and an `rrule` field for CalDAV/Radicale export.
 
 The `--checklist` parameter accepts a JSON array of automation items stored in frontmatter. Each item can reference a script that the system executes automatically at the right time.
 

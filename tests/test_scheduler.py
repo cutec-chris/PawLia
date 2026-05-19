@@ -285,6 +285,39 @@ class TestSchedulerEvents:
 
             assert len(notifications) == 0
 
+    @pytest.mark.asyncio
+    async def test_recurring_event_notified_per_occurrence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cal_dir = os.path.join(tmpdir, "test_user", "workspace", "calendar")
+            start = datetime.now() + timedelta(minutes=10)
+            byday = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"][start.weekday()]
+            _write_event_md(cal_dir, "2026-05-19 Parcours.md", {
+                "title": "Parcours",
+                "date": start.strftime("%Y-%m-%d"),
+                "startTime": start.strftime("%H:%M"),
+                "endTime": (start + timedelta(hours=1)).strftime("%H:%M"),
+                "allDay": False,
+                "type": "recurring",
+                "rrule": f"FREQ=WEEKLY;BYDAY={byday}",
+            })
+
+            notifications = []
+
+            async def capture(user_id, message):
+                notifications.append((user_id, message))
+
+            scheduler = Scheduler(tmpdir)
+            scheduler.register(capture)
+            await scheduler._check_all()
+
+            assert len(notifications) == 1
+            assert "Parcours" in notifications[0][1]
+
+            state_path = os.path.join(tmpdir, "test_user", "scheduler_state.json")
+            with open(state_path) as f:
+                state = json.load(f)
+            assert f"2026-05-19 Parcours.md#{start.strftime('%Y-%m-%dT%H:%M')}" in state.get("notified_events", [])
+
 
 class TestSchedulerCallbacks:
     @pytest.mark.asyncio

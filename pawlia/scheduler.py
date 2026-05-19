@@ -108,6 +108,101 @@ def _list_workspace_events(session_dir: str, user_id: str) -> list[dict]:
     return events
 
 
+_RRULE_WEEKDAY_TO_PY = {
+    "MO": 0,
+    "TU": 1,
+    "WE": 2,
+    "TH": 3,
+    "FR": 4,
+    "SA": 5,
+    "SU": 6,
+}
+
+
+def _rrule_part(rrule: str, key: str) -> str:
+    prefix = key.upper() + "="
+    for part in (rrule or "").split(";"):
+        if part.upper().startswith(prefix):
+            return part[len(prefix):]
+    return ""
+
+
+def _event_start_datetime(event: dict) -> Optional[datetime]:
+    date_str = event.get("date", "")
+    start_time = event.get("startTime", "")
+    if not date_str:
+        return None
+    try:
+        if start_time:
+            start = datetime.fromisoformat(f"{date_str}T{start_time}")
+        else:
+            start = datetime.fromisoformat(date_str)
+        if start.tzinfo is not None:
+            start = start.replace(tzinfo=None)
+        return start
+    except ValueError:
+        return None
+
+
+def _next_recurring_event_occurrence(event: dict, now: datetime, window: datetime) -> Optional[datetime]:
+    rrule = str(event.get("rrule", "") or "")
+    if not rrule:
+        return None
+
+    base_start = _event_start_datetime(event)
+    if base_start is None:
+        return None
+
+    freq = _rrule_part(rrule, "FREQ").upper()
+    until_raw = _rrule_part(rrule, "UNTIL")
+    until = None
+    if len(until_raw) >= 8:
+        try:
+            until = datetime.fromisoformat(f"{until_raw[:4]}-{until_raw[4:6]}-{until_raw[6:8]}T23:59:59")
+        except ValueError:
+            until = None
+
+    candidates: list[datetime] = []
+    if freq == "DAILY":
+        days = max((now.date() - base_start.date()).days, 0)
+        candidates = [base_start + timedelta(days=days), base_start + timedelta(days=days + 1)]
+    elif freq == "WEEKLY":
+        byday = _rrule_part(rrule, "BYDAY")
+        weekdays = [
+            _RRULE_WEEKDAY_TO_PY[d]
+            for d in byday.split(",")
+            if d in _RRULE_WEEKDAY_TO_PY
+        ] or [base_start.weekday()]
+        for offset in range(0, 8):
+            candidate_date = (now + timedelta(days=offset)).date()
+            if candidate_date.weekday() in weekdays:
+                candidates.append(datetime.combine(candidate_date, base_start.time()))
+    elif freq == "MONTHLY":
+        for month_offset in range(0, 2):
+            month = now.month + month_offset
+            year = now.year + (month - 1) // 12
+            month = (month - 1) % 12 + 1
+            try:
+                candidates.append(base_start.replace(year=year, month=month))
+            except ValueError:
+                continue
+    elif freq == "YEARLY":
+        for year in (now.year, now.year + 1):
+            try:
+                candidates.append(base_start.replace(year=year))
+            except ValueError:
+                continue
+
+    for candidate in sorted(candidates):
+        if candidate < base_start:
+            continue
+        if until and candidate > until:
+            continue
+        if now <= candidate <= window:
+            return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Markdown task/reminder parsing
 # ---------------------------------------------------------------------------
@@ -595,22 +690,18 @@ class Scheduler:
 
         for event in events:
             filename = event.get("_filename", "")
-            if filename in notified:
+            start = None
+            notify_key = filename
+            if event.get("rrule"):
+                start = _next_recurring_event_occurrence(event, now, window)
+                if start is None:
+                    continue
+                notify_key = f"{filename}#{start.strftime('%Y-%m-%dT%H:%M')}"
+            else:
+                start = _event_start_datetime(event)
+            if start is None:
                 continue
-
-            date_str = event.get("date", "")
-            start_time = event.get("startTime", "")
-            if not date_str:
-                continue
-
-            try:
-                if start_time:
-                    start = datetime.fromisoformat(f"{date_str}T{start_time}")
-                else:
-                    start = datetime.fromisoformat(date_str)
-                if start.tzinfo is not None:
-                    start = start.replace(tzinfo=None)
-            except ValueError:
+            if notify_key in notified:
                 continue
 
             if now <= start <= window:
@@ -623,7 +714,7 @@ class Scheduler:
                     text += f" ({location})"
 
                 await self._notify(user_id, text)
-                notified.add(filename)
+                notified.add(notify_key)
                 changed = True
 
         if changed:

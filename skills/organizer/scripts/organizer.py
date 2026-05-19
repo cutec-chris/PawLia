@@ -23,7 +23,7 @@ import re
 import sys
 import unicodedata
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import yaml
 
@@ -83,6 +83,138 @@ def _strip_quotes(s: str) -> str:
     return s
 
 
+_WEEKDAY_TO_RRULE = {
+    "mo": "MO",
+    "mon": "MO",
+    "monday": "MO",
+    "montag": "MO",
+    "tu": "TU",
+    "tue": "TU",
+    "tuesday": "TU",
+    "di": "TU",
+    "dienstag": "TU",
+    "we": "WE",
+    "wed": "WE",
+    "wednesday": "WE",
+    "mi": "WE",
+    "mittwoch": "WE",
+    "th": "TH",
+    "thu": "TH",
+    "thursday": "TH",
+    "do": "TH",
+    "donnerstag": "TH",
+    "fr": "FR",
+    "fri": "FR",
+    "friday": "FR",
+    "freitag": "FR",
+    "sa": "SA",
+    "sat": "SA",
+    "saturday": "SA",
+    "samstag": "SA",
+    "su": "SU",
+    "sun": "SU",
+    "sunday": "SU",
+    "so": "SU",
+    "sonntag": "SU",
+}
+
+_RRULE_TO_FULLCALENDAR_DAY = {
+    "SU": 0,
+    "MO": 1,
+    "TU": 2,
+    "WE": 3,
+    "TH": 4,
+    "FR": 5,
+    "SA": 6,
+}
+
+
+def _parse_date_or_datetime(value: str) -> date | datetime:
+    if "T" in value:
+        return datetime.fromisoformat(value)
+    return date.fromisoformat(value[:10])
+
+
+def _rrule_weekday_for_start(start: str) -> str:
+    parsed = _parse_date_or_datetime(start)
+    by_weekday = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+    return by_weekday[parsed.weekday()]
+
+
+def _normalize_recurrence_days(days: str) -> list[str]:
+    result: list[str] = []
+    for raw in re.split(r"[,\s]+", days or ""):
+        token = raw.strip().lower()
+        if not token:
+            continue
+        if token.isdigit():
+            fullcalendar_day = int(token)
+            reverse = {v: k for k, v in _RRULE_TO_FULLCALENDAR_DAY.items()}
+            if fullcalendar_day in reverse:
+                result.append(reverse[fullcalendar_day])
+            continue
+        day = _WEEKDAY_TO_RRULE.get(token)
+        if day:
+            result.append(day)
+    return result
+
+
+def _build_rrule(
+    recurrence: str,
+    start: str,
+    recurrence_days: str = "",
+    recurrence_until: str = "",
+    recurrence_count: int | None = None,
+) -> str:
+    recurrence = (recurrence or "").strip().lower()
+    if not recurrence or recurrence == "none":
+        return ""
+    if recurrence not in {"daily", "weekly", "monthly", "yearly"}:
+        raise ValueError("recurrence must be one of: none, daily, weekly, monthly, yearly")
+
+    parts = [f"FREQ={recurrence.upper()}"]
+    if recurrence == "weekly":
+        days = _normalize_recurrence_days(recurrence_days) or [_rrule_weekday_for_start(start)]
+        parts.append("BYDAY=" + ",".join(days))
+    if recurrence_until:
+        until = recurrence_until.replace("-", "")
+        if "T" in until:
+            until = until.replace(":", "")
+        parts.append(f"UNTIL={until}")
+    if recurrence_count:
+        parts.append(f"COUNT={int(recurrence_count)}")
+    return ";".join(parts)
+
+
+def _rrule_part(rrule: str, key: str) -> str:
+    prefix = key.upper() + "="
+    for part in (rrule or "").split(";"):
+        if part.upper().startswith(prefix):
+            return part[len(prefix):]
+    return ""
+
+
+def _recurrence_fields_from_rrule(rrule: str, start: str, recurrence_until: str = "") -> dict:
+    if not rrule:
+        return {}
+    fields: dict = {
+        "type": "recurring",
+        "rrule": rrule,
+        "startRecur": start[:10],
+    }
+    until = (recurrence_until or _rrule_part(rrule, "UNTIL")).replace("-", "")
+    if len(until) >= 8:
+        fields["endRecur"] = until[:4] + "-" + until[4:6] + "-" + until[6:8]
+    byday = _rrule_part(rrule, "BYDAY")
+    if byday:
+        fields["daysOfWeek"] = [
+            _RRULE_TO_FULLCALENDAR_DAY[d]
+            for d in byday.split(",")
+            if d in _RRULE_TO_FULLCALENDAR_DAY
+        ]
+    return fields
+
+
 def _safe_filename(name: str) -> str:
     """Create a filesystem-safe version of a string."""
     # Normalize unicode
@@ -132,12 +264,15 @@ def _write_event_md(filepath: str, event: dict) -> None:
 
     all_day = start_time is None or start_time == "00:00" and end_time in (None, "00:00", "23:59")
 
+    recurrence = event.get("recurrence", {}) or {}
+    rrule = recurrence.get("rrule") or event.get("rrule") or ""
+
     # Build frontmatter
     fm = {
         "title": event["title"],
         "date": date_str,
         "allDay": all_day,
-        "type": "single",
+        "type": "recurring" if rrule else "single",
     }
     if not all_day and start_time:
         fm["startTime"] = start_time
@@ -149,6 +284,12 @@ def _write_event_md(filepath: str, event: dict) -> None:
         fm["location"] = event["location"]
     if event.get("completed"):
         fm["completed"] = event["completed"]
+    if rrule:
+        fm.update(_recurrence_fields_from_rrule(
+            rrule,
+            event["start"],
+            recurrence.get("until") or "",
+        ))
 
     # Checklist automation config goes into frontmatter (scheduler reads it)
     if event.get("checklist"):
@@ -227,6 +368,11 @@ def _read_event_md(filepath: str) -> dict | None:
         "description": description,
         "location": fm.get("location", ""),
         "checklist": fm.get("checklist", []),
+        "type": fm.get("type", "single"),
+        "rrule": fm.get("rrule", ""),
+        "daysOfWeek": fm.get("daysOfWeek", []),
+        "startRecur": fm.get("startRecur", ""),
+        "endRecur": fm.get("endRecur", ""),
     }
     return event
 
@@ -433,6 +579,18 @@ def cmd_add_event(args) -> None:
         if "id" not in item:
             item["id"] = f"chk-{uuid.uuid4().hex[:8]}"
 
+    try:
+        rrule = _build_rrule(
+            args.recurrence or "none",
+            args.start,
+            args.recurrence_days or "",
+            args.recurrence_until or "",
+            args.recurrence_count,
+        )
+    except ValueError as e:
+        _out({"success": False, "error": str(e)})
+        return
+
     event = {
         "title": args.title,
         "start": args.start,
@@ -441,6 +599,8 @@ def cmd_add_event(args) -> None:
         "location": args.location or "",
         "checklist": checklist,
     }
+    if rrule:
+        event["recurrence"] = {"rrule": rrule, "until": args.recurrence_until or ""}
 
     cal_dir = _calendar_dir(args.user_id, args.session_dir)
     filename = _event_filename(args.start, args.title)
@@ -458,6 +618,8 @@ def cmd_add_event(args) -> None:
     _write_event_md(filepath, event)
 
     msg = f"Event '{args.title}' added"
+    if rrule:
+        msg += " as recurring event"
     if checklist:
         msg += f" with {len(checklist)} checklist items"
     _out({"success": True, "message": msg + ".", "event_id": filename})
@@ -774,6 +936,10 @@ def main():
     p.add_argument("--description")
     p.add_argument("--location")
     p.add_argument("--checklist", help="JSON array of checklist items")
+    p.add_argument("--recurrence", choices=["none", "daily", "weekly", "monthly", "yearly"], default="none")
+    p.add_argument("--recurrence-days", help="Weekly days, e.g. 'TU,TH' or 'dienstag donnerstag'")
+    p.add_argument("--recurrence-until", help="Last recurrence date as YYYY-MM-DD")
+    p.add_argument("--recurrence-count", type=int, help="Maximum number of occurrences")
 
     # list-events
     p = sub.add_parser("list-events")

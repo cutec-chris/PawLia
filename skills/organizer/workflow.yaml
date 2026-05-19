@@ -1,5 +1,5 @@
 skill: organizer
-version: '2.0'
+version: '3.0'
 compiled_at: '2026-03-26'
 compiled_by: workflow_compiler
 workflows:
@@ -39,8 +39,9 @@ workflows:
   - id: add_event
     command: python {scripts_dir}/organizer.py add-event --title "{title}" --start
       "{start}" --end "{end}" --description "{description}" --location "{location}"
-      --checklist '{checklist}'
-    description: 'Add calendar event. start/end: ISO8601 datetime.'
+      --checklist '{checklist}' --recurrence {recurrence} --recurrence-days "{recurrence_days}"
+      --recurrence-until "{recurrence_until}"
+    description: 'Add calendar event. start/end: ISO8601 datetime. recurrence: none, daily, weekly, monthly, yearly. For recurring weekly events set recurrence_days to RRULE weekdays like TU,TH; otherwise use empty strings.'
     status_desc: Füge Termin {title} am {start} hinzu
     verify:
       exit_code: 0
