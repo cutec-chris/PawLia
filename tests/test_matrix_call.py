@@ -1219,3 +1219,64 @@ def test_load_hold_audio_uses_mono_wav_default_without_m4a_fallback():
 
     assert chosen_paths
     assert all(path.endswith("keyboard_mono.wav") for path in chosen_paths)
+
+
+def test_should_transcribe_chunk_relaxed_thresholds_in_quiet_env():
+    """In very quiet environments (noise_floor < 0.001), relaxed thresholds
+    should accept chunks that would be rejected with the default thresholds."""
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=None):
+        session = CallSession(
+            call_id="call-quiet",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-quiet",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+
+        # Simulate a very quiet environment
+        session._noise_floor = 0.0005
+
+        # Create a chunk with low active_ratio (0.08) — would fail default 0.12
+        # but should pass with relaxed threshold 0.06
+        levels = [0.0] * 80
+        # 8 active frames out of 80 = 10% active_ratio (between 0.06 and 0.12)
+        for idx in range(8):
+            levels[idx] = 0.15
+        pcm = _make_tonal_pcm_from_frame_levels(levels)
+
+        # With relaxed thresholds, this should be accepted
+        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
+
+
+def test_should_transcribe_chunk_strict_thresholds_in_noisy_env():
+    """In noisy environments (noise_floor >= 0.001), default strict thresholds
+    should reject chunks with low active_ratio."""
+    with patch.object(matrix_call, "_build_webrtc_vad", return_value=None):
+        session = CallSession(
+            call_id="call-noisy",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-noisy",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+
+        # Simulate a noisier environment
+        session._noise_floor = 0.005
+
+        # Same chunk as above — 10% active_ratio
+        levels = [0.0] * 80
+        for idx in range(8):
+            levels[idx] = 0.15
+        pcm = _make_tonal_pcm_from_frame_levels(levels)
+
+        # With strict thresholds (0.12), this should be rejected
+        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+

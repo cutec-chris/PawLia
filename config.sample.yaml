@@ -107,7 +107,8 @@ interfaces:
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
 #   response_delay_seconds: 2.5       # wait this long after speech ends before replying
 #   agc_window_seconds: 15.0          # keep AGC active this long after bot/user activity
-#   agc_target_rms: 0.10              # target loudness used for VAD normalization
+#   agc_target_rms: 0.10              # target loudness used for VAD normalization (bot active)
+#   agc_quiet_target_rms: 0.06        # target loudness when bot is idle (boosts quiet speech)
 #   agc_max_gain: 12.0                # upper cap for AGC amplification
 #   agc_smoothing: 0.15               # how quickly AGC reacts (higher = faster)
 #   bargein_rms_threshold: 0.05       # raw RMS to interrupt TTS playback

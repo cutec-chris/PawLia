@@ -381,8 +381,9 @@ class CallSession:
     CALL_INACTIVITY_SECONDS = 180
     WATCHDOG_POLL_SECONDS = 5.0
     # AGC: boost gain in windows where we expect the user to speak
-    AGC_WINDOW_SECONDS = 15.0     # how long the AGC stays active
-    AGC_TARGET_RMS = 0.10         # target RMS level for normalization
+    AGC_WINDOW_SECONDS = 15.0     # how long the AGC stays active after bot/user activity
+    AGC_TARGET_RMS = 0.10         # target RMS level for normalization (when bot active)
+    AGC_QUIET_TARGET_RMS = 0.06   # target RMS when bot is idle (boosts quiet speech)
     AGC_MAX_GAIN = 12.0           # don't amplify more than this
     AGC_SMOOTHING = 0.15          # EMA alpha for gain updates (higher = faster)
     # Barge-in: buffer possible interruptions during TTS above this RMS and
@@ -484,16 +485,13 @@ class CallSession:
     def _agc_rms(self, raw_rms: float) -> float:
         """Return the AGC-adjusted RMS for VAD decisions.
 
-        When the AGC window is inactive, returns raw_rms unchanged.
-        When active, tracks a smoothed gain factor that brings the signal
-        toward AGC_TARGET_RMS and returns ``raw_rms * gain``.
+        Always active — uses AGC_TARGET_RMS when the bot is speaking/generating
+        (avoids amplifying over its own TTS) and AGC_QUIET_TARGET_RMS otherwise
+        to boost quiet speech in silent environments.
         """
-        if not self._agc_active:
-            self._agc_gain = 1.0
-            return raw_rms
-
         if raw_rms > 1e-6:
-            ideal_gain = self.AGC_TARGET_RMS / raw_rms
+            target = self.AGC_TARGET_RMS if self._bot_is_active() else self.AGC_QUIET_TARGET_RMS
+            ideal_gain = target / raw_rms
             ideal_gain = min(ideal_gain, self.AGC_MAX_GAIN)
             alpha = self.AGC_SMOOTHING
             self._agc_gain = alpha * ideal_gain + (1 - alpha) * self._agc_gain
@@ -640,6 +638,13 @@ class CallSession:
             "agc_smoothing",
             self.AGC_SMOOTHING,
             minimum=0.001,
+            maximum=1.0,
+        )
+        self.AGC_QUIET_TARGET_RMS = self._get_float_config(
+            voip_cfg,
+            "agc_quiet_target_rms",
+            self.AGC_QUIET_TARGET_RMS,
+            minimum=0.01,
             maximum=1.0,
         )
         self.BARGEIN_RMS_THRESHOLD = self._get_float_config(
@@ -1385,10 +1390,21 @@ class CallSession:
     ) -> bool:
         """Return True only when a chunk contains sustained speech-like activity."""
         stats = self._analyze_speech_chunk(pcm, sample_rate, fps)
+
+        # In very quiet environments (low noise floor), relax the active_ratio
+        # and speech_like thresholds. When background noise is near zero, any
+        # signal above the silence threshold is likely speech, not noise.
+        if self._noise_floor < 0.001:
+            min_active_ratio = self.MIN_ACTIVE_SPEECH_RATIO * 0.5
+            min_speech_like = self.MIN_SPEECH_LIKE_RATIO * 0.5
+        else:
+            min_active_ratio = self.MIN_ACTIVE_SPEECH_RATIO
+            min_speech_like = self.MIN_SPEECH_LIKE_RATIO
+
         basic_match = (
-            stats["active_ratio"] >= self.MIN_ACTIVE_SPEECH_RATIO
+            stats["active_ratio"] >= min_active_ratio
             and stats["longest_run"] >= self.MIN_CONSECUTIVE_SPEECH_FRAMES
-            and stats["speech_like_ratio"] >= self.MIN_SPEECH_LIKE_RATIO
+            and stats["speech_like_ratio"] >= min_speech_like
             and stats["speech_like_run"] >= self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
         )
         if not basic_match:
@@ -1854,6 +1870,7 @@ class CallSession:
                     continue
                 if speech_like_frame:
                     if not speech_buffer and silence_count == 0:
+                        self._activate_agc()
                         logger.info("call %s: speech started (rms=%.4f)",
                                     self.call_id[:8], rms)
                         self._mark_user_speech_started()
