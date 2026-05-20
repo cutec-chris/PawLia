@@ -211,7 +211,7 @@ def _make_status_step(event_id: str, skill_name: str, step: int, step_text: str,
     short = (step_text[:100] + "…") if len(step_text) > 100 else step_text
     short_q = (initial_query[:60] + "…") if len(initial_query) > 60 else initial_query
     body = f"⚙ {skill_name}: {short_q}\n[{step}] {short}"
-    html = _grey(f"⚙ <b>{skill_name}</b>: {short_q}<br>[{step}] <code>{short}</code>")
+    html = _grey(f"⚙ <b>{skill_name}</b>: {short_q}") + "<br>" + _grey(f"[{step}] <code>{short}</code>")
     return _status_edit(event_id, body, html)
 
 
@@ -233,10 +233,10 @@ def _make_status_done(event_id: str, skill_name: str, steps: int, initial_query:
         summary = (summary_text[:120] + "…") if len(summary_text) > 120 else summary_text
     if summary:
         body = f"✓ {skill_name}: {short_q}\n({steps} Schritte) — {summary}"
-        html = _grey(f"✓ <b>{skill_name}</b>: {short_q}<br>({steps} Schritte) — {summary}")
+        html = _grey(f"✓ <b>{skill_name}</b>: {short_q}") + "<br>" + _grey(f"({steps} Schritte) — {summary}")
     else:
         body = f"✓ {skill_name}: {short_q}\n({steps} Schritte)"
-        html = _grey(f"✓ <b>{skill_name}</b>: {short_q}<br>({steps} Schritte)")
+        html = _grey(f"✓ <b>{skill_name}</b>: {short_q}") + "<br>" + _grey(f"({steps} Schritte)")
     return _status_edit(event_id, body, html)
 
 
