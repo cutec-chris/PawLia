@@ -32,8 +32,8 @@ _QUESTION_STARTERS = frozenset({
 _TOPIC_SHIFT_THRESHOLD = 0.15  # overlap fraction below which we treat it as a new topic
 
 _DEFAULT_TOP_K = 3
-_DEFAULT_MIN_SCORE = 0.7  # fraction of best hit (0–1 normalized)
-_DEFAULT_MIN_RAW_SCORE = 0.5  # adjusted score below which even the best hit isn't a real match
+_DEFAULT_MIN_SCORE = 0.85  # fraction of best hit (0–1 normalized)
+_DEFAULT_MIN_RAW_SCORE = 3.0  # adjusted score below which even the best hit isn't a real match
 _DEFAULT_SNIPPET_CHARS = 100
 _DEFAULT_EXCLUDE_DIRS = {"memory", "skills"}
 
