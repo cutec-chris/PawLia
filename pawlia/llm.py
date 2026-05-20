@@ -46,6 +46,7 @@ name is not found there it is treated as a raw model string and the default
 provider is used.
 """
 
+import json
 import logging
 import re
 import time
@@ -60,6 +61,11 @@ logger = logging.getLogger(__name__)
 
 _CHARS_PER_TOKEN = 4
 _CONTEXT_SKIP_RESERVE_TOKENS = 1024
+# Per-message overhead in tokens (role label, JSON structure, tool metadata).
+# ToolMessages with call IDs and AIMessages with tool_calls arrays are
+# significantly more expensive than their raw text length suggests.
+_TOKENS_PER_MESSAGE_OVERHEAD = 12
+_TOOL_CALL_OVERHEAD_PER_CALL = 24
 
 
 # Heuristic: how many tool-call turns to grant the SkillRunner per model.
@@ -249,6 +255,18 @@ class _FallbackLLMWrapper:
             text = content if isinstance(content, str) else str(content)
             if text:
                 total += (len(text) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
+            # Per-message overhead (role label, JSON structure)
+            total += _TOKENS_PER_MESSAGE_OVERHEAD
+            # ToolMessages carry additional metadata (tool_call_id, name)
+            if hasattr(message, "tool_call_id") and getattr(message, "tool_call_id", None):
+                total += 8
+            # AIMessages with tool_calls arrays are expensive
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls:
+                for tc in tool_calls:
+                    total += _TOOL_CALL_OVERHEAD_PER_CALL
+                    args_json = json.dumps(tc.get("args", {}))
+                    total += (len(args_json) + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
         return total
 
     def _fits_context(self, idx: int, messages: List[BaseMessage]) -> bool:
@@ -287,6 +305,64 @@ class _FallbackLLMWrapper:
                 self._BLACKLIST_THRESHOLD,
                 self._BLACKLIST_COOLDOWN_SECONDS // 60,
             )
+
+    @staticmethod
+    def _summarize_tool_message(msg: BaseMessage) -> str:
+        """Condense a ToolMessage to a single-line summary."""
+        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        # Extract script/tool name from bash commands
+        name_match = re.search(r"(?:Executing|Tool call):\s+(\S+)", content)
+        if name_match:
+            tool_name = name_match.group(1)
+        else:
+            tool_name = "tool"
+        # Grab first 200 chars of actual result
+        result_preview = content[:200].replace("\n", " ")
+        if len(content) > 200:
+            result_preview += "..."
+        return f"[{tool_name} → {result_preview}]"
+
+    def summarize_context(self, messages: List[BaseMessage], keep_recent: int = 3) -> List[BaseMessage]:
+        """Summarize older messages to fit within context window.
+
+        Keeps the system message and the last *keep_recent* message pairs
+        intact. Older exchanges are condensed into compact summaries:
+        - ToolMessages become single-line "[tool → result]" entries
+        - Human/AI exchanges become "[User: ... / Assistant: ...]" entries
+
+        Returns the summarized message list.
+        """
+        if len(messages) <= 2 + keep_recent * 2:
+            return messages  # nothing to summarize
+
+        system = messages[:1]
+        tail = messages[-(keep_recent * 2):]  # keep last N pairs
+
+        # Summarize the middle portion
+        middle = messages[1:-(keep_recent * 2)]
+        if not middle:
+            return system + tail
+
+        summary_lines = [
+            f"[Earlier conversation summarized — {len(middle)} messages condensed]"
+        ]
+
+        for msg in middle:
+            if isinstance(msg, ToolMessage):
+                summary_lines.append(self._summarize_tool_message(msg))
+            elif isinstance(msg, HumanMessage):
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                preview = content[:120].replace("\n", " ")
+                summary_lines.append(f"[User: {preview}]")
+            elif isinstance(msg, AIMessage):
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                preview = content[:120].replace("\n", " ")
+                summary_lines.append(f"[Assistant: {preview}]")
+
+        summary_text = "\n".join(summary_lines)
+        summarized = HumanMessage(content=summary_text)
+
+        return system + [summarized] + tail
 
     def _raise_if_all_blacklisted(self) -> None:
         now = self._now()
@@ -342,6 +418,24 @@ class _FallbackLLMWrapper:
                 last_exc = exc
                 self._note_failure(idx, exc)
                 saw_context_error = saw_context_error or is_context_length_error(exc)
+                # First context error → summarize immediately and retry
+                # with the SAME model instead of falling through.
+                if is_context_length_error(exc):
+                    summarized = self.summarize_context(messages)
+                    if summarized != messages:
+                        logger.info(
+                            "LLM context overflow: summarized %d → %d messages, retrying '%s'",
+                            len(messages), len(summarized),
+                            self._labels[idx],
+                        )
+                        try:
+                            result = llm.invoke(summarized, **kwargs)
+                            self._note_success(idx)
+                            return result
+                        except Exception as retry_exc:
+                            last_exc = retry_exc
+                            self._note_failure(idx, retry_exc)
+                            # Summarization didn't help — fall through to next model
             if idx < len(self._llms) - 1:
                 if last_exc is not None and is_context_length_error(last_exc):
                     logger.warning(
@@ -393,6 +487,24 @@ class _FallbackLLMWrapper:
                 last_exc = exc
                 self._note_failure(idx, exc)
                 saw_context_error = saw_context_error or is_context_length_error(exc)
+                # First context error → summarize immediately and retry
+                # with the SAME model instead of falling through.
+                if is_context_length_error(exc):
+                    summarized = self.summarize_context(messages)
+                    if summarized != messages:
+                        logger.info(
+                            "LLM context overflow: summarized %d → %d messages, retrying '%s'",
+                            len(messages), len(summarized),
+                            self._labels[idx],
+                        )
+                        try:
+                            result = await llm.ainvoke(summarized, **kwargs)
+                            self._note_success(idx)
+                            return result
+                        except Exception as retry_exc:
+                            last_exc = retry_exc
+                            self._note_failure(idx, retry_exc)
+                            # Summarization didn't help — fall through to next model
             if idx < len(self._llms) - 1:
                 if last_exc is not None and is_context_length_error(last_exc):
                     logger.warning(
@@ -456,6 +568,25 @@ class _FallbackLLMWrapper:
                     raise
                 last_exc = exc
                 saw_context_error = saw_context_error or is_context_length_error(exc)
+                # First context error → summarize immediately and retry
+                # with the SAME model instead of falling through.
+                if is_context_length_error(exc):
+                    summarized = self.summarize_context(messages)
+                    if summarized != messages:
+                        logger.info(
+                            "LLM context overflow(stream): summarized %d → %d messages, retrying '%s'",
+                            len(messages), len(summarized),
+                            self._labels[idx],
+                        )
+                        try:
+                            async for chunk in llm.astream(summarized, **kwargs):
+                                yield chunk
+                            self._note_success(idx)
+                            return
+                        except Exception as retry_exc:
+                            last_exc = retry_exc
+                            self._note_failure(idx, retry_exc)
+                            # Summarization didn't help — fall through to next model
                 if idx < len(self._llms) - 1:
                     if is_context_length_error(exc):
                         logger.warning(
