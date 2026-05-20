@@ -193,6 +193,77 @@ def estimate_context_size(model_name: str) -> int:
     return 2_048
 
 
+class _DebugLLMWrapper:
+    """Wraps an LLM and logs messages on API errors for debugging."""
+
+    def __init__(self, llm: Any, model_name: str):
+        self._llm = llm
+        self._model_name = model_name
+
+    @staticmethod
+    def _serialize_messages(messages: List[BaseMessage]) -> str:
+        parts = []
+        for msg in messages:
+            role = msg.__class__.__name__.replace("Message", "").lower()
+            content = msg.content if isinstance(msg.content, str) else repr(msg.content)
+            extra = ""
+            if hasattr(msg, "tool_call_id") and getattr(msg, "tool_call_id", None):
+                extra = f" tool_call_id={msg.tool_call_id!r}"
+            if hasattr(msg, "tool_calls") and getattr(msg, "tool_calls", None):
+                extra += f" tool_calls={msg.tool_calls!r}"
+            parts.append(f"[{role}{extra}] content={content[:200]!r}")
+        return "\n".join(parts)
+
+    async def ainvoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        try:
+            return await self._llm.ainvoke(messages, **kwargs)
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "400" in str(exc) or "illegal" in error_text or "messages" in error_text:
+                logger.error(
+                    "LLM API error for model '%s'. Messages:\n%s\nError: %s",
+                    self._model_name,
+                    self._serialize_messages(messages),
+                    exc,
+                )
+            raise
+
+    def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        try:
+            return self._llm.invoke(messages, **kwargs)
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "400" in str(exc) or "illegal" in error_text or "messages" in error_text:
+                logger.error(
+                    "LLM API error for model '%s'. Messages:\n%s\nError: %s",
+                    self._model_name,
+                    self._serialize_messages(messages),
+                    exc,
+                )
+            raise
+
+    def bind_tools(self, *args: Any, **kwargs: Any) -> "_DebugLLMWrapper":
+        return _DebugLLMWrapper(self._llm.bind_tools(*args, **kwargs), self._model_name)
+
+    async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
+        try:
+            async for chunk in self._llm.astream(messages, **kwargs):
+                yield chunk
+        except Exception as exc:
+            error_text = str(exc).lower()
+            if "400" in str(exc) or "illegal" in error_text or "messages" in error_text:
+                logger.error(
+                    "LLM API error for model '%s'. Messages:\n%s\nError: %s",
+                    self._model_name,
+                    self._serialize_messages(messages),
+                    exc,
+                )
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._llm, name)
+
+
 class _NoThinkWrapper:
     """Wraps an LLM and prepends /no_think to the system prompt."""
 
@@ -993,6 +1064,9 @@ class LLMFactory:
             **({"max_tokens": max_tokens} if max_tokens else {}),
             **({"extra_body": extra_body} if extra_body else {}),
         )
+
+        # Wrap with debug logger for cloud APIs to capture message format issues
+        llm = _DebugLLMWrapper(llm, model)
 
         if think is False:
             llm = _NoThinkWrapper(llm)
