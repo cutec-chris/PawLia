@@ -1,23 +1,17 @@
 skill: perplexica
 version: '1.0'
-compiled_at: '2026-03-26'
-compiled_by: workflow_compiler
+compiled_at: '2026-05-19'
+compiled_by: glm-5.1
 workflows:
 - id: perplexica_search
-  trigger: When the user wants to perform an AI-powered search using Perplexica
+  trigger: User asks a question that requires a web search or explicitly requests
+    a Perplexica search.
   max_steps: 1
   building_blocks:
-  - id: run_search
-    command: python {scripts_dir}/search.py --query "{query}"
-    description: Execute Perplexica AI search with the configured Perplexica URL
-    status_desc: Suche {query} mit Perplexica
+  - id: search
+    command: python {scripts_dir}/search.py --query "{query}" --focus {focus_mode}
+    description: Runs a Perplexica search with the given query and focus mode, returning
+      a JSON answer and sources.
+    status_desc: Suche nach "{query}"
     verify:
       exit_code: 0
-      output_contains:
-      - answer
-      - sources
-    on_error: report_error
-  - id: report_error
-    command: 'echo ''Search failed: {stderr_message}'''
-    description: Report search error to user
-    status_desc: 'Suchfehler: {error}'

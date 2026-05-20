@@ -82,6 +82,7 @@ pawlia/
 │   ├── interfaces/  # CLI, Telegram, Matrix, Web, Webhook, openai_compat
 │   ├── backends/    # Hermes backend
 │   ├── tools/       # Built-in tools (bash)
+│   ├── coding.py    # Coding backends (aider, opencode, LLM) for skill implement/fix
 │   ├── dream_wiki.py # Dream Wiki backend (Karpathy's LLM Wiki pattern)
 │   └── memory.py    # Session & memory management
 ├── skills/          # Skill packages (user/ is gitignored)

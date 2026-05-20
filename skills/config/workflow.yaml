@@ -1,99 +1,166 @@
 skill: config
-version: '1.1'
-compiled_at: '2026-03-29'
-compiled_by: manual
+version: '1.0'
+compiled_at: '2026-05-19'
+compiled_by: glm-5.1
 workflows:
-- id: config_operations
-  trigger: When the user wants to read, show, or change a pawlia configuration setting
-    (interfaces, TTS, transcription, agents, skill-config)
-  max_steps: 6
-  goal_check:
-    prompt: Has the configuration been read or updated as requested?
-    max_retries: 2
+- id: config_management
+  trigger: User wants to view or modify configuration settings
+  max_steps: 5
   building_blocks:
-  - id: show_config
+  - id: show_all
     command: python {scripts_dir}/config.py show
-    description: Show all settable configuration sections (interfaces, tts, transcription,
-      agents, skill-config)
-    status_desc: Lese Konfiguration
+    description: Zeigt alle konfigurierbaren Abschnitte an
+    status_desc: Zeige alle Einstellungen
     verify:
       exit_code: 0
-      output_not_contains:
-      - '"success": false'
   - id: show_section
     command: python {scripts_dir}/config.py show --section {section}
-    description: Show a specific configuration section
-    status_desc: Lese Sektion {section}
+    description: Zeigt einen einzelnen Konfigurationsabschnitt
+    status_desc: Zeige Abschnitt {section}
     verify:
       exit_code: 0
-      output_not_contains:
-      - '"success": false'
   - id: get_value
     command: python {scripts_dir}/config.py get --path {path}
-    description: Get a specific configuration value by dot-notation path
-    status_desc: Lese {path}
+    description: Liest einen spezifischen Konfigurationswert
+    status_desc: Lese Wert {path}
     verify:
       exit_code: 0
-      output_not_contains:
-      - '"success": false'
   - id: set_value
     command: python {scripts_dir}/config.py set --path {path} --value {value}
-    description: Set a configuration value by dot-notation path (value is parsed as
-      YAML scalar — true/false/numbers/strings)
-    status_desc: Setze {path} = {value}
+    description: Setzt einen Konfigurationswert
+    status_desc: Setze {path} auf {value}
     verify:
       exit_code: 0
-      output_not_contains:
-      - '"success": false'
-- id: model_switch
-  trigger: When the user wants to switch, change, or show the active model
-  max_steps: 3
-  goal_check:
-    prompt: Has the model been shown or changed as requested?
-    max_retries: 1
-  building_blocks:
-  - id: show_model
+  - id: set_value_force
+    command: python {scripts_dir}/config.py set --path {path} --value {value} --force
+    description: Setzt einen Wert trotz Validierungsfehlern
+    status_desc: Setze {path} auf {value} (Force)
+    verify:
+      exit_code: 0
+  - id: model_show
     command: python {scripts_dir}/config.py model
-    description: Show the currently active model
-    status_desc: Zeige aktives Modell
+    description: Zeigt das aktuelle Modell‑Override und das aktive Modell
+    status_desc: Zeige aktuelles Modell
     verify:
       exit_code: 0
-  - id: set_model
-    command: python {scripts_dir}/config.py model --name {name}
-    description: Switch the active model at runtime (takes effect immediately)
-    status_desc: Wechsle Modell zu {name}
+  - id: model_set
+    command: python {scripts_dir}/config.py model --name {model_name}
+    description: Überschreibt das Chat‑Modell für die aktuelle Session
+    status_desc: Setze Modell auf {model_name}
     verify:
       exit_code: 0
-      output_not_contains:
-      - '"success": false'
-- id: private_mode
-  trigger: When the user wants to enable or disable private mode for the session or a thread
-  max_steps: 2
-  goal_check:
-    prompt: Has private mode been toggled as requested?
-    max_retries: 1
-  building_blocks:
-  - id: private_on
+  - id: agent_show
+    command: python {scripts_dir}/config.py agent
+    description: Listet alle Session‑Overrides für Agenten auf
+    status_desc: Zeige Agent‑Overrides
+    verify:
+      exit_code: 0
+  - id: agent_show_path
+    command: python {scripts_dir}/config.py agent --path {path}
+    description: Zeigt den Override‑Wert eines bestimmten Agent‑Pfads
+    status_desc: Zeige Agent‑Pfad {path}
+    verify:
+      exit_code: 0
+  - id: agent_set
+    command: python {scripts_dir}/config.py agent --path {path} --value {value}
+    description: Setzt einen Agent‑Override‑Pfad
+    status_desc: Setze Agent‑Pfad {path} auf {value}
+    verify:
+      exit_code: 0
+  - id: agent_off
+    command: python {scripts_dir}/config.py agent --path {path} --off
+    description: Entfernt einen Agent‑Override‑Pfad
+    status_desc: Deaktiviere Agent‑Pfad {path}
+    verify:
+      exit_code: 0
+  - id: voice_show
+    command: python {scripts_dir}/config.py voice
+    description: Zeigt aktuelle Stimme und verfügbare Stimmen des Providers
+    status_desc: Zeige aktuelle Stimme
+    verify:
+      exit_code: 0
+  - id: voice_set
+    command: python {scripts_dir}/config.py voice --name {voice_name}
+    description: Setzt die TTS‑Stimme für den aktuellen Nutzer
+    status_desc: Setze Stimme auf {voice_name}
+    verify:
+      exit_code: 0
+  - id: voice_set_force
+    command: python {scripts_dir}/config.py voice --name {voice_name} --force
+    description: Setzt die Stimme trotz fehlender Validierung
+    status_desc: Setze Stimme auf {voice_name} (Force)
+    verify:
+      exit_code: 0
+  - id: voice_off
+    command: python {scripts_dir}/config.py voice --off
+    description: Entfernt die Stimm‑Überschreibung
+    status_desc: Stimme zurücksetzen
+    verify:
+      exit_code: 0
+  - id: private_enable
     command: python {scripts_dir}/config.py private
-    description: Enable private mode for the current session (messages won't be saved)
-    status_desc: Private Mode aktivieren
+    description: Aktiviert privaten Modus für die aktuelle Session
+    status_desc: Privaten Modus aktivieren
     verify:
       exit_code: 0
-  - id: private_on_thread
+  - id: private_thread_enable
     command: python {scripts_dir}/config.py private --thread {thread_id}
-    description: Enable private mode for a specific thread
-    status_desc: Private Mode für Thread aktivieren
+    description: Aktiviert privaten Modus für einen spezifischen Thread
+    status_desc: Privaten Modus für Thread {thread_id} aktivieren
     verify:
       exit_code: 0
-  - id: private_off
+  - id: private_disable
     command: python {scripts_dir}/config.py private --off
-    description: Disable private mode for the current session
-    status_desc: Private Mode deaktivieren
+    description: Deaktiviert privaten Modus für die aktuelle Session
+    status_desc: Privaten Modus deaktivieren
     verify:
       exit_code: 0
-  - id: private_off_thread
+  - id: private_thread_disable
     command: python {scripts_dir}/config.py private --thread {thread_id} --off
-    description: Disable private mode for a specific thread
-    status_desc: Private Mode für Thread deaktivieren
+    description: Deaktiviert privaten Modus für einen spezifischen Thread
+    status_desc: Privaten Modus für Thread {thread_id} deaktivieren
+    verify:
+      exit_code: 0
+  - id: session_show
+    command: python {scripts_dir}/config.py session
+    description: Zeigt die komplette Session‑Konfiguration
+    status_desc: Zeige Session‑Konfiguration
+    verify:
+      exit_code: 0
+  - id: session_section
+    command: python {scripts_dir}/config.py session --section {section}
+    description: Zeigt einen Abschnitt der Session‑Konfiguration
+    status_desc: Zeige Session‑Abschnitt {section}
+    verify:
+      exit_code: 0
+  - id: session_get
+    command: python {scripts_dir}/config.py session --get-path {path}
+    description: Liest einen spezifischen Wert aus der Session‑Konfiguration
+    status_desc: Lese Session‑Wert {path}
+    verify:
+      exit_code: 0
+  - id: session_set
+    command: python {scripts_dir}/config.py session --set-path {path} --set-value
+      {value}
+    description: Schreibt einen Wert in die Session‑Konfiguration
+    status_desc: Setze Session‑Wert {path} auf {value}
+    verify:
+      exit_code: 0
+  - id: disabled_list
+    command: python {scripts_dir}/config.py disabled-skills
+    description: Listet aktuell deaktivierte Skills für die Session
+    status_desc: Zeige deaktivierte Skills
+    verify:
+      exit_code: 0
+  - id: disabled_add
+    command: python {scripts_dir}/config.py disabled-skills --add {skill}
+    description: Deaktiviert einen Skill für die aktuelle Session
+    status_desc: Deaktiviere Skill {skill}
+    verify:
+      exit_code: 0
+  - id: disabled_remove
+    command: python {scripts_dir}/config.py disabled-skills --remove {skill}
+    description: Re‑aktiviert einen zuvor deaktivierten Skill
+    status_desc: Re‑aktiviere Skill {skill}
     verify:
       exit_code: 0

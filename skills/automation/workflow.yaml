@@ -1,44 +1,33 @@
 skill: automation
-version: '1.0'
-compiled_at: '2026-03-26'
-compiled_by: workflow_compiler
+version: '2.0'
+compiled_at: '2026-05-19'
+compiled_by: glm-5.1
 workflows:
-- id: register_automation
-  trigger: User wants to create a scheduled automation that runs a natural-language instruction
-  max_steps: 5
+- id: manage-automations
+  trigger: When the user wants to create, list, delete, or toggle a scheduled automation
+    job
+  max_steps: 3
+  goal_check:
+    prompt: Was the automation job successfully created, listed, deleted, or toggled?
+    max_retries: 2
   building_blocks:
-  - id: register_job
-    command: python <scripts_dir>/../organizer/scripts/organizer.py add-job --name
-      "{job_name}" --instruction "{instruction}" --schedule "{schedule}"
-    description: Register a natural-language instruction as a scheduled job via organizer
-    status_desc: Registriere Job {job_name} mit Zeitplan {schedule}
-    verify:
-      exit_code: 0
-      output_contains:
-      - '"success": true'
-- id: manage_jobs
-  trigger: User wants to list, delete, or toggle existing automation jobs
-  max_steps: 5
-  building_blocks:
-  - id: list_jobs
-    command: python <scripts_dir>/../organizer/scripts/organizer.py list-jobs
+  - id: add-job
+    command: python {scripts_dir}/../organizer/scripts/organizer.py add-job --name
+      "{name}" --schedule "{schedule}" --instruction "{instruction}"
+    description: Register a new scheduled automation job with a name, schedule, and
+      instruction
+    status_desc: Registriere Automatisierung '{name}' ({schedule})
+  - id: list-jobs
+    command: python {scripts_dir}/../organizer/scripts/organizer.py list-jobs
     description: List all registered automation jobs
-    status_desc: Liste alle geplanten Jobs
-  - id: delete_job
-    command: python <scripts_dir>/../organizer/scripts/organizer.py delete-job --job-id
+    status_desc: Zeige alle Automatisierungen an
+  - id: delete-job
+    command: python {scripts_dir}/../organizer/scripts/organizer.py delete-job --job-id
       "{job_id}"
-    description: Delete specific automation job by ID
-    status_desc: Lösche Job {job_id}
-    verify:
-      exit_code: 0
-      output_contains:
-      - Job deleted successfully
-  - id: toggle_job
-    command: python <scripts_dir>/../organizer/scripts/organizer.py toggle-job --job-id
+    description: Delete an existing automation job by its ID
+    status_desc: Lösche Automatisierung {job_id}
+  - id: toggle-job
+    command: python {scripts_dir}/../organizer/scripts/organizer.py toggle-job --job-id
       "{job_id}"
-    description: Toggle enabled/disabled status of job
-    status_desc: Wechsle Status von Job {job_id}
-    verify:
-      exit_code: 0
-      output_contains:
-      - Job status toggled
+    description: Enable or disable an existing automation job
+    status_desc: Schalte Automatisierung {job_id} um

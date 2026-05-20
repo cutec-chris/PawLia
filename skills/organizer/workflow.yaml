@@ -1,146 +1,110 @@
 skill: organizer
 version: '3.1'
 compiled_at: '2026-05-19'
-compiled_by: manual
+compiled_by: glm-5.1
 workflows:
-- id: organizer_main
-  trigger: User wants to manage reminders, calendar events, tasks, or scheduled jobs.
-  max_steps: 12
+- id: organizer-ops
+  trigger: User wants to manage reminders, calendar events, tasks, or scheduled automation
+    jobs.
+  max_steps: 3
+  goal_check:
+    prompt: Was the reminder, event, task, or job successfully created, listed, completed,
+      toggled, or deleted?
+    max_retries: 2
   building_blocks:
-  - id: add_reminder
-    command: python {scripts_dir}/organizer.py add-reminder --fire-at "{fire_at}" --message "{message}" --label "{label}" --recurrence {recurrence}
-    description: Add a simple reminder at a fixed or relative time.
-    status_desc: Setze Erinnerung {label} für {fire_at}
+  - id: add-reminder
+    command: python {scripts_dir}/organizer.py add-reminder --fire-at "{fire_at}"
+      --message "{message}" --label "{label}" --recurrence {recurrence}
+    description: Add a reminder with a fire time, optional label and recurrence.
+    status_desc: 'Erinnerung erstellt: {message}'
     verify:
       exit_code: 0
-      output_not_contains:
-      - error
-      - failed
-  - id: list_reminders
+  - id: list-reminders
     command: python {scripts_dir}/organizer.py list-reminders
     description: List all pending reminders.
-    status_desc: Liste Erinnerungen
+    status_desc: Liste ausstehende Erinnerungen auf
     verify:
       exit_code: 0
-  - id: delete_reminder
+  - id: delete-reminder
     command: python {scripts_dir}/organizer.py delete-reminder --reminder-id "{reminder_id}"
-    description: Delete a reminder by full title or substring.
-    status_desc: Lösche Erinnerung {reminder_id}
+    description: Delete a reminder by title substring.
+    status_desc: 'Lösche Erinnerung: {reminder_id}'
     verify:
       exit_code: 0
-      output_contains:
-      - deleted
-  - id: add_event_simple
-    command: python {scripts_dir}/organizer.py add-event --title "{title}" --start "{start}"
-    description: Add a basic event with only title and start time.
-    status_desc: Füge Termin {title} am {start} hinzu
+  - id: add-event
+    command: python {scripts_dir}/organizer.py add-event --title "{title}" --start
+      "{start}" --end "{end}" --description "{description}" --location "{location}"
+      --reminders '{reminders}' --checklist '{checklist}' --recurrence {recurrence}
+      --recurrence-days "{recurrence_days}" --recurrence-until "{recurrence_until}"
+      --recurrence-count {recurrence_count}
+    description: Add a calendar event with optional end, location, recurrence, reminders
+      and checklist.
+    status_desc: 'Erstelle Termin: {title}'
     verify:
       exit_code: 0
-  - id: add_event_timed
-    command: python {scripts_dir}/organizer.py add-event --title "{title}" --start "{start}" --end "{end}" --description "{description}" --location "{location}"
-    description: Add a timed event with optional description and location fields filled explicitly.
-    status_desc: Füge Termin {title} mit Zeitfenster hinzu
-    verify:
-      exit_code: 0
-  - id: add_event_with_reminders
-    command: python {scripts_dir}/organizer.py add-event --title "{title}" --start "{start}" --end "{end}" --description "{description}" --location "{location}" --reminders '{reminders}' --checklist '{checklist}' --recurrence {recurrence} --recurrence-days "{recurrence_days}" --recurrence-until "{recurrence_until}"
-    description: Add an event with user-facing reminders, checklist automation, and recurrence settings.
-    status_desc: Füge Termin {title} mit Erinnerungen hinzu
-    verify:
-      exit_code: 0
-  - id: list_events
-    command: python {scripts_dir}/organizer.py list-events --limit 20
-    description: List upcoming calendar events with the default limit.
-    status_desc: Liste kommende Termine
-    verify:
-      exit_code: 0
-  - id: list_events_limit
+  - id: list-events
     command: python {scripts_dir}/organizer.py list-events --limit {limit}
-    description: List calendar events with an explicit limit.
-    status_desc: Liste {limit} Termine
+    description: List upcoming calendar events, optionally limited to N entries.
+    status_desc: Liste Termine auf
     verify:
       exit_code: 0
-  - id: delete_event
+  - id: delete-event
     command: python {scripts_dir}/organizer.py delete-event --event-id "{event_id}"
-    description: Delete an event by filename or filename substring.
-    status_desc: Lösche Termin {event_id}
+    description: Delete a calendar event by filename.
+    status_desc: 'Lösche Termin: {event_id}'
     verify:
       exit_code: 0
-  - id: add_task_simple
-    command: python {scripts_dir}/organizer.py add-task --title "{title}"
-    description: Add a simple task without due date or reminders.
-    status_desc: Füge Aufgabe {title} hinzu
+  - id: add-task
+    command: python {scripts_dir}/organizer.py add-task --title "{title}" --due-date
+      "{due_date}" --priority {priority} --description "{description}" --reminders
+      '{reminders}'
+    description: Add a task with optional due date, priority, description, and reminders.
+    status_desc: 'Erstelle Aufgabe: {title}'
     verify:
       exit_code: 0
-  - id: add_task_due
-    command: python {scripts_dir}/organizer.py add-task --title "{title}" --due-date "{due_date}" --description "{description}" --reminders '{reminders}'
-    description: Add a task with due date, description, and reminder rules.
-    status_desc: Füge Aufgabe {title} mit Fälligkeit hinzu
+  - id: list-tasks
+    command: python {scripts_dir}/organizer.py list-tasks --status {status} --limit
+      {limit}
+    description: List tasks filtered by status (pending/completed/all), optionally
+      limited.
+    status_desc: Liste Aufgaben auf
     verify:
       exit_code: 0
-  - id: add_task_priority
-    command: python {scripts_dir}/organizer.py add-task --title "{title}" --due-date "{due_date}" --priority {priority} --description "{description}" --reminders '{reminders}'
-    description: Add a task with due date, explicit priority, and reminder rules.
-    status_desc: Füge priorisierte Aufgabe {title} hinzu
-    verify:
-      exit_code: 0
-  - id: list_tasks_pending
-    command: python {scripts_dir}/organizer.py list-tasks --status pending --limit 20
-    description: List pending tasks with the default limit.
-    status_desc: Liste offene Aufgaben
-    verify:
-      exit_code: 0
-  - id: list_tasks_by_status
-    command: python {scripts_dir}/organizer.py list-tasks --status {status} --limit {limit}
-    description: List tasks for a chosen status with an explicit limit.
-    status_desc: Liste {status} Aufgaben
-    verify:
-      exit_code: 0
-  - id: complete_task
+  - id: complete-task
     command: python {scripts_dir}/organizer.py complete-task --task-id "{task_id}"
-    description: Mark a task as completed.
-    status_desc: Erledige Aufgabe {task_id}
+    description: Mark a task as completed by title or substring.
+    status_desc: 'Schließe Aufgabe ab: {task_id}'
     verify:
       exit_code: 0
-  - id: delete_task
+  - id: delete-task
     command: python {scripts_dir}/organizer.py delete-task --task-id "{task_id}"
     description: Delete a task by title or substring.
-    status_desc: Lösche Aufgabe {task_id}
+    status_desc: 'Lösche Aufgabe: {task_id}'
     verify:
       exit_code: 0
-  - id: add_job
-    command: python {scripts_dir}/organizer.py add-job --name "{name}" --instruction "{instruction}" --schedule "{schedule}"
-    description: Add a scheduled automation job with normal notifications.
-    status_desc: Füge Job {name} hinzu
+  - id: add-job
+    command: python {scripts_dir}/organizer.py add-job --name "{name}" --instruction
+      "{instruction}" --schedule "{schedule}"
+    description: Add a scheduled automation job with a name, natural-language instruction,
+      and schedule.
+    status_desc: 'Erstelle Job: {name}'
     verify:
       exit_code: 0
-  - id: add_job_no_notify
-    command: python {scripts_dir}/organizer.py add-job --name "{name}" --instruction "{instruction}" --schedule "{schedule}" --no-notify
-    description: Add a silent scheduled job that does not post normal output.
-    status_desc: Füge stillen Job {name} hinzu
-    verify:
-      exit_code: 0
-  - id: add_job_notify_on_error
-    command: python {scripts_dir}/organizer.py add-job --name "{name}" --instruction "{instruction}" --schedule "{schedule}" --notify-on-error
-    description: Add a scheduled job that only notifies on errors.
-    status_desc: Füge Fehler-Job {name} hinzu
-    verify:
-      exit_code: 0
-  - id: list_jobs
+  - id: list-jobs
     command: python {scripts_dir}/organizer.py list-jobs
-    description: List all scheduled jobs.
-    status_desc: Liste Jobs
+    description: List all scheduled automation jobs.
+    status_desc: Liste Jobs auf
     verify:
       exit_code: 0
-  - id: delete_job
+  - id: delete-job
     command: python {scripts_dir}/organizer.py delete-job --job-id "{job_id}"
-    description: Delete a scheduled job by id.
-    status_desc: Lösche Job {job_id}
+    description: Delete a scheduled job by ID.
+    status_desc: 'Lösche Job: {job_id}'
     verify:
       exit_code: 0
-  - id: toggle_job
+  - id: toggle-job
     command: python {scripts_dir}/organizer.py toggle-job --job-id "{job_id}"
-    description: Enable or disable a scheduled job.
-    status_desc: Schalte Job {job_id} um
+    description: Enable or disable a scheduled job by ID.
+    status_desc: 'Schalte Job um: {job_id}'
     verify:
       exit_code: 0

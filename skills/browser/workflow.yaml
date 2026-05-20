@@ -1,0 +1,73 @@
+skill: browser
+version: '1.0'
+compiled_at: '2026-05-19'
+compiled_by: glm-5.1
+workflows:
+- id: browse
+  trigger: User wants to browse a website, click links, fill forms, submit data, or
+    navigate web pages.
+  max_steps: 6
+  goal_check:
+    prompt: Has the user's browsing goal been achieved? Did they find the information,
+      complete the form, or finish the desired action on the website?
+    max_retries: 2
+  building_blocks:
+  - id: open_url
+    command: python {scripts_dir}/browser.py open "{url}"
+    description: Open a URL and render the page content with available interactive
+      elements.
+    status_desc: Öffne {url}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - Connection error
+      - No active page
+    on_error: show_page
+  - id: show_page
+    command: python {scripts_dir}/browser.py show
+    description: Re-render the current page and list all available elements (links,
+      buttons, inputs, forms).
+    status_desc: Zeige aktuelle Seite
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - No active page
+  - id: go_back
+    command: python {scripts_dir}/browser.py back
+    description: Navigate back to the previous page in browser history.
+    status_desc: Gehe zurück
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - No history to go back to
+    on_error: show_page
+  - id: click_element
+    command: python {scripts_dir}/browser.py click {element_id}
+    description: Click a link (L#) or button (B#) on the current page.
+    status_desc: Klicke auf {element_id}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - No element
+      - is not clickable
+    on_error: show_page
+  - id: fill_input
+    command: python {scripts_dir}/browser.py fill {element_id} "{value}"
+    description: Fill an input field (I#), textarea (T#), or select dropdown (S#)
+      with a value.
+    status_desc: Fülle {element_id} mit Wert
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - No element
+      - is not fillable
+    on_error: show_page
+  - id: submit_form
+    command: python {scripts_dir}/browser.py submit {form_id}
+    description: Submit a form (F#) with all filled input values.
+    status_desc: Sende Formular {form_id}
+    verify:
+      exit_code: 0
+      output_not_contains:
+      - No form
+    on_error: show_page

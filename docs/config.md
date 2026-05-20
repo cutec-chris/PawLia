@@ -175,6 +175,8 @@ agents:
   chat: smart,fast      # main conversation agent (runtime failover)
   skill_runner: fast    # default for all skill sub-agents
   vision: vision        # used when the user sends an image
+  compiler: compiler    # model for compiling SKILL.md → workflow.yaml
+  coder: smart          # model for coding backend LLM fallback (implement/fix)
   skills:               # per-skill overrides
     searxng: groq-fast,fast
     browser: smart,fast
@@ -190,6 +192,7 @@ If an agent value contains a comma-separated list, models are tried in order whe
 | `skill_runner` | `agents.skill_runner` → `agents.chat` → `agents.default` |
 | `vision` | `agents.vision` → `agents.chat` → `agents.default` |
 | `compiler` | `agents.compiler` → `agents.skill_runner` → `agents.chat` → `agents.default` |
+| `coder` | `agents.coder` → `agents.default` |
 | `skill.<name>` | `agents.skills.<name>` → `agents.skill_runner` → `agents.chat` → `agents.default` |
 
 LLMs with identical configuration are reused across agent types — no redundant connections.
@@ -525,6 +528,31 @@ Manual commands via the memory skill:
 | `rag_timeout` | all | LLM timeout in seconds (default: 600) |
 | `wiki_link_format` | markdown | Link format: `wikilink` (default, Obsidian-native) or `markdown` |
 | `idle_minutes` | all | Idle minutes before the scheduler runs memory indexing (default: 20, matches `IDLE_MEMORY_MIN`) |
+
+## Skill Installation
+
+## Coding Backend
+
+Controls the coding backend used by `skill-creator implement` and `skill-creator fix` for automated script generation and debugging.
+
+```yaml
+coding:
+  backend: auto             # auto | aider | opencode | llm
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `backend` | `auto` | `auto` picks the first available (aider > opencode > llm), or set explicitly |
+
+Per-skill override:
+
+```yaml
+skill-config:
+  skill-creator:
+    coding_backend: aider   # force aider for all skill-creator operations
+```
+
+The `agents.coder` model is used by the LLM fallback backend only. Aider and opencode use their own model configuration. See [skills.md](skills.md#coding-backend) for details.
 
 ## Skill Installation
 

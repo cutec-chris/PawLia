@@ -174,3 +174,55 @@ python <scripts_dir>/credentials.py check --keys "my_api_key,other_key"
 4. Main model stores it via `credentials.py set`
 5. SkillRunner loads matching credentials and injects as `CRED_*` env vars
 6. Skill script reads the env var
+
+## Coding Backend
+
+The `skill-creator` can delegate script generation and debugging to external
+coding tools. This is useful when a skill has been scaffolded (`init`) but the
+actual scripts still need to be written, or when a script fails and needs
+fixing.
+
+### Backends
+
+| Backend | How | Requirements |
+|---------|-----|-------------|
+| **aider** | Runs `aider --message ... --yes` in the skill directory | `aider` CLI in PATH, configured LLM |
+| **opencode** | Runs `opencode run ...` in the skill directory | `opencode` CLI in PATH |
+| **llm** | Direct LLM call via the `coder` model from config | Always available (fallback) |
+
+Auto-detection order: aider > opencode > llm. Override globally or per-skill.
+
+### Commands
+
+**Implement** — generate or rewrite skill scripts:
+
+```
+python <scripts_dir>/creator.py implement --name "my-skill" --task "what to implement"
+```
+
+**Fix** — debug a failing script:
+
+```
+python <scripts_dir>/creator.py fix --name "my-skill" --error "SyntaxError..." --failed-cmd "python scripts/main.py"
+```
+
+### Configuration
+
+```yaml
+agents:
+  coder: coder              # model for LLM fallback (aider/opencode use their own)
+
+coding:
+  backend: auto             # auto | aider | opencode | llm
+
+# Per-skill override:
+skill-config:
+  skill-creator:
+    coding_backend: aider
+```
+
+When `backend: auto` (default), PawLia picks the first available backend from
+the detection order. Set explicitly to skip detection.
+
+The `coder` model is only used by the LLM fallback backend. Aider and opencode
+use their own configured models.
