@@ -52,7 +52,13 @@ import re
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from langchain_core.messages import BaseMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
@@ -432,6 +438,11 @@ class _FallbackLLMWrapper:
 
         summary_text = "\n".join(summary_lines)
         summarized = HumanMessage(content=summary_text)
+
+        # Ensure tail doesn't start with a ToolMessage orphaned from its
+        # preceding AI(tool_calls) — makes the sequence invalid for strict APIs.
+        while tail and isinstance(tail[0], ToolMessage):
+            tail = tail[1:]
 
         return system + [summarized] + tail
 

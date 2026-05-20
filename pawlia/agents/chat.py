@@ -573,6 +573,13 @@ class ChatAgent(BaseAgent):
             drop = 2 if len(tail) - 2 >= _CONTEXT_MIN_NON_SYSTEM_KEEP else 1
             tail = tail[drop:]
 
+        # Ensure the first message after system is not a ToolMessage — dropping
+        # pairs from the front can orphan a tool result from its preceding
+        # AI(tool_calls) message, which makes the sequence invalid and causes
+        # 400 errors from strict APIs (e.g. Z.AI / GLM).
+        while tail and isinstance(tail[0], ToolMessage):
+            tail = tail[1:]
+
         return system + tail
 
     async def run(
