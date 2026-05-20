@@ -64,10 +64,12 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             status_message = None
             step_count = 0
             current_skill: Optional[str] = None
+            initial_query: Optional[str] = None
 
             async def _on_skill_start(skill_name: str, query: str) -> None:
-                nonlocal status_message, step_count, current_skill
+                nonlocal status_message, step_count, current_skill, initial_query
                 current_skill = skill_name
+                initial_query = query
                 step_count = 0
                 await update.message.chat.send_action(ChatAction.TYPING)
                 short_q = (query[:60] + "…") if len(query) > 60 else query
@@ -89,12 +91,28 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
                     except Exception:
                         pass
 
-            async def _on_skill_done(skill_name: str) -> None:
+            async def _on_skill_done(skill_name: str, result: str = "") -> None:
                 await update.message.chat.send_action(ChatAction.TYPING)
                 if status_message:
+                    short_q = (initial_query[:60] + "…") if initial_query else skill_name
+                    summary = ""
+                    if result:
+                        clean = result.lstrip()
+                        if clean.startswith("[Report from"):
+                            for line in clean.splitlines():
+                                if line.strip() and not line.startswith("[") and not line.startswith("---"):
+                                    clean = line
+                                    break
+                        first_line = clean.splitlines()[0].strip() if clean.splitlines() else ""
+                        summary_text = first_line if first_line else clean[:120]
+                        summary = (summary_text[:120] + "…") if len(summary_text) > 120 else summary_text
+                    if summary:
+                        text = f"<i>✓ {skill_name}: {short_q} ({step_count} Schritte) — {summary}</i>"
+                    else:
+                        text = f"<i>✓ {skill_name} ({step_count} Schritte)</i>"
                     try:
                         await status_message.edit_text(
-                            f"<i>✓ {skill_name} ({step_count} Schritte)</i>",
+                            text,
                             parse_mode=ParseMode.HTML,
                         )
                     except Exception:

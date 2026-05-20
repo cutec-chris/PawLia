@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 # Callback types
 InterimCallback = Callable[[str], Awaitable[None]]
 SkillStartCallback = Callable[[str, str], Awaitable[None]]  # (skill_name, query)
+SkillDoneCallback = Callable[[str, str], Awaitable[None]]  # (skill_name, result)
 
 from langchain_core.messages import (
     AIMessage,
@@ -188,7 +189,7 @@ class ChatAgent(BaseAgent):
         self._workspace_search_cfg: Dict[str, Any] = workspace_search_cfg or {}
         self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
-        self.on_skill_done: Optional[InterimCallback] = None      # (skill_name)
+        self.on_skill_done: Optional[SkillDoneCallback] = None    # (skill_name, result)
         self.on_model_change: Optional[Callable[[str], None]] = None  # (new_model)
 
         # Bind skill specs as "tools" so the LLM can call them
@@ -582,7 +583,7 @@ class ChatAgent(BaseAgent):
         thread_id: Optional[str] = None,
         on_skill_start: Optional[SkillStartCallback] = None,
         on_skill_step: Optional[InterimCallback] = None,
-        on_skill_done: Optional[InterimCallback] = None,
+        on_skill_done: Optional[SkillDoneCallback] = None,
     ) -> str:
         """Process user input and return a response.
 
@@ -741,7 +742,7 @@ class ChatAgent(BaseAgent):
                     result = self._wrap_with_trust_header(result, skill, query)
                     if _on_skill_done:
                         try:
-                            await _on_skill_done(skill_name)
+                            await _on_skill_done(skill_name, result)
                         except Exception as exc:
                             self.logger.debug("on_skill_done error: %s", exc)
                 else:
@@ -808,7 +809,7 @@ class ChatAgent(BaseAgent):
         on_sentence: Optional[Callable[[str], Awaitable[None]]] = None,
         on_skill_start: Optional[SkillStartCallback] = None,
         on_skill_step: Optional[InterimCallback] = None,
-        on_skill_done: Optional[InterimCallback] = None,
+        on_skill_done: Optional[SkillDoneCallback] = None,
         allow_skills: bool = True,
     ) -> str:
         """Like :meth:`run` but streams the LLM and calls *on_sentence* per sentence.
@@ -928,7 +929,7 @@ class ChatAgent(BaseAgent):
                     skill_result = self._wrap_with_trust_header(skill_result, skill, query)
                     if _on_skill_done:
                         try:
-                            await _on_skill_done(skill_name)
+                            await _on_skill_done(skill_name, skill_result)
                         except Exception:
                             pass
                 else:
@@ -999,7 +1000,7 @@ class ChatAgent(BaseAgent):
                         skill_result = self._wrap_with_trust_header(skill_result, skill, query)
                         if _on_skill_done:
                             try:
-                                await _on_skill_done(skill_name)
+                                await _on_skill_done(skill_name, skill_result)
                             except Exception:
                                 pass
                     else:

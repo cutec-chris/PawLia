@@ -207,16 +207,36 @@ def _make_status(skill_name: str, query: str) -> dict:
     return {"msgtype": "m.text", "body": body, "format": "org.matrix.custom.html", "formatted_body": html}
 
 
-def _make_status_step(event_id: str, skill_name: str, step: int, step_text: str) -> dict:
+def _make_status_step(event_id: str, skill_name: str, step: int, step_text: str, initial_query: str) -> dict:
     short = (step_text[:100] + "…") if len(step_text) > 100 else step_text
-    body = f"⚙ {skill_name} [{step}]: {short}"
-    html = _grey(f"⚙ <b>{skill_name}</b> [{step}]: <code>{short}</code>")
+    short_q = (initial_query[:60] + "…") if len(initial_query) > 60 else initial_query
+    body = f"⚙ {skill_name}: {short_q}\n[{step}] {short}"
+    html = _grey(f"⚙ <b>{skill_name}</b>: {short_q}<br>[{step}] <code>{short}</code>")
     return _status_edit(event_id, body, html)
 
 
-def _make_status_done(event_id: str, skill_name: str, steps: int) -> dict:
-    body = f"✓ {skill_name} ({steps} Schritte)"
-    html = _grey(f"✓ <b>{skill_name}</b> ({steps} Schritte)")
+def _make_status_done(event_id: str, skill_name: str, steps: int, initial_query: str, result: str = "") -> dict:
+    short_q = (initial_query[:60] + "…") if len(initial_query) > 60 else initial_query
+    # Extract a short summary from the result (first line or first 120 chars)
+    summary = ""
+    if result:
+        # Strip trust header if present
+        clean = result.lstrip()
+        if clean.startswith("[Report from"):
+            # Skip header lines until we find actual content
+            for line in clean.splitlines():
+                if line.strip() and not line.startswith("[") and not line.startswith("---"):
+                    clean = line
+                    break
+        first_line = clean.splitlines()[0].strip() if clean.splitlines() else ""
+        summary_text = first_line if first_line else clean[:120]
+        summary = (summary_text[:120] + "…") if len(summary_text) > 120 else summary_text
+    if summary:
+        body = f"✓ {skill_name}: {short_q}\n({steps} Schritte) — {summary}"
+        html = _grey(f"✓ <b>{skill_name}</b>: {short_q}<br>({steps} Schritte) — {summary}")
+    else:
+        body = f"✓ {skill_name}: {short_q}\n({steps} Schritte)"
+        html = _grey(f"✓ <b>{skill_name}</b>: {short_q}<br>({steps} Schritte)")
     return _status_edit(event_id, body, html)
 
 
@@ -632,14 +652,16 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             status_event_id: Optional[str] = None
             step_count = 0
             current_skill: Optional[str] = None
+            initial_query: Optional[str] = None
 
             async def _on_interim(interim_text: str) -> None:
                 await _send(interim_text)
                 await client.room_typing(room.room_id, typing_state=True)
 
             async def _on_skill_start(skill_name: str, query: str) -> None:
-                nonlocal status_event_id, step_count, current_skill
+                nonlocal status_event_id, step_count, current_skill, initial_query
                 current_skill = skill_name
+                initial_query = query
                 step_count = 0
                 await client.room_typing(room.room_id, typing_state=True)
                 content = _make_status(skill_name, query)
@@ -667,17 +689,17 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     await client.room_send(
                         room_id=room.room_id,
                         message_type="m.room.message",
-                        content=_make_status_step(status_event_id, current_skill, step_count, step_text),
+                        content=_make_status_step(status_event_id, current_skill, step_count, step_text, initial_query or ""),
                         ignore_unverified_devices=True,
                     )
 
-            async def _on_skill_done(skill_name: str) -> None:
+            async def _on_skill_done(skill_name: str, result: str = "") -> None:
                 await client.room_typing(room.room_id, typing_state=True)
                 if status_event_id:
                     await client.room_send(
                         room_id=room.room_id,
                         message_type="m.room.message",
-                        content=_make_status_done(status_event_id, skill_name, step_count),
+                        content=_make_status_done(status_event_id, skill_name, step_count, initial_query or "", result),
                         ignore_unverified_devices=True,
                     )
 

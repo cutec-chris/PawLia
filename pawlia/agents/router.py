@@ -62,7 +62,7 @@ class RouterAgent:
         self.on_interim = on_interim
         self.on_skill_start: Optional[Callable[[str, str], Awaitable[None]]] = None
         self.on_skill_step: Optional[Callable[[str], Awaitable[None]]] = None
-        self.on_skill_done: Optional[Callable[[str], Awaitable[None]]] = None
+        self.on_skill_done: Optional[Callable[[str, str], Awaitable[None]]] = None
         self.on_model_change: Optional[Callable[[str], None]] = None
 
     @property
@@ -196,7 +196,7 @@ class RouterAgent:
         thread_id: Optional[str] = None,
         on_skill_start: Optional[Callable[[str, str], Awaitable[None]]] = None,
         on_skill_step: Optional[Callable[[str], Awaitable[None]]] = None,
-        on_skill_done: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_skill_done: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ) -> str:
         agent_type = "vision" if images else "chat"
         meta = self.describe_backend(thread_id, agent_type=agent_type)
@@ -238,7 +238,7 @@ class RouterAgent:
         on_sentence: Optional[Callable[[str], Awaitable[None]]] = None,
         on_skill_start: Optional[Callable[[str, str], Awaitable[None]]] = None,
         on_skill_step: Optional[Callable[[str], Awaitable[None]]] = None,
-        on_skill_done: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_skill_done: Optional[Callable[[str, str], Awaitable[None]]] = None,
         allow_skills: bool = True,
     ) -> str:
         agent_type = "vision" if images else "chat"

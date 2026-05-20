@@ -1601,7 +1601,7 @@ class CallSession:
                 if self._tts_track:
                     self._tts_track.start_hold()
 
-            async def _on_skill_done(skill_name: str) -> None:
+            async def _on_skill_done(skill_name: str, result: str = "") -> None:
                 await self._send_cb(f"✓ *{skill_name}*")
                 # Restart hold audio for the next skill or agent thinking phase
                 if self._tts_track:

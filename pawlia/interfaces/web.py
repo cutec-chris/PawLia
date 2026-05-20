@@ -306,8 +306,8 @@ async def start_web(app: "App", cfg: Dict) -> None:
             async def _on_skill_step(step_text: str) -> None:
                 await _sse("skill_step", {"text": step_text})
 
-            async def _on_skill_done(skill_name: str) -> None:
-                await _sse("skill_done", {"skill": skill_name})
+            async def _on_skill_done(skill_name: str, result: str = "") -> None:
+                await _sse("skill_done", {"skill": skill_name, "result": result})
 
             response = await agent.run(
                 message, images=images, thread_id=thread_id,
