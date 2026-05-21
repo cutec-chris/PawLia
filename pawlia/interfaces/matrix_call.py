@@ -265,7 +265,7 @@ def _strip_red_codec(sdp: str) -> str:
     # Find RED payload type(s)
     red_pts: set = set()
     for line in lines:
-        m = re.match(r"a=rtpmap:(\d+)\s+red/", line)
+        m = re.match(r"a=rtpmap:(\d+)\s+red/", line, re.IGNORECASE)
         if m:
             red_pts.add(m.group(1))
     if not red_pts:
@@ -355,6 +355,8 @@ class CallSession:
 
     # Silence detection: RMS below this (after AGC) → silence
     SILENCE_THRESHOLD = 0.018
+    # How many noise-floor multiples before a frame counts as speech
+    SILENCE_EMPHASIS_FACTOR = 2.0
     # Seconds of silence that end a speech chunk
     SILENCE_SECONDS = 1.5
     # Minimum seconds of speech before we transcribe (filter short noise bursts)
@@ -519,6 +521,13 @@ class CallSession:
             "silence_threshold",
             self.SILENCE_THRESHOLD,
             minimum=0.0,
+        )
+        self.SILENCE_EMPHASIS_FACTOR = self._get_float_config(
+            voip_cfg,
+            "silence_emphasis_factor",
+            self.SILENCE_EMPHASIS_FACTOR,
+            minimum=1.0,
+            maximum=10.0,
         )
         self.SILENCE_SECONDS = self._get_float_config(
             voip_cfg,
@@ -1303,8 +1312,7 @@ class CallSession:
                     voiced_mask[idx] = bool(self._webrtc_vad.is_speech(frame_int16.tobytes(), sample_rate))
                 except Exception as e:
                     logger.debug("call %s: webrtcvad frame analysis failed: %s", self.call_id[:8], e)
-                    voiced_mask = np.zeros(len(frame_rms), dtype=bool)
-                    break
+                    voiced_mask[idx] = False
 
         voiced_run = 0
         current_voiced_run = 0
@@ -1356,7 +1364,7 @@ class CallSession:
         # RMS is less than 2× the measured floor is treated as silence so that
         # steady background noise (e.g. cycling) does not prevent silence_count
         # from accumulating.
-        effective_threshold = max(self.SILENCE_THRESHOLD, self._noise_floor * 2.0)
+        effective_threshold = max(self.SILENCE_THRESHOLD, self._noise_floor * self.SILENCE_EMPHASIS_FACTOR)
         if adjusted_rms <= effective_threshold:
             return False
 
@@ -1768,15 +1776,20 @@ class CallSession:
                 # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
                 adjusted_rms = self._agc_rms(rms)
 
+                # Apply AGC gain to PCM so STT receives boosted audio matching VAD
+                pcm = pcm * min(self._agc_gain, 4.0)
+
                 if not speech_buffer and pre_speech_frames > 0:
                     pre_speech_buffer.append(pcm)
 
-                # Update background noise floor while not accumulating speech.
-                # EMA alpha=0.02 → ~50-frame (1 s) time constant, slow enough to
-                # ignore transient spikes but fast enough to adapt to the cycling
-                # noise floor within the first few seconds of a call.
+                # Update background noise floor.  While not accumulating speech, use
+                # a fast EMA (~1 s time constant) to adapt quickly to room changes.
+                # During speech, use a very slow EMA (~10 s) to track slow drift
+                # (e.g. fan cycling) without contamination from the speech signal.
                 if not speech_buffer:
                     self._noise_floor = 0.02 * rms + 0.98 * self._noise_floor
+                elif rms < self._noise_floor * self.SILENCE_EMPHASIS_FACTOR:
+                    self._noise_floor = 0.002 * rms + 0.998 * self._noise_floor
 
                 # silence_threshold in frames; kept at the configured value (minimum
                 # 1.2 s).  Because _is_speech_like_frame now uses an adaptive
