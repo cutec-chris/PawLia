@@ -198,6 +198,9 @@ class App:
             chat_llm = self.llm.get("chat", agent_overrides=overrides)
             vision_llm = self.llm.get("vision", agent_overrides=overrides)
             ws_search_cfg = self.config.get("workspace-search", {})
+            # Model-size-aware tool-turn budget
+            chat_model_name = self.llm.default_model_name("chat", agent_overrides=overrides)
+            chat_max_turns = self.llm.max_tool_turns_for_model(chat_model_name)
             agent = ChatAgent(
                 llm=chat_llm,
                 skills=user_skills,
@@ -207,6 +210,7 @@ class App:
                 session=session,
                 vision_llm=vision_llm,
                 workspace_search_cfg=ws_search_cfg,
+                max_tool_turns=chat_max_turns,
                 **kwargs,
             )
             # Resolve session/thread-specific agent selectors at run() time.
