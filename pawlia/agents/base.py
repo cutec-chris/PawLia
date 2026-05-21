@@ -3,7 +3,9 @@
 import asyncio
 import logging
 import os
+import random
 import re
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from typing import Any, List, Optional
@@ -16,6 +18,13 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_openai import ChatOpenAI
+
+from pawlia.agents.error_classifier import (
+    ErrorCategory,
+    classify_error,
+    is_retryable,
+    should_compact,
+)
 from pawlia.utils import run_sync_in_thread
 
 
@@ -76,9 +85,11 @@ class BaseAgent(ABC):
                       max_retries: int = 3) -> AIMessage:
         """Invoke an LLM (default: self.llm) with the given messages.
 
-        Runs synchronous ``llm.invoke`` in a thread to keep the event loop free.
-        Retries up to *max_retries* times when the model calls a tool despite
-        ``tool_choice="none"`` — a common failure mode for smaller models.
+        Classifies API errors and applies the correct recovery strategy:
+        - context_overflow → compact and retry
+        - rate_limit / timeout / server_error → jittered backoff + retry
+        - auth_error / format_error → surface immediately, no retry
+        - tool-use-failed → inject synthetic ToolMessage, retry
         """
         log_prompt(messages, name=self.log_name)
         target = llm or self.llm
@@ -87,8 +98,6 @@ class BaseAgent(ABC):
             try:
                 return target.invoke(messages)
             except StopIteration as exc:
-                # Python 3.14+: StopIteration cannot propagate out of a thread
-                # into a Future; wrap it so the async bridge can report it.
                 raise RuntimeError("LLM invoke exhausted iterator") from exc
 
         retries = 0
@@ -96,26 +105,27 @@ class BaseAgent(ABC):
             try:
                 return await run_sync_in_thread(_call)
             except Exception as exc:
-                error_str = str(exc)
-                # Detect "tool use failed" errors from OpenAI-compatible APIs.
-                # This happens when the model embeds a tool call as JSON text
-                # instead of using the structured tool_calls mechanism — or when
-                # the model tries to call a tool despite tool_choice="none".
-                if ("tool_use_failed" in error_str or
-                    ("Tool choice is none" in error_str and "called a tool" in error_str)):
+                category, detail = classify_error(exc)
+
+                # Tool-use-failed: model embedded a tool call as JSON text
+                # despite tool_choice="none" or no tools bound.
+                if category == ErrorCategory.format_error and (
+                    "tool_use_failed" in detail or "tool choice is none" in detail
+                ):
                     retries += 1
                     if retries >= max_retries:
                         self.logger.warning(
-                            "Max retries (%d) reached for tool-use-failed error", max_retries)
+                            "Max retries (%d) reached for tool-use-failed error",
+                            max_retries,
+                        )
                         raise
 
-                    tool_name = self._extract_failed_tool_call(error_str) or "unknown_tool"
+                    tool_name = self._extract_failed_tool_call(detail) or "unknown_tool"
                     self.logger.info(
                         "Model output a tool call as JSON: '%s' (attempt %d/%d), "
-                        "injecting tool result", tool_name, retries, max_retries)
-
-                    # Add a ToolMessage to messages (not HumanMessage — the model
-                    # responds with text when it "sees" a tool result in context)
+                        "injecting tool result",
+                        tool_name, retries, max_retries,
+                    )
                     tool_call_id = f"synthetic_{retries}"
                     messages = list(messages) + [
                         ToolMessage(
@@ -129,8 +139,64 @@ class BaseAgent(ABC):
                     ]
                     continue
 
-                # Re-raise any other exceptions
-                raise
+                # Context overflow → compact messages and retry once
+                if should_compact(category):
+                    compacted = self._compact_messages(messages)
+                    if compacted is not messages and len(compacted) < len(messages):
+                        self.logger.info(
+                            "Context overflow: compacted %d → %d messages, retrying",
+                            len(messages), len(compacted),
+                        )
+                        messages = compacted
+                        retries += 1
+                        continue
+                    self.logger.warning(
+                        "Context overflow: cannot compact further, surfacing"
+                    )
+                    raise
+
+                # Non-retryable errors (auth, format, permanent) → surface
+                if not is_retryable(category):
+                    self.logger.warning(
+                        "Non-retryable API error (%s): %s", category.value, detail,
+                    )
+                    raise
+
+                # Retryable: rate_limit, timeout, server_error, unknown
+                retries += 1
+                if retries >= max_retries:
+                    self.logger.warning(
+                        "Max retries (%d) reached for %s: %s",
+                        max_retries, category.value, detail,
+                    )
+                    raise
+
+                delay = self._jittered_backoff(retries, category)
+                self.logger.info(
+                    "API error (%s, attempt %d/%d): retrying in %.1fs — %s",
+                    category.value, retries, max_retries, delay, detail,
+                )
+                await asyncio.sleep(delay)
+
+    @staticmethod
+    def _compact_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
+        """Drop the middle of the conversation to reduce context size.
+
+        Keeps system message + first exchange + last 4 exchanges intact.
+        """
+        if len(messages) <= 4:
+            return messages
+        system = messages[:1]
+        tail = messages[-4:]
+        return system + [
+            HumanMessage(content="[Earlier conversation compacted due to context limit]"),
+        ] + tail
+
+    @staticmethod
+    def _jittered_backoff(attempt: int, category: ErrorCategory = ErrorCategory.unknown) -> float:
+        base = 5.0 if category == ErrorCategory.rate_limit else 1.5
+        delay = min(base * (1.5 ** (attempt - 1)), 30.0)
+        return delay * (0.5 + random.random())
 
     @staticmethod
     def _extract_failed_tool_call(error_str: str) -> Optional[str]:
