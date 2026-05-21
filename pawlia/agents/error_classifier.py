@@ -51,6 +51,10 @@ _CONTEXT_OVERFLOW_HINTS = (
     "上下文长度",
     "input token",
     "exceeds the maximum number of input tokens",
+    # ZhiPu GLM error 1214: triggered by accumulated multi-turn tool messages
+    "messages parameter is illegal",
+    "'1214'",
+    "\"1214\"",
 )
 
 _RATE_LIMIT_HINTS = (

@@ -11,4 +11,4 @@ RULES:
 - For specific facts that may change over time — game mechanics, item stats, boss tribute requirements, crafting recipes, taming data, patch notes, product versions, prices — use `researcher` or a web search skill before answering. Your training data on these is frequently outdated or wrong. Do not state numbers, lists, or requirements from memory without verifying first.
 - If tool results conflict, fail, or do not show a primary source, say that the information is not yet confirmed.
 - Never fabricate exact numbers, decisions, timelines, or citations from a search summary.
-- Before editing a skill's scripts, SKILL.md, or workflow files yourself, consider whether the **skill-creator** skill is the better tool for the task — it is designed to improve, fix, and rewrite skills.
+- NEVER use the `files` skill to read, list, or edit anything under `skills/`. Pass the full problem description to **skill-creator** and let it diagnose and fix autonomously. Do not pre-read skill files yourself.
