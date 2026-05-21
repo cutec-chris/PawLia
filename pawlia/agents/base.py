@@ -28,6 +28,12 @@ from pawlia.agents.error_classifier import (
 from pawlia.utils import run_sync_in_thread
 
 
+_SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
+_RE_ROLE_ALTERNATION_VIOLATION = re.compile(
+    r"(tool|assistant)\s*(tool|assistant)", re.IGNORECASE
+)
+
+
 _RE_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL)
 _RE_TOOL_CALL_LEAKED = re.compile(r"<tool_call>.*?(?:</tool_call>|$)", re.DOTALL)
 # Chat-template tokens that some models leak into their output
@@ -91,6 +97,7 @@ class BaseAgent(ABC):
         - auth_error / format_error → surface immediately, no retry
         - tool-use-failed → inject synthetic ToolMessage, retry
         """
+        messages = self._sanitize_messages(list(messages))
         log_prompt(messages, name=self.log_name)
         target = llm or self.llm
 
@@ -177,6 +184,37 @@ class BaseAgent(ABC):
                     category.value, retries, max_retries, delay, detail,
                 )
                 await asyncio.sleep(delay)
+
+    @staticmethod
+    def _sanitize_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
+        """Strip surrogate characters and repair role alternation in-place."""
+        result: List[BaseMessage] = []
+        for msg in messages:
+            content = msg.content
+            if isinstance(content, str) and _SURROGATE_RE.search(content):
+                cleaned = _SURROGATE_RE.sub("\ufffd", content)
+                if isinstance(msg, HumanMessage):
+                    msg = HumanMessage(content=cleaned)
+                elif isinstance(msg, AIMessage):
+                    msg = AIMessage(content=cleaned, tool_calls=getattr(msg, "tool_calls", []))
+                elif isinstance(msg, ToolMessage):
+                    msg = ToolMessage(content=cleaned, tool_call_id=msg.tool_call_id)
+                elif isinstance(msg, SystemMessage):
+                    msg = SystemMessage(content=cleaned)
+            result.append(msg)
+
+        # Repair role alternation: drop orphaned tool messages
+        repaired: List[BaseMessage] = []
+        for i, msg in enumerate(result):
+            if isinstance(msg, ToolMessage):
+                if i == 0:
+                    continue
+                prev = repaired[-1] if repaired else result[i - 1]
+                if not isinstance(prev, AIMessage) or not getattr(prev, "tool_calls", None):
+                    continue
+            repaired.append(msg)
+
+        return repaired
 
     @staticmethod
     def _compact_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
