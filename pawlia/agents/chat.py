@@ -29,6 +29,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from pawlia.agents.base import BaseAgent, log_prompt
+from pawlia.agents.iteration_budget import IterationBudget
 from pawlia.llm import is_context_length_error
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.skills.loader import AgentSkill
@@ -178,6 +179,7 @@ class ChatAgent(BaseAgent):
         on_interim: Optional[InterimCallback] = None,
         vision_llm: Optional[ChatOpenAI] = None,
         workspace_search_cfg: Optional[Dict[str, Any]] = None,
+        max_tool_turns: Optional[int] = None,
     ):
         super().__init__(llm, logger)
         self._all_skills = dict(skills)  # unfiltered — kept for re-enable support
@@ -191,6 +193,7 @@ class ChatAgent(BaseAgent):
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self.on_skill_done: Optional[SkillDoneCallback] = None    # (skill_name, result)
         self.on_model_change: Optional[Callable[[str], None]] = None  # (new_model)
+        self.max_tool_turns = max_tool_turns if (isinstance(max_tool_turns, int) and max_tool_turns > 0) else _MAX_CHAT_TOOL_TURNS
 
         # Bind skill specs as "tools" so the LLM can call them
         self._skill_specs = [s.as_openai_spec() for s in skills.values()]
@@ -667,8 +670,11 @@ class ChatAgent(BaseAgent):
         tool_calls_info: List[Dict[str, Any]] = []
         final = response
         nudge_count = 0
+        budget = IterationBudget(self.max_tool_turns)
 
-        for turn in range(_MAX_CHAT_TOOL_TURNS):
+        turn = 0
+        while budget.consume():
+            turn += 1
             self.logger.debug(
                 "Chat tool loop turn %d: tool_calls=%s, content=%s",
                 turn,
@@ -781,8 +787,9 @@ class ChatAgent(BaseAgent):
                 thread_id=thread_id,
                 images=bool(images),
             )
+
         else:
-            self.logger.warning("Max chat tool turns reached, forcing final response")
+            self.logger.warning("Max chat tool turns (%d) reached, forcing final response", self.max_tool_turns)
             final = await self._invoke(
                 self._prepare_messages_for_context_budget(
                     messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)],
@@ -964,8 +971,9 @@ class ChatAgent(BaseAgent):
             raw_text2 = ""
             nudge_count = 0
             final_response: Optional[AIMessage] = None
+            stream_budget = IterationBudget(self.max_tool_turns)
 
-            for _turn in range(_MAX_CHAT_TOOL_TURNS):
+            while stream_budget.consume():
                 next_response, messages = await self._invoke_with_tool_retry(
                     messages,
                     llm=bound_llm,

@@ -34,6 +34,31 @@ _RE_ANY_CODE_BLOCK = re.compile(r"```[^\n]*\n(.+?)```", re.DOTALL)
 _RE_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
 
 
+def _repair_tool_args(args: Any) -> Dict[str, Any]:
+    """Normalize malformed tool-call arguments from small models.
+
+    Common failure modes:
+    - ``args`` is a bare string instead of a dict
+    - ``args`` is a list (first element is the real payload)
+    - ``args`` is a dict with wrong key casing or extra junk
+    """
+    if args is None:
+        return {}
+    if isinstance(args, str):
+        stripped = args.strip()
+        if stripped:
+            return {"command": stripped} if stripped else {}
+        return {}
+    if isinstance(args, list):
+        if args:
+            return _repair_tool_args(args[0])
+        return {}
+    if not isinstance(args, dict):
+        return {}
+
+    return dict(args)
+
+
 class SkillRunnerAgent(BaseAgent):
     """Worker agent that executes a skill using real tools.
 
@@ -291,7 +316,7 @@ class SkillRunnerAgent(BaseAgent):
     def _execute_tool_call(self, tc: dict, messages: List[BaseMessage]) -> ToolExecutionResult:
         """Execute a single tool call, append result to messages, and return it."""
         tc_name = str(tc.get("name", "") or "").strip()
-        tc_args = tc.get("args", {})
+        tc_args = _repair_tool_args(tc.get("args", {}))
         tc_id = tc.get("id", "")
 
         if not tc_name:
