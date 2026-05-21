@@ -733,6 +733,7 @@ class ChatAgent(BaseAgent):
 
             messages.append(final)
 
+            skill_creator_called = False
             for tool_call in final.tool_calls:
                 skill_name, normalized_args, error = self._decode_skill_call(tool_call)
                 query = normalized_args.get("query", "")
@@ -753,6 +754,8 @@ class ChatAgent(BaseAgent):
                     result = await runner.run(query=query)
                     result = self._process_directives(result, thread_id)
                     result = self._wrap_with_trust_header(result, skill, query)
+                    if skill_name == "skill-creator":
+                        skill_creator_called = True
                     if _on_skill_done:
                         try:
                             await _on_skill_done(skill_name, result)
@@ -776,8 +779,8 @@ class ChatAgent(BaseAgent):
                     tool_call_id=tool_call.get("id", ""),
                 ))
 
-            # Refresh workspace skills (e.g. skill-creator may have added one)
-            if self._refresh_and_rebind_skills():
+            # Refresh workspace skills only when skill-creator ran (it may have added/changed skills)
+            if skill_creator_called and self._refresh_and_rebind_skills():
                 bound_llm = self.bound_llm
                 active_llm = bound_llm
 
@@ -921,6 +924,7 @@ class ChatAgent(BaseAgent):
             messages.append(accumulated)
             tool_calls_info: List[Dict[str, Any]] = []
 
+            skill_creator_called = False
             for tool_call in accumulated.tool_calls:
                 skill_name, normalized_args, error = self._decode_skill_call(tool_call)
                 query = normalized_args.get("query", "")
@@ -941,6 +945,8 @@ class ChatAgent(BaseAgent):
                     skill_result = await runner.run(query=query)
                     skill_result = self._process_directives(skill_result, thread_id)
                     skill_result = self._wrap_with_trust_header(skill_result, skill, query)
+                    if skill_name == "skill-creator":
+                        skill_creator_called = True
                     if _on_skill_done:
                         try:
                             await _on_skill_done(skill_name, skill_result)
@@ -963,8 +969,8 @@ class ChatAgent(BaseAgent):
                     tool_call_id=tool_call.get("id", ""),
                 ))
 
-            # Refresh workspace skills (e.g. skill-creator may have added one)
-            if self._refresh_and_rebind_skills():
+            # Refresh workspace skills only when skill-creator ran (it may have added/changed skills)
+            if skill_creator_called and self._refresh_and_rebind_skills():
                 bound_llm = self.bound_llm
 
             # ---- Continue tool loop until the task is actually complete ----
@@ -993,6 +999,7 @@ class ChatAgent(BaseAgent):
                     break
 
                 messages.append(next_response)
+                skill_creator_called = False
                 for tool_call in next_response.tool_calls:
                     skill_name, normalized_args, error = self._decode_skill_call(tool_call)
                     query = normalized_args.get("query", "")
@@ -1013,6 +1020,8 @@ class ChatAgent(BaseAgent):
                         skill_result = await runner.run(query=query)
                         skill_result = self._process_directives(skill_result, thread_id)
                         skill_result = self._wrap_with_trust_header(skill_result, skill, query)
+                        if skill_name == "skill-creator":
+                            skill_creator_called = True
                         if _on_skill_done:
                             try:
                                 await _on_skill_done(skill_name, skill_result)
@@ -1035,8 +1044,8 @@ class ChatAgent(BaseAgent):
                         tool_call_id=tool_call.get("id", ""),
                     ))
 
-                # Refresh workspace skills after each skill return
-                if self._refresh_and_rebind_skills():
+                # Refresh workspace skills only when skill-creator ran
+                if skill_creator_called and self._refresh_and_rebind_skills():
                     bound_llm = self.bound_llm
             else:
                 accumulated2, raw_text2 = await self._stream_with_sentences(
