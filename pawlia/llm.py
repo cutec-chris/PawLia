@@ -62,6 +62,8 @@ from langchain_core.messages import (
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
+from pawlia.agents.error_classifier import classify_error, ErrorCategory
+
 
 logger = logging.getLogger(__name__)
 
@@ -88,21 +90,10 @@ _CAPABLE_NAME_HINTS = (
     "llama-3.3", "llama-4",
 )
 
-_CONTEXT_ERROR_HINTS = (
-    "context_length_exceeded",
-    "prompt exceeds max length",
-    "maximum context length",
-    "maximum context",
-    "context window",
-    "please reduce the length of the messages or completion",
-    "too many tokens",
-)
-
-
 def is_context_length_error(exc: BaseException) -> bool:
     """Return True when *exc* indicates a prompt/context window overflow."""
-    text = str(exc).lower()
-    return any(hint in text for hint in _CONTEXT_ERROR_HINTS)
+    category, _ = classify_error(exc)
+    return category == ErrorCategory.context_overflow
 
 
 def estimate_max_tool_turns(model_name: str) -> int:
