@@ -4,6 +4,9 @@ description: >
   Create new PawLia skills from scratch, improve or audit existing ones.
   Also manages centralized credentials for skills — store, retrieve, check
   API keys and tokens that other skills need at runtime.
+  When a skill has bugs or needs changes, delegate the full task here —
+  describe the problem and let the skill-creator autonomously diagnose
+  and fix it. Do not pre-read the skill files yourself.
   Use when the user wants to: create a new skill, scaffold a skill directory,
   manage skill credentials, improve or review an existing skill, validate
   a SKILL.md against the spec, package a skill for distribution.
