@@ -103,9 +103,11 @@ if _AIORTC_AVAILABLE:
             self._hold_pos = 0
 
         def start_hold(self) -> None:
-            """Start looping hold audio (until :meth:`stop_hold`)."""
+            """Start looping hold audio (until :meth:`stop_hold`).
+            Does not reset the playback position if already active."""
+            if not self._hold_active:
+                self._hold_pos = 0
             self._hold_active = True
-            self._hold_pos = 0
 
         def stop_hold(self) -> None:
             """Stop hold audio playback."""
@@ -319,11 +321,15 @@ class CallSession:
     utterances get a quick response.  A small bonus is added when the noise
     floor is elevated, since background noise can mask the true end of speech.
 
-        last_speech_duration  →  base delay
+        last_speech_duration (minus trailing silence) → base delay
         < 6 s                    RESPONSE_DELAY_SECONDS (default 1.2 s)
         6 – 12 s                 max(base, 3.0 s)
         12 – 20 s                max(base, 4.0 s)
         > 20 s                   max(base, 5.0 s)
+
+    The trailing silence window (~1.5 s) is subtracted from the raw chunk
+    duration before applying the thresholds so that short utterances with a
+    natural trailing pause are not mistakenly classified as long monologues.
     """
 
     CALL_INACTIVITY_SECONDS = 180
@@ -927,7 +933,10 @@ class CallSession:
         background noise is present so transient noise dips don't cut off early.
         """
         base = self.RESPONSE_DELAY_SECONDS
-        dur = self._speech_detector.last_speech_duration
+        # Subtract the trailing silence window that is always appended to every
+        # chunk — it inflates the raw duration without representing actual speech.
+        silence_trail = max(1.2, self._speech_detector.SILENCE_SECONDS)
+        dur = max(0.0, self._speech_detector.last_speech_duration - silence_trail)
         if dur > 20.0:
             base = max(base, 5.0)
         elif dur > 12.0:
@@ -1377,7 +1386,10 @@ class CallSession:
                             is_barge_in=False,
                         )
                         if task is not None:
-                            ...  # fire & forget
+                            # Start hold immediately on pause detection so the
+                            # caller hears feedback before the async STT task runs.
+                            if self._tts_track:
+                                self._tts_track.start_hold()
                         speech_buffer = []
                         pre_speech_buffer.clear()
                         silence_count = 0
