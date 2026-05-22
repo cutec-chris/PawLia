@@ -401,6 +401,7 @@ class TestChatAgentPersist:
             call_args = llm.invoke.call_args
             messages = call_args[0][0]
             # SystemMessage + HumanMessage(prev_q) + AIMessage(prev_a) + HumanMessage(new)
+            # (workspace context block not injected because bootstrap.md exists)
             assert len(messages) == 4
             assert messages[1].content == "prev_q"
             assert messages[2].content == "prev_a"
@@ -431,7 +432,7 @@ class TestChatAgentPersist:
         await agent.run("New question")
 
         messages = llm.invoke.call_args[0][0]
-        assert len(messages) == 4
+        assert len(messages) == 5
         assert messages[1].content == "prev_q"
         assert isinstance(messages[2], AIMessage)
         assert "Earlier skill use:" in messages[2].content

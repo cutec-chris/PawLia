@@ -105,38 +105,54 @@ _DEFERRED_PLACEHOLDER_RE = re.compile(
 )
 
 
-def _augment_with_workspace_refs(user_input: str, session: Any) -> str:
-    """Prepend workspace search results as a preamble to the user message.
+def _augment_with_workspace_refs(user_input: str, session: Any) -> tuple[str | None, str]:
+    """Return (context_block, clean_user_input).
 
-    Putting refs in the user role (not system) triggers the model to actually
-    call the files skill. Trust-headers on skill results (see ChatAgent
-    _wrap_with_trust_header) then govern how the model interprets the output.
-    The two mechanisms are complementary: one triggers calls, the other frames
-    their results.
+    When workspace refs are available, *context_block* is a self-contained
+    preamble referencing matched wiki sections.  It is returned separately so
+    callers can inject it as a *distinct* HumanMessage — the model sees it as
+    auxiliary context rather than part of the user's current utterance.
+
+    When no refs exist *context_block* is ``None``.
     """
     if not session or not session.workspace_refs:
-        return user_input
+        return None, user_input
     try:
         from pawlia.memory import _format_workspace_refs
         block = _format_workspace_refs(session.workspace_refs, user_query=user_input)
-        return f"{block}\n\n---\n\n{user_input}"
+        context = (
+            "[Workspace context — optional reference material]\n"
+            "The sections below were keyword-matched from the user's workspace.\n"
+            "They *may* be relevant to the current question, or they may be a\n"
+            "coincidental match.  Only read and use them if they clearly answer\n"
+            "what the user just asked.\n\n"
+            + block
+        )
+        return context, user_input
     except Exception:
-        return user_input
+        return None, user_input
 
 
 def _remove_workspace_refs_from_messages(
     messages: List[BaseMessage],
     original_user_input: str,
 ) -> List[BaseMessage]:
-    """Drop workspace-search hints after they served their routing purpose."""
+    """Drop the workspace-context preamble after it served its routing purpose.
+
+    The context block is a separate HumanMessage prepended by
+    ``_augment_with_workspace_refs``.  It is removed entirely (not replaced with
+    a stub) so tool-loop turns don't keep re-reading the same suggestions.
+    The actual user message (the next HumanMessage) is left untouched.
+    """
     cleaned = list(messages)
-    for idx in range(len(cleaned) - 1, -1, -1):
-        msg = cleaned[idx]
-        if not isinstance(msg, HumanMessage) or not isinstance(msg.content, str):
-            continue
-        if msg.content.startswith("## Workspace Notes Available"):
-            cleaned[idx] = HumanMessage(content=original_user_input)
-        break
+    for idx, msg in enumerate(cleaned):
+        if (
+            isinstance(msg, HumanMessage)
+            and isinstance(msg.content, str)
+            and msg.content.startswith("[Workspace context")
+        ):
+            cleaned.pop(idx)
+            break
     return cleaned
 
 
@@ -646,17 +662,21 @@ class ChatAgent(BaseAgent):
         # A thread-specific model override takes priority over the session default.
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
 
-        augmented_input = _augment_with_workspace_refs(user_input, self.session)
+        context_block, clean_input = _augment_with_workspace_refs(user_input, self.session)
 
         # Build multimodal content when images are present
         if images:
             self.logger.debug("Sending %d image(s) to LLM", len(images))
-            content: List[Dict[str, Any]] = [{"type": "text", "text": augmented_input or "What's in this image?"}]
+            if context_block:
+                messages.append(HumanMessage(content=context_block))
+            content: List[Dict[str, Any]] = [{"type": "text", "text": clean_input or "What's in this image?"}]
             for data_uri in images:
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             messages.append(HumanMessage(content=content))
         else:
-            messages.append(HumanMessage(content=augmented_input))
+            if context_block:
+                messages.append(HumanMessage(content=context_block))
+            messages.append(HumanMessage(content=clean_input))
 
         # Turn 1: LLM decides whether to call a skill or answer directly
         active_llm = bound_llm
@@ -868,15 +888,19 @@ class ChatAgent(BaseAgent):
         bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
         first_turn_llm = bound_llm if allow_skills else unbound_llm
 
-        augmented_input = _augment_with_workspace_refs(user_input, self.session)
+        context_block, clean_input = _augment_with_workspace_refs(user_input, self.session)
 
         if images:
-            content: List[Dict[str, Any]] = [{"type": "text", "text": augmented_input or "What's in this image?"}]
+            if context_block:
+                messages.append(HumanMessage(content=context_block))
+            content: List[Dict[str, Any]] = [{"type": "text", "text": clean_input or "What's in this image?"}]
             for data_uri in images:
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             messages.append(HumanMessage(content=content))
         else:
-            messages.append(HumanMessage(content=augmented_input))
+            if context_block:
+                messages.append(HumanMessage(content=context_block))
+            messages.append(HumanMessage(content=clean_input))
 
         # ---- Stream turn 1 ----
         # _partial_text tracks generated text for persist-on-cancel (barge-in during TTS
