@@ -48,43 +48,15 @@ except Exception as _e:
     _logging.getLogger("pawlia.interfaces.matrix_call").warning("aiortc import failed: %s", _e)
     _AIORTC_AVAILABLE = False
 
-try:
-    import webrtcvad  # type: ignore
-    _WEBRTCVAD_IMPORT_ERROR = None
-except Exception as _e:
-    webrtcvad = None  # type: ignore[assignment]
-    _WEBRTCVAD_IMPORT_ERROR = _e
+from pawlia.audio.agc import AGCController
+from pawlia.audio.vad import SpeechDetector
+from pawlia.audio.config import get_float_config, get_int_config, get_bool_config
 
 if TYPE_CHECKING:
     from nio import AsyncClient, MatrixRoom
     from pawlia.app import App
 
 logger = logging.getLogger("pawlia.interfaces.matrix_call")
-
-_INTERRUPT_KEYWORD_RE = re.compile(
-    r"\b(?:halt|stop|stopp|wait|warte|warten|moment|sekunde|pause)\b",
-    re.IGNORECASE,
-)
-
-_STANDALONE_STT_HALLUCINATION_RE = re.compile(
-    r"^(?:"
-    r"(?:vielen\s+dank|danke(?:\s+schön)?)"
-    r"|(?:tschüss|auf\s+wiedersehen)"
-    r"|(?:untertitelung\s+des\s+zdf(?:,\s*\d{4})?)"
-    r")\.?$",
-    re.IGNORECASE,
-)
-
-
-def _build_webrtc_vad(mode: int):
-    """Create a WebRTC VAD instance when the optional dependency is available."""
-    if webrtcvad is None:
-        return None
-    try:
-        return webrtcvad.Vad(mode)
-    except Exception as e:
-        logger.warning("matrix-call: could not initialize webrtcvad(mode=%s): %s", mode, e)
-        return None
 
 # ---------------------------------------------------------------------------
 # Outgoing audio track (TTS playback)
@@ -327,10 +299,11 @@ class CallSession:
     --------------------------
     Rather than using a fixed RMS threshold to distinguish speech from silence,
     the pipeline maintains a rolling EMA of the background noise floor
-    (_noise_floor) during periods when no speech buffer is active.  The
-    frame-level gate (_is_speech_like_frame) then uses
+    (_noise_floor, managed by :class:`SpeechDetector`) during periods when no
+    speech buffer is active.  The frame-level gate
+    (:meth:`SpeechDetector.is_speech_like_frame`) then uses
 
-        effective_threshold = max(SILENCE_THRESHOLD, _noise_floor × 2.0)
+        effective_threshold = max(SILENCE_THRESHOLD, noise_floor × 2.0)
 
     so that steady background noise (e.g. road noise while cycling) falls
     below the effective threshold and counts as silence.  This lets
@@ -353,46 +326,9 @@ class CallSession:
         > 20 s                   max(base, 5.0 s)
     """
 
-    # Silence detection: RMS below this (after AGC) → silence
-    SILENCE_THRESHOLD = 0.018
-    # How many noise-floor multiples before a frame counts as speech
-    SILENCE_EMPHASIS_FACTOR = 2.0
-    # Seconds of silence that end a speech chunk
-    SILENCE_SECONDS = 1.5
-    # Minimum seconds of speech before we transcribe (filter short noise bursts)
-    MIN_SPEECH_SECONDS = 0.4
-    # Chunk-level guard: require enough active speech frames before STT
-    MIN_ACTIVE_SPEECH_RATIO = 0.12
-    MIN_CONSECUTIVE_SPEECH_FRAMES = 8
-    MIN_SPEECH_BAND_RATIO = 0.35
-    MAX_SPECTRAL_FLATNESS = 0.72
-    MIN_SPEECH_LIKE_RATIO = 0.08
-    MIN_CONSECUTIVE_SPEECHLIKE_FRAMES = 4
-    # Require a short sustained return to speech before a pause is treated as
-    # broken. This prevents single noisy frames from stretching a chunk for
-    # many extra seconds.
-    MIN_RESUME_SPEECH_FRAMES = 3
-    # Keep a small lead-in before detected speech so STT does not miss word
-    # onsets that arrive just before the VAD is confident enough to start.
-    PRE_SPEECH_SECONDS = 0.4
-    WEBRTC_VAD_ENABLED = True
-    WEBRTC_VAD_MODE = 2
-    WEBRTC_VAD_MIN_VOICED_RATIO = 0.12
-    WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES = 4
-    # End calls when no speech chunk has been sent to STT for too long.
     CALL_INACTIVITY_SECONDS = 180
     WATCHDOG_POLL_SECONDS = 5.0
-    # AGC: boost gain in windows where we expect the user to speak
-    AGC_WINDOW_SECONDS = 15.0     # how long the AGC stays active after bot/user activity
-    AGC_TARGET_RMS = 0.10         # target RMS level for normalization (when bot active)
-    AGC_QUIET_TARGET_RMS = 0.06   # target RMS when bot is idle (boosts quiet speech)
-    AGC_MAX_GAIN = 12.0           # don't amplify more than this
-    AGC_SMOOTHING = 0.15          # EMA alpha for gain updates (higher = faster)
-    # Barge-in: buffer possible interruptions during TTS above this RMS and
-    # only stop playback after the transcript looks meaningful.
     BARGEIN_RMS_THRESHOLD = 0.05
-    BARGEIN_MIN_WORDS = 4
-    BARGEIN_MIN_CHARS = 12
     # Pre-answer warmup: load STT and prepare the first greeting before Matrix
     # sees the call as answered so the caller does not hear a long cold start.
     PREANSWER_WARMUP_ENABLED = True
@@ -436,9 +372,6 @@ class CallSession:
         self._ice_reconnect_task: Optional[asyncio.Task] = None
         self._last_activity_at = time.monotonic()
         self._last_user_speech_at = self._last_activity_at
-        # AGC state
-        self._agc_until: float = 0.0   # monotonic timestamp; AGC active while now < this
-        self._agc_gain: float = 1.0    # current smoothed gain factor
         self._active_response_task: Optional[asyncio.Task] = None
         self._greeting_sent = False
         self._answer_sent = asyncio.Event()
@@ -448,12 +381,11 @@ class CallSession:
         self._greeting_task: Optional[asyncio.Task] = None
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
-        # Adaptive silence detection: rolling EMA of background noise floor
-        self._noise_floor: float = 0.01
-        # Duration of the most recently accepted speech chunk (seconds)
-        self._last_speech_duration: float = 0.0
         self._load_voip_audio_config()
-        self._webrtc_vad = self._init_webrtc_vad()
+        ctx = f"call {call_id[:8]}"
+        voip_cfg = self._voip_cfg
+        self._agc = AGCController(voip_cfg, context=ctx)
+        self._speech_detector = SpeechDetector(voip_cfg, context=ctx)
 
     def _mark_activity(self) -> None:
         """Record user or bot activity to keep the call alive."""
@@ -476,29 +408,7 @@ class CallSession:
         task = self._active_response_task
         return bool(task and not task.done())
 
-    def _activate_agc(self) -> None:
-        """Open an AGC window for the next AGC_WINDOW_SECONDS."""
-        self._agc_until = time.monotonic() + self.AGC_WINDOW_SECONDS
 
-    @property
-    def _agc_active(self) -> bool:
-        return time.monotonic() < self._agc_until
-
-    def _agc_rms(self, raw_rms: float) -> float:
-        """Return the AGC-adjusted RMS for VAD decisions.
-
-        Always active — uses AGC_TARGET_RMS when the bot is speaking/generating
-        (avoids amplifying over its own TTS) and AGC_QUIET_TARGET_RMS otherwise
-        to boost quiet speech in silent environments.
-        """
-        if raw_rms > 1e-6:
-            target = self.AGC_TARGET_RMS if self._bot_is_active() else self.AGC_QUIET_TARGET_RMS
-            ideal_gain = target / raw_rms
-            ideal_gain = min(ideal_gain, self.AGC_MAX_GAIN)
-            alpha = self.AGC_SMOOTHING
-            self._agc_gain = alpha * ideal_gain + (1 - alpha) * self._agc_gain
-
-        return raw_rms * self._agc_gain
 
     def _voice_override(self) -> Optional[str]:
         """Return the user's persistent TTS voice override (if any)."""
@@ -509,316 +419,49 @@ class CallSession:
             return None
 
     def _load_voip_audio_config(self) -> None:
-        """Apply per-instance VAD/STT gating thresholds from shared VoIP config."""
+        """Apply CallSession-specific config from shared VoIP config."""
         app_cfg = self._app.config if isinstance(self._app.config, dict) else {}
         voip_cfg = app_cfg.get("voip", {}) if isinstance(app_cfg, dict) else {}
         if not isinstance(voip_cfg, dict):
             logger.warning("call %s: ignoring non-dict voip config", self.call_id[:8])
             voip_cfg = {}
+        self._voip_cfg = voip_cfg
 
-        self.SILENCE_THRESHOLD = self._get_float_config(
-            voip_cfg,
-            "silence_threshold",
-            self.SILENCE_THRESHOLD,
-            minimum=0.0,
+        ctx = f"call {self.call_id[:8]}"
+        self.CALL_INACTIVITY_SECONDS = get_int_config(
+            voip_cfg, "call_inactivity_seconds", self.CALL_INACTIVITY_SECONDS,
+            context=ctx, minimum=1,
         )
-        self.SILENCE_EMPHASIS_FACTOR = self._get_float_config(
-            voip_cfg,
-            "silence_emphasis_factor",
-            self.SILENCE_EMPHASIS_FACTOR,
-            minimum=1.0,
-            maximum=10.0,
+        self.BARGEIN_RMS_THRESHOLD = get_float_config(
+            voip_cfg, "bargein_rms_threshold", self.BARGEIN_RMS_THRESHOLD,
+            context=ctx, minimum=0.0,
         )
-        self.SILENCE_SECONDS = self._get_float_config(
-            voip_cfg,
-            "silence_seconds",
-            self.SILENCE_SECONDS,
-            minimum=0.1,
+        self.PREANSWER_WARMUP_ENABLED = get_bool_config(
+            voip_cfg, "preanswer_warmup_enabled", self.PREANSWER_WARMUP_ENABLED,
+            context=ctx,
         )
-        self.MIN_SPEECH_SECONDS = self._get_float_config(
-            voip_cfg,
-            "min_speech_seconds",
-            self.MIN_SPEECH_SECONDS,
-            minimum=0.1,
-        )
-        self.MIN_ACTIVE_SPEECH_RATIO = self._get_float_config(
-            voip_cfg,
-            "min_active_speech_ratio",
-            self.MIN_ACTIVE_SPEECH_RATIO,
-            minimum=0.0,
-            maximum=1.0,
-        )
-        self.MIN_CONSECUTIVE_SPEECH_FRAMES = self._get_int_config(
-            voip_cfg,
-            "min_consecutive_speech_frames",
-            self.MIN_CONSECUTIVE_SPEECH_FRAMES,
-            minimum=1,
-        )
-        self.MIN_SPEECH_BAND_RATIO = self._get_float_config(
-            voip_cfg,
-            "min_speech_band_ratio",
-            self.MIN_SPEECH_BAND_RATIO,
-            minimum=0.0,
-            maximum=1.0,
-        )
-        self.MAX_SPECTRAL_FLATNESS = self._get_float_config(
-            voip_cfg,
-            "max_spectral_flatness",
-            self.MAX_SPECTRAL_FLATNESS,
-            minimum=0.0,
-            maximum=1.0,
-        )
-        self.MIN_SPEECH_LIKE_RATIO = self._get_float_config(
-            voip_cfg,
-            "min_speech_like_ratio",
-            self.MIN_SPEECH_LIKE_RATIO,
-            minimum=0.0,
-            maximum=1.0,
-        )
-        self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES = self._get_int_config(
-            voip_cfg,
-            "min_consecutive_speechlike_frames",
-            self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES,
-            minimum=1,
-        )
-        self.MIN_RESUME_SPEECH_FRAMES = self._get_int_config(
-            voip_cfg,
-            "min_resume_speech_frames",
-            self.MIN_RESUME_SPEECH_FRAMES,
-            minimum=1,
-        )
-        self.PRE_SPEECH_SECONDS = self._get_float_config(
-            voip_cfg,
-            "pre_speech_seconds",
-            self.PRE_SPEECH_SECONDS,
-            minimum=0.0,
-        )
-        self.WEBRTC_VAD_ENABLED = self._get_bool_config(
-            voip_cfg,
-            "webrtcvad_enabled",
-            self.WEBRTC_VAD_ENABLED,
-        )
-        self.WEBRTC_VAD_MODE = self._get_int_config(
-            voip_cfg,
-            "webrtcvad_mode",
-            self.WEBRTC_VAD_MODE,
-            minimum=0,
-            maximum=3,
-        )
-        self.WEBRTC_VAD_MIN_VOICED_RATIO = self._get_float_config(
-            voip_cfg,
-            "webrtcvad_min_voiced_ratio",
-            self.WEBRTC_VAD_MIN_VOICED_RATIO,
-            minimum=0.0,
-            maximum=1.0,
-        )
-        self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES = self._get_int_config(
-            voip_cfg,
-            "webrtcvad_min_consecutive_frames",
-            self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES,
-            minimum=1,
-        )
-        self.CALL_INACTIVITY_SECONDS = self._get_int_config(
-            voip_cfg,
-            "call_inactivity_seconds",
-            self.CALL_INACTIVITY_SECONDS,
-            minimum=1,
-        )
-        self.AGC_WINDOW_SECONDS = self._get_float_config(
-            voip_cfg,
-            "agc_window_seconds",
-            self.AGC_WINDOW_SECONDS,
-            minimum=0.1,
-        )
-        self.AGC_TARGET_RMS = self._get_float_config(
-            voip_cfg,
-            "agc_target_rms",
-            self.AGC_TARGET_RMS,
-            minimum=0.001,
-        )
-        self.AGC_MAX_GAIN = self._get_float_config(
-            voip_cfg,
-            "agc_max_gain",
-            self.AGC_MAX_GAIN,
-            minimum=1.0,
-        )
-        self.AGC_SMOOTHING = self._get_float_config(
-            voip_cfg,
-            "agc_smoothing",
-            self.AGC_SMOOTHING,
-            minimum=0.001,
-            maximum=1.0,
-        )
-        self.AGC_QUIET_TARGET_RMS = self._get_float_config(
-            voip_cfg,
-            "agc_quiet_target_rms",
-            self.AGC_QUIET_TARGET_RMS,
-            minimum=0.01,
-            maximum=1.0,
-        )
-        self.BARGEIN_RMS_THRESHOLD = self._get_float_config(
-            voip_cfg,
-            "bargein_rms_threshold",
-            self.BARGEIN_RMS_THRESHOLD,
-            minimum=0.0,
-        )
-        self.PREANSWER_WARMUP_ENABLED = self._get_bool_config(
-            voip_cfg,
-            "preanswer_warmup_enabled",
-            self.PREANSWER_WARMUP_ENABLED,
-        )
-        self.PREANSWER_WARMUP_TIMEOUT_SECONDS = self._get_float_config(
-            voip_cfg,
-            "preanswer_warmup_timeout_seconds",
+        self.PREANSWER_WARMUP_TIMEOUT_SECONDS = get_float_config(
+            voip_cfg, "preanswer_warmup_timeout_seconds",
             self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
-            minimum=0.1,
+            context=ctx, minimum=0.1,
         )
-        self.PREANSWER_STT_SILENCE_SECONDS = self._get_float_config(
-            voip_cfg,
-            "preanswer_stt_silence_seconds",
+        self.PREANSWER_STT_SILENCE_SECONDS = get_float_config(
+            voip_cfg, "preanswer_stt_silence_seconds",
             self.PREANSWER_STT_SILENCE_SECONDS,
-            minimum=0.05,
+            context=ctx, minimum=0.05,
         )
-        self.RESPONSE_DELAY_SECONDS = self._get_float_config(
-            voip_cfg,
-            "response_delay_seconds",
-            self.RESPONSE_DELAY_SECONDS,
-            minimum=0.0,
+        self.RESPONSE_DELAY_SECONDS = get_float_config(
+            voip_cfg, "response_delay_seconds", self.RESPONSE_DELAY_SECONDS,
+            context=ctx, minimum=0.0,
         )
-        self.CONNECT_TIMEOUT_SECONDS = self._get_float_config(
-            voip_cfg,
-            "connect_timeout_seconds",
-            self.CONNECT_TIMEOUT_SECONDS,
-            minimum=1.0,
+        self.CONNECT_TIMEOUT_SECONDS = get_float_config(
+            voip_cfg, "connect_timeout_seconds", self.CONNECT_TIMEOUT_SECONDS,
+            context=ctx, minimum=1.0,
         )
-        self.HANGUP_ON_MEDIA_END = self._get_bool_config(
-            voip_cfg,
-            "hangup_on_media_end",
-            self.HANGUP_ON_MEDIA_END,
+        self.HANGUP_ON_MEDIA_END = get_bool_config(
+            voip_cfg, "hangup_on_media_end", self.HANGUP_ON_MEDIA_END,
+            context=ctx,
         )
-
-    def _init_webrtc_vad(self):
-        """Initialize the optional WebRTC VAD instance from config."""
-        if not self.WEBRTC_VAD_ENABLED:
-            return None
-        vad = _build_webrtc_vad(self.WEBRTC_VAD_MODE)
-        if vad is None and _WEBRTCVAD_IMPORT_ERROR is not None:
-            logger.info(
-                "call %s: webrtcvad unavailable, continuing without it: %s",
-                self.call_id[:8],
-                _WEBRTCVAD_IMPORT_ERROR,
-            )
-        return vad
-
-    def _get_float_config(
-        self,
-        cfg: Dict[str, Any],
-        key: str,
-        default: float,
-        minimum: Optional[float] = None,
-        maximum: Optional[float] = None,
-    ) -> float:
-        value = cfg.get(key, default)
-        try:
-            value = float(value)
-        except (TypeError, ValueError):
-            logger.warning(
-                "call %s: invalid voip.%s=%r, using default %s",
-                self.call_id[:8],
-                key,
-                value,
-                default,
-            )
-            return default
-
-        if minimum is not None and value < minimum:
-            logger.warning(
-                "call %s: voip.%s=%s below minimum %s, using default %s",
-                self.call_id[:8],
-                key,
-                value,
-                minimum,
-                default,
-            )
-            return default
-        if maximum is not None and value > maximum:
-            logger.warning(
-                "call %s: voip.%s=%s above maximum %s, using default %s",
-                self.call_id[:8],
-                key,
-                value,
-                maximum,
-                default,
-            )
-            return default
-        return value
-
-    def _get_bool_config(
-        self,
-        cfg: Dict[str, Any],
-        key: str,
-        default: bool,
-    ) -> bool:
-        value = cfg.get(key, default)
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"1", "true", "yes", "on"}:
-                return True
-            if normalized in {"0", "false", "no", "off"}:
-                return False
-        logger.warning(
-            "call %s: invalid boolean voip.%s=%r — using default %r",
-            self.call_id[:8],
-            key,
-            value,
-            default,
-        )
-        return default
-
-    def _get_int_config(
-        self,
-        cfg: Dict[str, Any],
-        key: str,
-        default: int,
-        minimum: Optional[int] = None,
-        maximum: Optional[int] = None,
-    ) -> int:
-        value = cfg.get(key, default)
-        try:
-            value = int(value)
-        except (TypeError, ValueError):
-            logger.warning(
-                "call %s: invalid voip.%s=%r, using default %s",
-                self.call_id[:8],
-                key,
-                value,
-                default,
-            )
-            return default
-
-        if minimum is not None and value < minimum:
-            logger.warning(
-                "call %s: voip.%s=%s below minimum %s, using default %s",
-                self.call_id[:8],
-                key,
-                value,
-                minimum,
-                default,
-            )
-            return default
-        if maximum is not None and value > maximum:
-            logger.warning(
-                "call %s: voip.%s=%s above maximum %s, using default %s",
-                self.call_id[:8],
-                key,
-                value,
-                maximum,
-                default,
-            )
-            return default
-        return value
 
     # ------------------------------------------------------------------
     # Public API
@@ -1143,7 +786,7 @@ class CallSession:
             await self._send_cb(response)
             self._greeting_sent = True
             self._mark_activity()
-            self._activate_agc()
+            self._agc.activate()
             logger.info("call %s: prepared greeting sent", self.call_id[:8])
             return
 
@@ -1203,7 +846,7 @@ class CallSession:
             await self._send_cb(response)
             self._greeting_sent = True
             self._mark_activity()
-            self._activate_agc()
+            self._agc.activate()
             logger.info("call %s: greeting sent", self.call_id[:8])
         except asyncio.CancelledError:
             raise
@@ -1265,209 +908,6 @@ class CallSession:
     # Internal: audio pipeline
     # ------------------------------------------------------------------
 
-    def _analyze_speech_chunk(
-        self,
-        pcm: "np.ndarray",
-        sample_rate: int,
-        fps: int,
-    ) -> Dict[str, float]:
-        """Summarize frame-level activity for a completed speech chunk."""
-        frame_size = max(sample_rate // fps, 1)
-        usable = len(pcm) // frame_size * frame_size
-        if usable < frame_size:
-            return {
-                "frame_count": 0.0,
-                "active_frames": 0.0,
-                "active_ratio": 0.0,
-                "longest_run": 0.0,
-                "voiced_frames": 0.0,
-                "voiced_ratio": 0.0,
-                "voiced_run": 0.0,
-                "speech_like_frames": 0.0,
-                "speech_like_ratio": 0.0,
-                "speech_like_run": 0.0,
-                "median_band_ratio": 0.0,
-                "median_flatness": 1.0,
-                "p90_rms": 0.0,
-            }
-
-        framed = pcm[:usable].reshape(-1, frame_size)
-        frame_rms = np.sqrt(np.mean(framed ** 2, axis=1))
-        # Apply current AGC gain so chunk analysis matches frame-level VAD
-        if self._agc_active:
-            frame_rms = frame_rms * self._agc_gain
-        active_mask = frame_rms > self.SILENCE_THRESHOLD
-
-        longest_run = 0
-        current_run = 0
-        for is_active in active_mask:
-            current_run = current_run + 1 if is_active else 0
-            longest_run = max(longest_run, current_run)
-
-        voiced_mask = np.zeros(len(frame_rms), dtype=bool)
-        if self._webrtc_vad is not None:
-            for idx, frame in enumerate(framed):
-                frame_int16 = (np.clip(frame, -1.0, 1.0) * 32767.0).astype(np.int16)
-                try:
-                    voiced_mask[idx] = bool(self._webrtc_vad.is_speech(frame_int16.tobytes(), sample_rate))
-                except Exception as e:
-                    logger.debug("call %s: webrtcvad frame analysis failed: %s", self.call_id[:8], e)
-                    voiced_mask[idx] = False
-
-        voiced_run = 0
-        current_voiced_run = 0
-        for is_voiced in voiced_mask:
-            current_voiced_run = current_voiced_run + 1 if is_voiced else 0
-            voiced_run = max(voiced_run, current_voiced_run)
-
-        window = np.hanning(frame_size).astype(np.float32)
-        spectra = np.fft.rfft(framed * window[None, :], axis=1)
-        power = np.abs(spectra) ** 2
-        freqs = np.fft.rfftfreq(frame_size, d=1.0 / sample_rate)
-        speech_band = (freqs >= 180.0) & (freqs <= 4000.0)
-        total_power = np.maximum(np.sum(power, axis=1), 1e-9)
-        band_ratio = np.sum(power[:, speech_band], axis=1) / total_power
-        flatness = np.exp(np.mean(np.log(power + 1e-9), axis=1)) / np.maximum(np.mean(power + 1e-9, axis=1), 1e-9)
-        speech_like_mask = active_mask & (band_ratio >= self.MIN_SPEECH_BAND_RATIO) & (flatness <= self.MAX_SPECTRAL_FLATNESS)
-
-        speech_like_run = 0
-        current_speech_like_run = 0
-        for is_speech_like in speech_like_mask:
-            current_speech_like_run = current_speech_like_run + 1 if is_speech_like else 0
-            speech_like_run = max(speech_like_run, current_speech_like_run)
-
-        return {
-            "frame_count": float(len(frame_rms)),
-            "active_frames": float(np.count_nonzero(active_mask)),
-            "active_ratio": float(np.mean(active_mask)),
-            "longest_run": float(longest_run),
-            "voiced_frames": float(np.count_nonzero(voiced_mask)),
-            "voiced_ratio": float(np.mean(voiced_mask)),
-            "voiced_run": float(voiced_run),
-            "speech_like_frames": float(np.count_nonzero(speech_like_mask)),
-            "speech_like_ratio": float(np.mean(speech_like_mask)),
-            "speech_like_run": float(speech_like_run),
-            "median_band_ratio": float(np.median(band_ratio)),
-            "median_flatness": float(np.median(flatness)),
-            "p90_rms": float(np.percentile(frame_rms, 90)),
-        }
-
-    def _is_speech_like_frame(
-        self,
-        pcm: "np.ndarray",
-        sample_rate: int,
-        adjusted_rms: float,
-    ) -> bool:
-        """Return True when a live frame looks like speech, not just loud noise."""
-        # Raise silence threshold dynamically when background noise is present.
-        # noise_floor is an EMA of RMS during non-speech periods; a frame whose
-        # RMS is less than 2× the measured floor is treated as silence so that
-        # steady background noise (e.g. cycling) does not prevent silence_count
-        # from accumulating.
-        effective_threshold = max(self.SILENCE_THRESHOLD, self._noise_floor * self.SILENCE_EMPHASIS_FACTOR)
-        if adjusted_rms <= effective_threshold:
-            return False
-
-        if len(pcm) < 2:
-            return False
-
-        window = np.hanning(len(pcm)).astype(np.float32)
-        spectrum = np.fft.rfft(pcm * window)
-        power = np.abs(spectrum) ** 2
-        total_power = float(np.sum(power))
-        if total_power <= 1e-9:
-            return False
-
-        freqs = np.fft.rfftfreq(len(pcm), d=1.0 / sample_rate)
-        speech_band = (freqs >= 180.0) & (freqs <= 4000.0)
-        band_ratio = float(np.sum(power[speech_band]) / total_power)
-        flatness = float(
-            np.exp(np.mean(np.log(power + 1e-9)))
-            / max(float(np.mean(power + 1e-9)), 1e-9)
-        )
-        return (
-            band_ratio >= self.MIN_SPEECH_BAND_RATIO
-            and flatness <= self.MAX_SPECTRAL_FLATNESS
-        )
-
-    def _should_transcribe_chunk(
-        self,
-        pcm: "np.ndarray",
-        sample_rate: int,
-        fps: int,
-    ) -> bool:
-        """Return True only when a chunk contains sustained speech-like activity."""
-        stats = self._analyze_speech_chunk(pcm, sample_rate, fps)
-
-        # In very quiet environments (low noise floor), relax the active_ratio
-        # and speech_like thresholds. When background noise is near zero, any
-        # signal above the silence threshold is likely speech, not noise.
-        if self._noise_floor < 0.001:
-            min_active_ratio = self.MIN_ACTIVE_SPEECH_RATIO * 0.5
-            min_speech_like = self.MIN_SPEECH_LIKE_RATIO * 0.5
-        else:
-            min_active_ratio = self.MIN_ACTIVE_SPEECH_RATIO
-            min_speech_like = self.MIN_SPEECH_LIKE_RATIO
-
-        basic_match = (
-            stats["active_ratio"] >= min_active_ratio
-            and stats["longest_run"] >= self.MIN_CONSECUTIVE_SPEECH_FRAMES
-            and stats["speech_like_ratio"] >= min_speech_like
-            and stats["speech_like_run"] >= self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
-        )
-        if not basic_match:
-            return False
-        if self._webrtc_vad is None:
-            return True
-        return (
-            stats["voiced_ratio"] >= self.WEBRTC_VAD_MIN_VOICED_RATIO
-            and stats["voiced_run"] >= self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
-        )
-
-    def _resume_speech_after_pause(
-        self,
-        speech_like_frame: bool,
-        silence_count: int,
-        resume_speech_count: int,
-    ) -> tuple[bool, int]:
-        """Require a short sustained return before breaking an in-progress pause."""
-        if not speech_like_frame or silence_count <= 0:
-            return False, 0
-        resume_speech_count += 1
-        return resume_speech_count >= self.MIN_RESUME_SPEECH_FRAMES, resume_speech_count
-
-    def _start_speech_buffer(
-        self,
-        pre_speech_buffer: "deque[np.ndarray]",
-        pcm: "np.ndarray",
-    ) -> List["np.ndarray"]:
-        """Seed a new speech chunk with a small pre-roll before the trigger frame."""
-        chunk = list(pre_speech_buffer)
-        chunk.append(pcm)
-        return chunk
-
-    def _is_meaningful_interrupt(self, text: str) -> bool:
-        """Return True when a transcript is strong enough to justify barge-in."""
-        normalized = " ".join((text or "").strip().split())
-        if not normalized:
-            return False
-        if _INTERRUPT_KEYWORD_RE.search(normalized):
-            return True
-
-        words = re.findall(r"\b\w+\b", normalized, flags=re.UNICODE)
-        if len(words) >= self.BARGEIN_MIN_WORDS and len(normalized) >= self.BARGEIN_MIN_CHARS:
-            return True
-        if len(words) >= 3 and bool(re.search(r"[.!?…]\s*$", normalized)):
-            return True
-        return False
-
-    def _looks_like_standalone_stt_hallucination(self, text: str) -> bool:
-        """Filter common Whisper fallback phrases from non-speech chunks."""
-        normalized = " ".join((text or "").strip().split())
-        if not normalized:
-            return False
-        return bool(_STANDALONE_STT_HALLUCINATION_RE.fullmatch(normalized))
-
     def _track_response_task(self, task: asyncio.Task) -> None:
         """Remember the currently active speech-response task."""
         self._active_response_task = task
@@ -1487,7 +927,7 @@ class CallSession:
         background noise is present so transient noise dips don't cut off early.
         """
         base = self.RESPONSE_DELAY_SECONDS
-        dur = self._last_speech_duration
+        dur = self._speech_detector.last_speech_duration
         if dur > 20.0:
             base = max(base, 5.0)
         elif dur > 12.0:
@@ -1495,7 +935,7 @@ class CallSession:
         elif dur > 6.0:
             base = max(base, 3.0)
         # Small bonus when noise floor is elevated (background noise context)
-        noise_ratio = self._noise_floor / max(self.SILENCE_THRESHOLD, 1e-4)
+        noise_ratio = self._speech_detector.noise_floor / max(self._speech_detector.SILENCE_THRESHOLD, 1e-4)
         if noise_ratio > 1.5:
             base += min((noise_ratio - 1.5) * 0.5, 1.5)
         return base
@@ -1643,7 +1083,7 @@ class CallSession:
             typing_task.cancel()
             if self._tts_track:
                 self._tts_track.stop_hold()
-            self._activate_agc()
+            self._agc.activate()
             try:
                 await self._client.room_typing(self.room_id, typing_state=False)
             except Exception:
@@ -1698,8 +1138,8 @@ class CallSession:
                 self.call_id[:8],
                 response_delay,
                 len(text.splitlines()),
-                self._last_speech_duration,
-                self._noise_floor,
+                self._speech_detector.last_speech_duration,
+                self._speech_detector.noise_floor,
             )
             await self._respond_to_transcript(text, announce_transcript=False)
         finally:
@@ -1714,12 +1154,87 @@ class CallSession:
         except Exception:
             pass
 
+    def _finalize_speech_chunk(
+        self,
+        chunk_parts: List[np.ndarray],
+        sample_rate: int,
+        fps: int,
+        min_speech_frames: int,
+        is_barge_in: bool = False,
+    ) -> Optional[asyncio.Task]:
+        """Analyze completed speech buffer and start transcription if appropriate.
+
+        Returns the transcription task if the chunk looks like speech, ``None`` otherwise.
+        """
+        chunk = np.concatenate(chunk_parts)
+        duration = len(chunk) / sample_rate
+        label = "possible barge-in" if is_barge_in else "speech"
+        logger.info("call %s: %s ended — %.1fs, %d samples",
+                    self.call_id[:8], label, duration, len(chunk))
+
+        frame_size = sample_rate // fps
+        if len(chunk) < min_speech_frames * frame_size:
+            if not is_barge_in:
+                logger.info("call %s: chunk too short (%.1fs), skipping",
+                            self.call_id[:8], duration)
+            return None
+
+        chunk_stats = self._speech_detector.analyze_chunk(
+            chunk, sample_rate, fps,
+            agc_gain=self._agc.gain, agc_active=self._agc.active,
+        )
+        if not self._speech_detector.should_transcribe(
+            chunk, sample_rate, fps,
+            agc_gain=self._agc.gain, agc_active=self._agc.active,
+        ):
+            noise_label = ("barge-in candidate looked like noise" if is_barge_in
+                           else "skipping chunk as background noise")
+            logger.info(
+                "call %s: %s "
+                "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
+                self.call_id[:8], noise_label,
+                chunk_stats["active_ratio"],
+                int(chunk_stats["longest_run"]),
+                chunk_stats["speech_like_ratio"],
+                chunk_stats["voiced_ratio"],
+                chunk_stats["p90_rms"],
+            )
+            return None
+
+        transcribe_label = ("transcribing barge-in candidate" if is_barge_in
+                            else "sending chunk for transcription")
+        logger.info(
+            "call %s: %s "
+            "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f "
+            "p90_rms=%.4f noise_floor=%.4f)",
+            self.call_id[:8], transcribe_label,
+            chunk_stats["active_ratio"],
+            int(chunk_stats["longest_run"]),
+            chunk_stats["speech_like_ratio"],
+            chunk_stats["voiced_ratio"],
+            chunk_stats["p90_rms"],
+            self._speech_detector.noise_floor,
+        )
+
+        if not is_barge_in:
+            self._speech_detector.last_speech_duration = duration
+
+        self._mark_activity()
+        task = asyncio.create_task(
+            self._process_speech(chunk, sample_rate, interrupt_playback=is_barge_in)
+        )
+
+        if not is_barge_in:
+            self._track_response_task(task)
+
+        return task
+
     async def _audio_pipeline(self, track) -> None:
         """Continuously read audio frames, detect speech, transcribe, respond."""
         SAMPLE_RATE = 48000
         fps = 50  # aiortc default: 20 ms frames
-        min_speech_frames = int(self.MIN_SPEECH_SECONDS * fps)
-        pre_speech_frames = int(max(0.0, self.PRE_SPEECH_SECONDS) * fps)
+        min_speech_frames = int(self._speech_detector.MIN_SPEECH_SECONDS * fps)
+        pre_speech_frames = int(max(0.0, self._speech_detector.PRE_SPEECH_SECONDS) * fps)
 
         speech_buffer: List[np.ndarray] = []
         pre_speech_buffer: "deque[np.ndarray]" = deque(maxlen=max(pre_speech_frames, 1))
@@ -1751,7 +1266,6 @@ class CallSession:
                 n_int16 = frame.samples * n_channels
                 raw = np.frombuffer(raw_bytes, dtype=np.int16)[:n_int16]
                 if n_channels > 1:
-                    # Stereo → mono: average as float (no int16 truncation)
                     pcm = raw.reshape(-1, n_channels).astype(np.float32).mean(axis=1) / 32768.0
                 else:
                     pcm = raw.astype(np.float32) / 32768.0
@@ -1770,60 +1284,45 @@ class CallSession:
                     import hashlib
                     h = hashlib.md5(pcm.tobytes()).hexdigest()[:8]
                     logger.debug("call %s: frame #%d rms=%.4f nf=%.4f buf=%d silence=%d hash=%s",
-                                 self.call_id[:8], frames_received, rms, self._noise_floor,
+                                 self.call_id[:8], frames_received, rms,
+                                 self._speech_detector.noise_floor,
                                  len(speech_buffer), silence_count, h)
 
-                # Apply AGC to RMS for VAD decision (raw PCM stays untouched)
-                adjusted_rms = self._agc_rms(rms)
+                # Apply AGC to RMS for VAD decision
+                adjusted_rms = self._agc.adjust_rms(rms, self._bot_is_active())
 
                 # Apply AGC gain to PCM so STT receives boosted audio matching VAD
-                pcm = pcm * min(self._agc_gain, 4.0)
+                pcm = pcm * min(self._agc.gain, 4.0)
 
                 if not speech_buffer and pre_speech_frames > 0:
                     pre_speech_buffer.append(pcm)
 
-                # Update background noise floor.  While not accumulating speech, use
-                # a fast EMA (~1 s time constant) to adapt quickly to room changes.
-                # During speech, use a very slow EMA (~10 s) to track slow drift
-                # (e.g. fan cycling) without contamination from the speech signal.
-                if not speech_buffer:
-                    self._noise_floor = 0.02 * rms + 0.98 * self._noise_floor
-                elif rms < self._noise_floor * self.SILENCE_EMPHASIS_FACTOR:
-                    self._noise_floor = 0.002 * rms + 0.998 * self._noise_floor
+                # Update background noise floor
+                self._speech_detector.update_noise_floor(rms, during_speech=bool(speech_buffer))
 
-                # silence_threshold in frames; kept at the configured value (minimum
-                # 1.2 s).  Because _is_speech_like_frame now uses an adaptive
-                # threshold that treats background noise as silence, silence_count
-                # accumulates naturally without needing to reduce this value.
-                silence_threshold = int(max(1.2, self.SILENCE_SECONDS) * fps)
+                silence_threshold = int(max(1.2, self._speech_detector.SILENCE_SECONDS) * fps)
 
-                speech_like_frame = self._is_speech_like_frame(
-                    pcm,
-                    SAMPLE_RATE,
-                    adjusted_rms,
+                speech_like_frame = self._speech_detector.is_speech_like_frame(
+                    pcm, SAMPLE_RATE, adjusted_rms,
                 )
 
-                # While TTS is playing, keep buffering possible interruptions, but
-                # only stop playback after the resulting transcript is meaningful.
+                # While TTS is playing, buffer possible interruptions
                 if self._tts_track and self._tts_track.is_playing:
                     if (
-                        rms >= max(self.BARGEIN_RMS_THRESHOLD, self.SILENCE_THRESHOLD)
+                        rms >= max(self.BARGEIN_RMS_THRESHOLD, self._speech_detector.SILENCE_THRESHOLD)
                         and speech_like_frame
                     ):
                         if not speech_buffer and silence_count == 0:
                             logger.info(
                                 "call %s: possible barge-in started (rms=%.4f)",
-                                self.call_id[:8],
-                                rms,
+                                self.call_id[:8], rms,
                             )
                             self._mark_user_speech_started()
-                            speech_buffer = self._start_speech_buffer(pre_speech_buffer, pcm)
+                            speech_buffer = SpeechDetector.start_buffer(pre_speech_buffer, pcm)
                         else:
                             speech_buffer.append(pcm)
-                        resume_confirmed, resume_speech_count = self._resume_speech_after_pause(
-                            speech_like_frame,
-                            silence_count,
-                            resume_speech_count,
+                        resume_confirmed, resume_speech_count = self._speech_detector.resume_after_pause(
+                            speech_like_frame, silence_count, resume_speech_count,
                         )
                         if resume_confirmed:
                             silence_count = 0
@@ -1836,64 +1335,31 @@ class CallSession:
                         speech_buffer.append(pcm)
 
                         if silence_count >= silence_threshold:
-                            chunk = np.concatenate(speech_buffer)
-                            duration = len(chunk) / SAMPLE_RATE
-                            logger.info(
-                                "call %s: possible barge-in ended — %.1fs, %d samples",
-                                self.call_id[:8], duration, len(chunk),
+                            task = self._finalize_speech_chunk(
+                                speech_buffer, SAMPLE_RATE, fps, min_speech_frames,
+                                is_barge_in=True,
                             )
+                            if task is not None:
+                                ...  # fire & forget
                             speech_buffer = []
                             pre_speech_buffer.clear()
                             silence_count = 0
                             resume_speech_count = 0
                             self._mark_user_speech_ended()
-
-                            if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
-                                chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
-                                if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
-                                    logger.info(
-                                        "call %s: transcribing barge-in candidate "
-                                        "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
-                                        self.call_id[:8],
-                                        chunk_stats["active_ratio"],
-                                        int(chunk_stats["longest_run"]),
-                                        chunk_stats["speech_like_ratio"],
-                                        chunk_stats["voiced_ratio"],
-                                        chunk_stats["p90_rms"],
-                                    )
-                                    self._mark_activity()
-                                    task = asyncio.create_task(
-                                        self._process_speech(
-                                            chunk,
-                                            SAMPLE_RATE,
-                                            interrupt_playback=True,
-                                        )
-                                    )
-                                else:
-                                    logger.info(
-                                        "call %s: barge-in candidate looked like noise "
-                                        "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
-                                        self.call_id[:8],
-                                        chunk_stats["active_ratio"],
-                                        int(chunk_stats["longest_run"]),
-                                        chunk_stats["speech_like_ratio"],
-                                        chunk_stats["voiced_ratio"],
-                                        chunk_stats["p90_rms"],
-                                    )
                     continue
+
+                # Normal speech detection (no TTS playing)
                 if speech_like_frame:
                     if not speech_buffer and silence_count == 0:
-                        self._activate_agc()
+                        self._agc.activate()
                         logger.info("call %s: speech started (rms=%.4f)",
                                     self.call_id[:8], rms)
                         self._mark_user_speech_started()
-                        speech_buffer = self._start_speech_buffer(pre_speech_buffer, pcm)
+                        speech_buffer = SpeechDetector.start_buffer(pre_speech_buffer, pcm)
                     else:
                         speech_buffer.append(pcm)
-                    resume_confirmed, resume_speech_count = self._resume_speech_after_pause(
-                        speech_like_frame,
-                        silence_count,
-                        resume_speech_count,
+                    resume_confirmed, resume_speech_count = self._speech_detector.resume_after_pause(
+                        speech_like_frame, silence_count, resume_speech_count,
                     )
                     if resume_confirmed:
                         silence_count = 0
@@ -1906,50 +1372,17 @@ class CallSession:
                     speech_buffer.append(pcm)  # keep trailing silence for context
 
                     if silence_count >= silence_threshold:
-                        chunk = np.concatenate(speech_buffer)
-                        duration = len(chunk) / SAMPLE_RATE
-                        logger.info("call %s: speech ended — %.1fs, %d samples",
-                                    self.call_id[:8], duration, len(chunk))
+                        task = self._finalize_speech_chunk(
+                            speech_buffer, SAMPLE_RATE, fps, min_speech_frames,
+                            is_barge_in=False,
+                        )
+                        if task is not None:
+                            ...  # fire & forget
                         speech_buffer = []
                         pre_speech_buffer.clear()
                         silence_count = 0
                         resume_speech_count = 0
                         self._mark_user_speech_ended()
-
-                        if len(chunk) >= min_speech_frames * (SAMPLE_RATE // fps):
-                            chunk_stats = self._analyze_speech_chunk(chunk, SAMPLE_RATE, fps)
-                            if self._should_transcribe_chunk(chunk, SAMPLE_RATE, fps):
-                                self._last_speech_duration = duration
-                                logger.info(
-                                    "call %s: sending chunk for transcription "
-                                    "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f noise_floor=%.4f)",
-                                    self.call_id[:8],
-                                    chunk_stats["active_ratio"],
-                                    int(chunk_stats["longest_run"]),
-                                    chunk_stats["speech_like_ratio"],
-                                    chunk_stats["voiced_ratio"],
-                                    chunk_stats["p90_rms"],
-                                    self._noise_floor,
-                                )
-                                self._mark_activity()
-                                task = asyncio.create_task(
-                                    self._process_speech(chunk, SAMPLE_RATE)
-                                )
-                                self._track_response_task(task)
-                            else:
-                                logger.info(
-                                    "call %s: skipping chunk as background noise "
-                                    "(active_ratio=%.2f longest_run=%d speech_like=%.2f voiced=%.2f p90_rms=%.4f)",
-                                    self.call_id[:8],
-                                    chunk_stats["active_ratio"],
-                                    int(chunk_stats["longest_run"]),
-                                    chunk_stats["speech_like_ratio"],
-                                    chunk_stats["voiced_ratio"],
-                                    chunk_stats["p90_rms"],
-                                )
-                        else:
-                            logger.info("call %s: chunk too short (%.1fs), skipping",
-                                        self.call_id[:8], duration)
         except Exception as e:
             logger.error("call %s: audio pipeline error: %s", self.call_id[:8], e)
         finally:
@@ -1964,6 +1397,7 @@ class CallSession:
                     await self._send_hangup_event()
                 finally:
                     await self.hangup()
+
     async def _process_speech(
         self,
         pcm: "np.ndarray",
@@ -1991,7 +1425,7 @@ class CallSession:
                 self._tts_track.stop_hold()
             return
 
-        if self._looks_like_standalone_stt_hallucination(text):
+        if self._speech_detector.looks_like_stt_hallucination(text):
             logger.info(
                 "call %s: ignoring likely standalone STT hallucination: %s",
                 self.call_id[:8],
@@ -2003,7 +1437,7 @@ class CallSession:
 
         try:
             if interrupt_playback:
-                if not self._is_meaningful_interrupt(text):
+                if not self._speech_detector.is_meaningful_interrupt(text):
                     logger.info(
                         "call %s: ignoring non-meaningful barge-in transcript: %s",
                         self.call_id[:8],
@@ -2192,10 +1626,10 @@ class CallSession:
             # Activate AGC when half the inactivity timeout has passed
             # — the user might be speaking softly and we're not hearing them
             half = self.CALL_INACTIVITY_SECONDS / 2
-            if idle_for >= half and not self._agc_active:
+            if idle_for >= half and not self._agc.active:
                 logger.info("call %s: half inactivity reached, activating AGC",
                             self.call_id[:8])
-                self._activate_agc()
+                self._agc.activate()
 
             try:
                 await asyncio.wait_for(

@@ -8,6 +8,8 @@ import sys
 import numpy as np
 import pytest
 
+import pawlia.audio.vad as audio_vad
+from pawlia.audio.vad import SpeechDetector
 import pawlia.interfaces.matrix_call as matrix_call
 from pawlia.interfaces.matrix_call import CallSession
 
@@ -146,10 +148,10 @@ def test_standalone_stt_hallucination_filter_keeps_real_sentences():
         send_cb=AsyncMock(),
     )
 
-    assert session._looks_like_standalone_stt_hallucination("Vielen Dank.") is True
-    assert session._looks_like_standalone_stt_hallucination("Untertitelung des ZDF, 2020") is True
-    assert session._looks_like_standalone_stt_hallucination("Ja, danke, das meinte ich.") is False
-    assert session._looks_like_standalone_stt_hallucination("Ja, du, tschüss.") is False
+    assert session._speech_detector.looks_like_stt_hallucination("Vielen Dank.") is True
+    assert session._speech_detector.looks_like_stt_hallucination("Untertitelung des ZDF, 2020") is True
+    assert session._speech_detector.looks_like_stt_hallucination("Ja, danke, das meinte ich.") is False
+    assert session._speech_detector.looks_like_stt_hallucination("Ja, du, tschüss.") is False
 
 
 def test_mark_activity_updates_last_activity_timestamp():
@@ -255,11 +257,11 @@ def test_should_transcribe_chunk_rejects_background_noise():
         levels[idx] = 0.05
     pcm = _make_tonal_pcm_from_frame_levels(levels)
 
-    assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+    assert session._speech_detector.should_transcribe(pcm, 48000, fps=50) is False
 
 
 def test_should_transcribe_chunk_accepts_sustained_speech():
-    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 10 + [True] * 30 + [False] * 40)):
+    with patch.object(audio_vad, "_build_webrtc_vad", return_value=_FakeVad([False] * 10 + [True] * 30 + [False] * 40)):
         session = CallSession(
             call_id="call-speech",
             room_id="!room:test",
@@ -275,11 +277,11 @@ def test_should_transcribe_chunk_accepts_sustained_speech():
         levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
         pcm = _make_tonal_pcm_from_frame_levels(levels)
 
-        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
+        assert session._speech_detector.should_transcribe(pcm, 48000, fps=50) is True
 
 
 def test_should_transcribe_chunk_rejects_broadband_noise():
-    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 100)):
+    with patch.object(audio_vad, "_build_webrtc_vad", return_value=_FakeVad([False] * 100)):
         session = CallSession(
             call_id="call-noise-broadband",
             room_id="!room:test",
@@ -295,11 +297,11 @@ def test_should_transcribe_chunk_rejects_broadband_noise():
         rng = np.random.default_rng(7)
         pcm = rng.normal(0.0, 0.05, 48000 * 2).astype(np.float32)
 
-        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+        assert session._speech_detector.should_transcribe(pcm, 48000, fps=50) is False
 
 
 def test_should_transcribe_chunk_rejects_when_webrtcvad_disagrees():
-    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([False] * 100)):
+    with patch.object(audio_vad, "_build_webrtc_vad", return_value=_FakeVad([False] * 100)):
         session = CallSession(
             call_id="call-vad-reject",
             room_id="!room:test",
@@ -315,7 +317,7 @@ def test_should_transcribe_chunk_rejects_when_webrtcvad_disagrees():
         levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
         pcm = _make_tonal_pcm_from_frame_levels(levels)
 
-        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+        assert session._speech_detector.should_transcribe(pcm, 48000, fps=50) is False
 
 
 def test_live_frame_filter_rejects_broadband_wind_noise():
@@ -334,7 +336,7 @@ def test_live_frame_filter_rejects_broadband_wind_noise():
     rng = np.random.default_rng(9)
     pcm = rng.normal(0.0, 0.08, 960).astype(np.float32)
 
-    assert session._is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is False
+    assert session._speech_detector.is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is False
 
 
 def test_live_frame_filter_accepts_speech_band_tone():
@@ -352,7 +354,7 @@ def test_live_frame_filter_accepts_speech_band_tone():
 
     pcm = _make_tonal_pcm_from_frame_levels([0.08], freq_hz=220.0)
 
-    assert session._is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is True
+    assert session._speech_detector.is_speech_like_frame(pcm, 48000, adjusted_rms=0.08) is True
 
 
 def test_resume_speech_after_pause_requires_consecutive_frames():
@@ -368,19 +370,19 @@ def test_resume_speech_after_pause_requires_consecutive_frames():
         send_cb=AsyncMock(),
     )
 
-    resumed, count = session._resume_speech_after_pause(True, silence_count=10, resume_speech_count=0)
+    resumed, count = session._speech_detector.resume_after_pause(True, silence_count=10, resume_speech_count=0)
     assert resumed is False
     assert count == 1
 
-    resumed, count = session._resume_speech_after_pause(True, silence_count=10, resume_speech_count=count)
+    resumed, count = session._speech_detector.resume_after_pause(True, silence_count=10, resume_speech_count=count)
     assert resumed is False
     assert count == 2
 
-    resumed, count = session._resume_speech_after_pause(True, silence_count=10, resume_speech_count=count)
+    resumed, count = session._speech_detector.resume_after_pause(True, silence_count=10, resume_speech_count=count)
     assert resumed is True
     assert count == 3
 
-    resumed, count = session._resume_speech_after_pause(False, silence_count=10, resume_speech_count=2)
+    resumed, count = session._speech_detector.resume_after_pause(False, silence_count=10, resume_speech_count=2)
     assert resumed is False
     assert count == 0
 
@@ -406,7 +408,7 @@ def test_start_speech_buffer_includes_pre_speech_frames():
     )
     trigger = np.array([0.5, 0.6], dtype=np.float32)
 
-    chunk = session._start_speech_buffer(pre, trigger)
+    chunk = SpeechDetector.start_buffer(pre, trigger)
 
     assert len(chunk) == 3
     assert np.array_equal(chunk[0], pre[0])
@@ -427,9 +429,9 @@ def test_meaningful_interrupt_accepts_keywords_and_full_sentences():
         send_cb=AsyncMock(),
     )
 
-    assert session._is_meaningful_interrupt("warte kurz") is True
-    assert session._is_meaningful_interrupt("Kannst du kurz anhalten?") is True
-    assert session._is_meaningful_interrupt("Ich bin gleich da.") is True
+    assert session._speech_detector.is_meaningful_interrupt("warte kurz") is True
+    assert session._speech_detector.is_meaningful_interrupt("Kannst du kurz anhalten?") is True
+    assert session._speech_detector.is_meaningful_interrupt("Ich bin gleich da.") is True
 
 
 def test_meaningful_interrupt_rejects_short_noise_like_transcripts():
@@ -445,9 +447,9 @@ def test_meaningful_interrupt_rejects_short_noise_like_transcripts():
         send_cb=AsyncMock(),
     )
 
-    assert session._is_meaningful_interrupt("hm") is False
-    assert session._is_meaningful_interrupt("ja") is False
-    assert session._is_meaningful_interrupt("fahrrad wind") is False
+    assert session._speech_detector.is_meaningful_interrupt("hm") is False
+    assert session._speech_detector.is_meaningful_interrupt("ja") is False
+    assert session._speech_detector.is_meaningful_interrupt("fahrrad wind") is False
 
 
 @pytest.mark.asyncio
@@ -738,7 +740,7 @@ def test_tts_barge_in_finishes_current_sentence_and_discards_later_sentences():
 
 
 def test_call_session_loads_voip_audio_thresholds_from_config():
-    with patch.object(matrix_call, "_build_webrtc_vad", return_value=_FakeVad([])):
+    with patch.object(audio_vad, "_build_webrtc_vad", return_value=_FakeVad([])):
         session = CallSession(
             call_id="call-config",
             room_id="!room:test",
@@ -775,22 +777,22 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
             agent=MagicMock(),
             send_cb=AsyncMock(),
         )
-
-        assert session.SILENCE_THRESHOLD == pytest.approx(0.03)
-        assert session.SILENCE_SECONDS == pytest.approx(2.2)
-        assert session.MIN_SPEECH_SECONDS == pytest.approx(0.7)
-        assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(0.25)
-        assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == 11
-        assert session.MIN_SPEECH_BAND_RATIO == pytest.approx(0.42)
-        assert session.MAX_SPECTRAL_FLATNESS == pytest.approx(0.61)
-        assert session.MIN_SPEECH_LIKE_RATIO == pytest.approx(0.14)
-        assert session.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == 6
-        assert session.MIN_RESUME_SPEECH_FRAMES == 5
-        assert session.PRE_SPEECH_SECONDS == pytest.approx(0.8)
-        assert session.WEBRTC_VAD_ENABLED is True
-        assert session.WEBRTC_VAD_MODE == 3
-        assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(0.22)
-        assert session.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == 5
+        sd = session._speech_detector
+        assert sd.SILENCE_THRESHOLD == pytest.approx(0.03)
+        assert sd.SILENCE_SECONDS == pytest.approx(2.2)
+        assert sd.MIN_SPEECH_SECONDS == pytest.approx(0.7)
+        assert sd.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(0.25)
+        assert sd.MIN_CONSECUTIVE_SPEECH_FRAMES == 11
+        assert sd.MIN_SPEECH_BAND_RATIO == pytest.approx(0.42)
+        assert sd.MAX_SPECTRAL_FLATNESS == pytest.approx(0.61)
+        assert sd.MIN_SPEECH_LIKE_RATIO == pytest.approx(0.14)
+        assert sd.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == 6
+        assert sd.MIN_RESUME_SPEECH_FRAMES == 5
+        assert sd.PRE_SPEECH_SECONDS == pytest.approx(0.8)
+        assert sd.WEBRTC_VAD_ENABLED is True
+        assert sd.WEBRTC_VAD_MODE == 3
+        assert sd.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(0.22)
+        assert sd.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == 5
         assert session.CALL_INACTIVITY_SECONDS == 240
         assert session.PREANSWER_WARMUP_ENABLED is False
         assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(7.5)
@@ -801,65 +803,66 @@ def test_call_session_loads_voip_audio_thresholds_from_config():
 
 
 def test_call_session_invalid_voip_audio_thresholds_fall_back_to_defaults():
-    session = CallSession(
-        call_id="call-config-default",
-        room_id="!room:test",
-        caller_id="@user:test",
-        thread_id="thread-config-default",
-        client=SimpleNamespace(),
-        app=SimpleNamespace(config={
-            "voip": {
-                "silence_threshold": -1,
-                "silence_seconds": "bad",
-                "min_speech_seconds": 0,
-                "min_active_speech_ratio": 1.5,
-                "min_consecutive_speech_frames": 0,
-                "min_speech_band_ratio": 1.3,
-                "max_spectral_flatness": -0.1,
-                "min_speech_like_ratio": -1,
-                "min_consecutive_speechlike_frames": 0,
-                "min_resume_speech_frames": 0,
-                "pre_speech_seconds": -1,
-                "webrtcvad_enabled": "maybe",
-                "webrtcvad_mode": 99,
-                "webrtcvad_min_voiced_ratio": 2,
-                "webrtcvad_min_consecutive_frames": 0,
-                "call_inactivity_seconds": 0,
-                "preanswer_warmup_enabled": "perhaps",
-                "preanswer_warmup_timeout_seconds": 0,
-                "preanswer_stt_silence_seconds": 0,
-                "response_delay_seconds": -1,
-                "connect_timeout_seconds": 0,
-                "hangup_on_media_end": "perhaps",
-            }
-        }),
-        cfg={},
-        agent=MagicMock(),
-        send_cb=AsyncMock(),
-    )
-
-    assert session.SILENCE_THRESHOLD == pytest.approx(CallSession.SILENCE_THRESHOLD)
-    assert session.SILENCE_SECONDS == pytest.approx(CallSession.SILENCE_SECONDS)
-    assert session.MIN_SPEECH_SECONDS == pytest.approx(CallSession.MIN_SPEECH_SECONDS)
-    assert session.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(CallSession.MIN_ACTIVE_SPEECH_RATIO)
-    assert session.MIN_CONSECUTIVE_SPEECH_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECH_FRAMES
-    assert session.MIN_SPEECH_BAND_RATIO == pytest.approx(CallSession.MIN_SPEECH_BAND_RATIO)
-    assert session.MAX_SPECTRAL_FLATNESS == pytest.approx(CallSession.MAX_SPECTRAL_FLATNESS)
-    assert session.MIN_SPEECH_LIKE_RATIO == pytest.approx(CallSession.MIN_SPEECH_LIKE_RATIO)
-    assert session.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == CallSession.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
-    assert session.MIN_RESUME_SPEECH_FRAMES == CallSession.MIN_RESUME_SPEECH_FRAMES
-    assert session.PRE_SPEECH_SECONDS == pytest.approx(CallSession.PRE_SPEECH_SECONDS)
-    assert session.WEBRTC_VAD_ENABLED == CallSession.WEBRTC_VAD_ENABLED
-    assert session.WEBRTC_VAD_MODE == CallSession.WEBRTC_VAD_MODE
-    assert session.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(CallSession.WEBRTC_VAD_MIN_VOICED_RATIO)
-    assert session.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == CallSession.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
-    assert session.CALL_INACTIVITY_SECONDS == CallSession.CALL_INACTIVITY_SECONDS
-    assert session.PREANSWER_WARMUP_ENABLED == CallSession.PREANSWER_WARMUP_ENABLED
-    assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(CallSession.PREANSWER_WARMUP_TIMEOUT_SECONDS)
-    assert session.PREANSWER_STT_SILENCE_SECONDS == pytest.approx(CallSession.PREANSWER_STT_SILENCE_SECONDS)
-    assert session.RESPONSE_DELAY_SECONDS == CallSession.RESPONSE_DELAY_SECONDS
-    assert session.CONNECT_TIMEOUT_SECONDS == CallSession.CONNECT_TIMEOUT_SECONDS
-    assert session.HANGUP_ON_MEDIA_END == CallSession.HANGUP_ON_MEDIA_END
+    with patch.object(audio_vad, "_build_webrtc_vad", return_value=_FakeVad([])):
+        session = CallSession(
+            call_id="call-config-default",
+            room_id="!room:test",
+            caller_id="@user:test",
+            thread_id="thread-config-default",
+            client=SimpleNamespace(),
+            app=SimpleNamespace(config={
+                "voip": {
+                    "silence_threshold": -1,
+                    "silence_seconds": "bad",
+                    "min_speech_seconds": 0,
+                    "min_active_speech_ratio": 1.5,
+                    "min_consecutive_speech_frames": 0,
+                    "min_speech_band_ratio": 1.3,
+                    "max_spectral_flatness": -0.1,
+                    "min_speech_like_ratio": -1,
+                    "min_consecutive_speechlike_frames": 0,
+                    "min_resume_speech_frames": 0,
+                    "pre_speech_seconds": -1,
+                    "webrtcvad_enabled": "maybe",
+                    "webrtcvad_mode": 99,
+                    "webrtcvad_min_voiced_ratio": 2,
+                    "webrtcvad_min_consecutive_frames": 0,
+                    "call_inactivity_seconds": 0,
+                    "preanswer_warmup_enabled": "perhaps",
+                    "preanswer_warmup_timeout_seconds": 0,
+                    "preanswer_stt_silence_seconds": 0,
+                    "response_delay_seconds": -1,
+                    "connect_timeout_seconds": 0,
+                    "hangup_on_media_end": "perhaps",
+                }
+            }),
+            cfg={},
+            agent=MagicMock(),
+            send_cb=AsyncMock(),
+        )
+        sd = session._speech_detector
+        assert sd.SILENCE_THRESHOLD == pytest.approx(SpeechDetector.SILENCE_THRESHOLD)
+        assert sd.SILENCE_SECONDS == pytest.approx(SpeechDetector.SILENCE_SECONDS)
+        assert sd.MIN_SPEECH_SECONDS == pytest.approx(SpeechDetector.MIN_SPEECH_SECONDS)
+        assert sd.MIN_ACTIVE_SPEECH_RATIO == pytest.approx(SpeechDetector.MIN_ACTIVE_SPEECH_RATIO)
+        assert sd.MIN_CONSECUTIVE_SPEECH_FRAMES == SpeechDetector.MIN_CONSECUTIVE_SPEECH_FRAMES
+        assert sd.MIN_SPEECH_BAND_RATIO == pytest.approx(SpeechDetector.MIN_SPEECH_BAND_RATIO)
+        assert sd.MAX_SPECTRAL_FLATNESS == pytest.approx(SpeechDetector.MAX_SPECTRAL_FLATNESS)
+        assert sd.MIN_SPEECH_LIKE_RATIO == pytest.approx(SpeechDetector.MIN_SPEECH_LIKE_RATIO)
+        assert sd.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES == SpeechDetector.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
+        assert sd.MIN_RESUME_SPEECH_FRAMES == SpeechDetector.MIN_RESUME_SPEECH_FRAMES
+        assert sd.PRE_SPEECH_SECONDS == pytest.approx(SpeechDetector.PRE_SPEECH_SECONDS)
+        assert sd.WEBRTC_VAD_ENABLED == SpeechDetector.WEBRTC_VAD_ENABLED
+        assert sd.WEBRTC_VAD_MODE == SpeechDetector.WEBRTC_VAD_MODE
+        assert sd.WEBRTC_VAD_MIN_VOICED_RATIO == pytest.approx(SpeechDetector.WEBRTC_VAD_MIN_VOICED_RATIO)
+        assert sd.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES == SpeechDetector.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
+        assert session.CALL_INACTIVITY_SECONDS == CallSession.CALL_INACTIVITY_SECONDS
+        assert session.PREANSWER_WARMUP_ENABLED == CallSession.PREANSWER_WARMUP_ENABLED
+        assert session.PREANSWER_WARMUP_TIMEOUT_SECONDS == pytest.approx(CallSession.PREANSWER_WARMUP_TIMEOUT_SECONDS)
+        assert session.PREANSWER_STT_SILENCE_SECONDS == pytest.approx(CallSession.PREANSWER_STT_SILENCE_SECONDS)
+        assert session.RESPONSE_DELAY_SECONDS == CallSession.RESPONSE_DELAY_SECONDS
+        assert session.CONNECT_TIMEOUT_SECONDS == CallSession.CONNECT_TIMEOUT_SECONDS
+        assert session.HANGUP_ON_MEDIA_END == CallSession.HANGUP_ON_MEDIA_END
 
 
 @pytest.mark.asyncio
@@ -1224,7 +1227,7 @@ def test_load_hold_audio_uses_mono_wav_default_without_m4a_fallback():
 def test_should_transcribe_chunk_relaxed_thresholds_in_quiet_env():
     """In very quiet environments (noise_floor < 0.001), relaxed thresholds
     should accept chunks that would be rejected with the default thresholds."""
-    with patch.object(matrix_call, "_build_webrtc_vad", return_value=None):
+    with patch.object(audio_vad, "_build_webrtc_vad", return_value=None):
         session = CallSession(
             call_id="call-quiet",
             room_id="!room:test",
@@ -1238,7 +1241,7 @@ def test_should_transcribe_chunk_relaxed_thresholds_in_quiet_env():
         )
 
         # Simulate a very quiet environment
-        session._noise_floor = 0.0005
+        session._speech_detector._noise_floor = 0.0005
 
         # Create a chunk with low active_ratio (0.08) — would fail default 0.12
         # but should pass with relaxed threshold 0.06
@@ -1249,13 +1252,13 @@ def test_should_transcribe_chunk_relaxed_thresholds_in_quiet_env():
         pcm = _make_tonal_pcm_from_frame_levels(levels)
 
         # With relaxed thresholds, this should be accepted
-        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is True
+        assert session._speech_detector.should_transcribe(pcm, 48000, fps=50) is True
 
 
 def test_should_transcribe_chunk_strict_thresholds_in_noisy_env():
     """In noisy environments (noise_floor >= 0.001), default strict thresholds
     should reject chunks with low active_ratio."""
-    with patch.object(matrix_call, "_build_webrtc_vad", return_value=None):
+    with patch.object(audio_vad, "_build_webrtc_vad", return_value=None):
         session = CallSession(
             call_id="call-noisy",
             room_id="!room:test",
@@ -1269,7 +1272,7 @@ def test_should_transcribe_chunk_strict_thresholds_in_noisy_env():
         )
 
         # Simulate a noisier environment
-        session._noise_floor = 0.005
+        session._speech_detector._noise_floor = 0.005
 
         # Same chunk as above — 10% active_ratio
         levels = [0.0] * 80
@@ -1278,5 +1281,5 @@ def test_should_transcribe_chunk_strict_thresholds_in_noisy_env():
         pcm = _make_tonal_pcm_from_frame_levels(levels)
 
         # With strict thresholds (0.12), this should be rejected
-        assert session._should_transcribe_chunk(pcm, 48000, fps=50) is False
+        assert session._speech_detector.should_transcribe(pcm, 48000, fps=50) is False
 
