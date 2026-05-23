@@ -416,6 +416,18 @@ class CallSession:
 
 
 
+    async def _send_status(self, text: str) -> None:
+        """Send a small-font HTML status message into the call thread."""
+        try:
+            html = (
+                '<font size="1" color="#888888" data-mx-color="#888888">'
+                f"{text}"
+                '</font>'
+            )
+            await self._send_cb(html)
+        except Exception:
+            pass
+
     def _voice_override(self) -> Optional[str]:
         """Return the user's persistent TTS voice override (if any)."""
         try:
@@ -606,6 +618,7 @@ class CallSession:
         if not self._greeting_sent:
             self._greeting_task = asyncio.ensure_future(self._send_greeting_when_ready())
 
+        asyncio.ensure_future(self._send_status("Anruf angenommen – Verbindung wird aufgebaut…"))
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
 
@@ -793,6 +806,7 @@ class CallSession:
             self._greeting_sent = True
             self._mark_activity()
             self._agc.activate()
+            await self._send_status("Telefonat verbunden")
             logger.info("call %s: prepared greeting sent", self.call_id[:8])
             return
 
@@ -899,6 +913,7 @@ class CallSession:
             self._prepare_greeting_task.cancel()
         if self._pc:
             await self._pc.close()
+        await self._send_status("Telefonat beendet")
         logger.info("call %s hung up", self.call_id[:8])
 
     @property
@@ -1807,6 +1822,14 @@ class CallManager:
             send_cb=_send_cb,
         )
         self._sessions[event.call_id] = session
+
+        # Wire up fallback notifications → status messages in the call thread
+        if hasattr(agent, "set_callbacks"):
+            agent.set_callbacks(
+                on_fallback=lambda from_m, to_m: asyncio.ensure_future(
+                    session._send_status(f"⚙ Fallback: {from_m} → {to_m}")
+                )
+            )
 
         sdp_answer = await session.start(sdp_offer)
         if sdp_answer is None:

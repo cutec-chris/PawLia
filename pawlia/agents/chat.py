@@ -209,6 +209,7 @@ class ChatAgent(BaseAgent):
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self.on_skill_done: Optional[SkillDoneCallback] = None    # (skill_name, result)
         self.on_model_change: Optional[Callable[[str], None]] = None  # (new_model)
+        self._on_fallback: Optional[Callable[[str, str], None]] = None  # (from_model, to_model)
         self.max_tool_turns = max_tool_turns if (isinstance(max_tool_turns, int) and max_tool_turns > 0) else _MAX_CHAT_TOOL_TURNS
 
         # Bind skill specs as "tools" so the LLM can call them
@@ -1262,9 +1263,25 @@ class ChatAgent(BaseAgent):
             agent_type = "vision" if images else "chat"
             llm = self._agent_llm_resolver(agent_type, thread_id)
             bound = llm.bind_tools(self._skill_specs, tool_choice="auto") if self._skill_specs else llm
+            if self._on_fallback:
+                for l in (bound, llm):
+                    if hasattr(l, "set_on_fallback"):
+                        l.set_on_fallback(self._on_fallback)
             return bound, llm
 
+        for l in (self.bound_llm, self.llm, self.vision_bound_llm):
+            if hasattr(l, "set_on_fallback") and self._on_fallback:
+                l.set_on_fallback(self._on_fallback)
         return (self.vision_bound_llm if images else self.bound_llm), self.llm
+
+    def set_callbacks(self, *, on_fallback: Optional[Callable[[str, str], None]] = None) -> None:
+        """Register callbacks for this agent instance.
+
+        Args:
+            on_fallback: Called when the LLM fallback chain advances:
+                         ``(from_model_name, to_model_name)``.
+        """
+        self._on_fallback = on_fallback
 
     def _active_override_model(self, thread_id: Optional[str]) -> Optional[str]:
         """Return the name of the active model override, or ``None``."""

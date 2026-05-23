@@ -304,12 +304,14 @@ class _FallbackLLMWrapper:
     _BLACKLIST_THRESHOLD = 3
     _BLACKLIST_COOLDOWN_SECONDS = 30 * 60
 
-    def __init__(self, llms: List[Any], labels: List[str], context_sizes: List[int]):
+    def __init__(self, llms: List[Any], labels: List[str], context_sizes: List[int],
+                 on_fallback: Optional[Callable[[str, str], None]] = None):
         if not llms:
             raise ValueError("Fallback wrapper requires at least one LLM")
         self._llms = llms
         self._labels = labels
         self._context_sizes = context_sizes
+        self._on_fallback = on_fallback  # (from_model, to_model) -> None
         self._now = time.monotonic
         self._failures = [0 for _ in llms]
         self._blacklisted_until = [0.0 for _ in llms]
@@ -524,6 +526,8 @@ class _FallbackLLMWrapper:
                         last_exc,
                         self._labels[idx + 1],
                     )
+                if self._on_fallback:
+                    self._on_fallback(self._labels[idx], self._labels[idx + 1])
             elif saw_context_error:
                 logger.warning("LLM context limit: all fallback models rejected the prompt as too large")
         assert last_exc is not None
@@ -593,6 +597,8 @@ class _FallbackLLMWrapper:
                         last_exc,
                         self._labels[idx + 1],
                     )
+                if self._on_fallback:
+                    self._on_fallback(self._labels[idx], self._labels[idx + 1])
             elif saw_context_error:
                 logger.warning("LLM context limit: all fallback models rejected the prompt as too large")
         assert last_exc is not None
@@ -603,6 +609,7 @@ class _FallbackLLMWrapper:
             [llm.bind_tools(*args, **kwargs) for llm in self._llms],
             self._labels,
             self._context_sizes,
+            on_fallback=self._on_fallback,
         )
 
     async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
@@ -675,10 +682,16 @@ class _FallbackLLMWrapper:
                             exc,
                             self._labels[idx + 1],
                         )
+                    if self._on_fallback:
+                        self._on_fallback(self._labels[idx], self._labels[idx + 1])
                 elif saw_context_error:
                     logger.warning("LLM context limit: all fallback models rejected the prompt as too large")
         assert last_exc is not None
         raise last_exc
+
+    def set_on_fallback(self, callback: Optional[Callable[[str, str], None]]) -> None:
+        """Set a callback invoked on each fallback transition: ``(from, to)``."""
+        self._on_fallback = callback
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._llms[0], name)

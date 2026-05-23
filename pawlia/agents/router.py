@@ -64,6 +64,7 @@ class RouterAgent:
         self.on_skill_step: Optional[Callable[[str], Awaitable[None]]] = None
         self.on_skill_done: Optional[Callable[[str, str], Awaitable[None]]] = None
         self.on_model_change: Optional[Callable[[str], None]] = None
+        self._on_fallback: Optional[Callable[[str, str], None]] = None  # propagated to chat agent
 
     @property
     def skills(self) -> Dict[str, Any]:
@@ -94,6 +95,7 @@ class RouterAgent:
         self._local_agent.on_skill_step = self.on_skill_step
         self._local_agent.on_skill_done = self.on_skill_done
         self._local_agent.on_model_change = self.on_model_change
+        self._local_agent._on_fallback = self._on_fallback
         return self._local_agent
 
     def _agent_overrides(self, thread_id: Optional[str]) -> Dict[str, Any]:
