@@ -1066,7 +1066,7 @@ class LLMFactory:
             return llm
 
         extra_body: Dict[str, Any] = {}
-        if isinstance(think, int):
+        if isinstance(think, int) and not isinstance(think, bool):
             # Token budget for thinking
             extra_body["reasoning_format"] = "parsed"
             extra_body["reasoning_budget"] = think
