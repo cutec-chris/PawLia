@@ -1321,8 +1321,11 @@ class CallSession:
                 if not speech_buffer and pre_speech_frames > 0:
                     pre_speech_buffer.append(pcm)
 
-                # Update background noise floor
-                self._speech_detector.update_noise_floor(rms, during_speech=bool(speech_buffer))
+                # Update background noise floor using AGC-adjusted RMS so that
+                # the adaptive silence threshold tracks the same level that
+                # is_speech_like_frame sees — avoids wind/road noise being
+                # classified as speech when AGC gain is high.
+                self._speech_detector.update_noise_floor(adjusted_rms, during_speech=bool(speech_buffer))
 
                 silence_threshold = int(max(1.2, self._speech_detector.SILENCE_SECONDS) * fps)
 

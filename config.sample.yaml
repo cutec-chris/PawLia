@@ -90,7 +90,8 @@ interfaces:
 
 # voip:
 #   silence_threshold: 0.018          # frame RMS above this counts as speech (after AGC)
-#   silence_emphasis_factor: 2.0      # noise-floor multiplier for adaptive threshold
+#   silence_emphasis_factor: 2.0      # base multiplier for adaptive threshold
+#                                       # (auto-scaled down to 1.2 in noisy environments)
 #   silence_seconds: 2.2              # trailing silence that ends a chunk
 #   min_speech_seconds: 0.4           # shorter chunks are discarded early
 #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk

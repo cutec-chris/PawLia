@@ -58,11 +58,12 @@ class SpeechDetector:
     (``_noise_floor``) during periods when no speech buffer is active.  The
     frame-level gate (``is_speech_like_frame``) then uses
 
-        effective_threshold = max(SILENCE_THRESHOLD, noise_floor * SILENCE_EMPHASIS_FACTOR)
+        effective_threshold = max(SILENCE_THRESHOLD, noise_floor * emphasis)
 
-    so that steady background noise (e.g. road noise while cycling) falls
-    below the effective threshold and counts as silence.  This lets
-    silence_count accumulate even when the raw RMS never drops to zero.
+    where ``emphasis`` is auto-scaled from ``SILENCE_EMPHASIS_FACTOR`` down to
+    a minimum of 1.2 as the noise floor rises.  This keeps quiet speech
+    detectable in silent environments while preventing AGC-amplified wind or
+    road noise from being classified as speech in loud ones.
     """
 
     SILENCE_THRESHOLD: float = 0.018
@@ -205,10 +206,18 @@ class SpeechDetector:
         Uses an adaptive threshold based on the current noise floor, band-ratio
         (how much energy is in the 180–4000 Hz speech band), and spectral
         flatness (white noise vs. tonal signal).
+
+        The emphasis factor is auto-scaled: it starts at SILENCE_EMPHASIS_FACTOR
+        (default 2.0) in quiet environments and decreases toward 1.2 as the
+        noise floor rises.  This prevents AGC-amplified ambient noise from
+        exceeding the effective threshold in loud settings.
         """
+        emphasis = self.SILENCE_EMPHASIS_FACTOR
+        if self._noise_floor > 0.002:
+            emphasis = max(1.2, emphasis - (self._noise_floor - 0.002) * 30.0)
         effective_threshold = max(
             self.SILENCE_THRESHOLD,
-            self._noise_floor * self.SILENCE_EMPHASIS_FACTOR,
+            self._noise_floor * emphasis,
         )
         if adjusted_rms <= effective_threshold:
             return False
