@@ -593,14 +593,26 @@ class ChatAgent(BaseAgent):
             drop = 2 if len(tail) - 2 >= _CONTEXT_MIN_NON_SYSTEM_KEEP else 1
             tail = tail[drop:]
 
-        # Ensure the first message after system is not a ToolMessage — dropping
-        # pairs from the front can orphan a tool result from its preceding
-        # AI(tool_calls) message, which makes the sequence invalid and causes
-        # 400 errors from strict APIs (e.g. Z.AI / GLM).
-        while tail and isinstance(tail[0], ToolMessage):
+        # Ensure the first message after system is a HumanMessage.
+        # Dropping pairs from the front can remove the original user message,
+        # leaving an orphaned AI(tool_calls) or ToolMessage as the first
+        # non-system entry — strict APIs (e.g. Z.AI / GLM error 1214) reject
+        # sequences that start with system → assistant or system → tool.
+        while tail and not isinstance(tail[0], HumanMessage):
             tail = tail[1:]
+        if not tail:
+            return system + [HumanMessage(content="[Conversation trimmed due to context limit]")]
+        # Also drop any orphaned ToolMessages whose parent AI(tool_calls)
+        # was removed during trimming.
+        repaired_tail = [tail[0]]
+        for msg in tail[1:]:
+            if isinstance(msg, ToolMessage):
+                if repaired_tail and isinstance(repaired_tail[-1], AIMessage) and getattr(repaired_tail[-1], "tool_calls", None):
+                    repaired_tail.append(msg)
+            else:
+                repaired_tail.append(msg)
 
-        return system + tail
+        return system + repaired_tail
 
     async def run(
         self,

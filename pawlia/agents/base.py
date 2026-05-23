@@ -270,16 +270,26 @@ class BaseAgent(ABC):
                     msg = SystemMessage(content=cleaned)
             result.append(msg)
 
-        # Pass 2: drop orphaned tool messages
+        # Pass 2: drop orphaned tool messages (no matching AIMessage with tool_calls)
+        # A ToolMessage is valid if there is a preceding AIMessage with a
+        # tool_call whose id matches — it does NOT have to be the immediately
+        # previous message (parallel tool results are separate ToolMessages).
+        known_tool_ids: set = set()
         repaired: List[BaseMessage] = []
-        for i, msg in enumerate(result):
-            if isinstance(msg, ToolMessage):
-                if i == 0:
-                    continue
-                prev = repaired[-1] if repaired else result[i - 1]
-                if not isinstance(prev, AIMessage) or not getattr(prev, "tool_calls", None):
-                    continue
-            repaired.append(msg)
+        for msg in result:
+            if isinstance(msg, AIMessage):
+                known_tool_ids = set()
+                for tc in (getattr(msg, "tool_calls", None) or []):
+                    tc_id = tc.get("id") if isinstance(tc, dict) else None
+                    if tc_id:
+                        known_tool_ids.add(tc_id)
+                repaired.append(msg)
+            elif isinstance(msg, ToolMessage):
+                if msg.tool_call_id in known_tool_ids:
+                    repaired.append(msg)
+            else:
+                known_tool_ids = set()
+                repaired.append(msg)
 
         # Pass 3: compress old tool result content
         repaired = BaseAgent._compress_tool_results(repaired)
