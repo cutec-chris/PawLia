@@ -419,6 +419,7 @@ class TestChatAgentPersist:
         }]
 
         session = MagicMock()
+        session.workspace_refs = []  # prevent MagicMock default from injecting workspace context
         session.exchanges = [("prev_q", "prev_a", skill_history)]
         memory = MagicMock()
         agent = ChatAgent(
@@ -432,17 +433,20 @@ class TestChatAgentPersist:
         await agent.run("New question")
 
         messages = llm.invoke.call_args[0][0]
-        assert len(messages) == 5
+        # System + Human(prev_q) + AI(prev_a with compact skill replay) + Human(new)
+        assert len(messages) == 4
         assert messages[1].content == "prev_q"
         assert isinstance(messages[2], AIMessage)
         assert "Earlier skill use:" in messages[2].content
         assert "searxng: python tutorials for absolute beginners" in messages[2].content
         assert "Result line Result line" in messages[2].content
         assert len(messages[2].content) < 500
+        assert messages[3].content == "New question"
 
     @pytest.mark.asyncio
     async def test_compacts_old_history_when_context_budget_is_small(self):
-        """Old replayed exchanges should be dropped before sending an oversized prompt."""
+        """Old replayed exchanges should be summarized into a single HumanMessage
+        when the context budget is exceeded."""
         llm = _mock_llm([_make_ai_message("Response")])
 
         session = MagicMock()
@@ -467,8 +471,13 @@ class TestChatAgentPersist:
         messages = llm.invoke.call_args[0][0]
         serialized = [getattr(msg, "content", "") for msg in messages]
         assert any(content == "Newest question" for content in serialized)
-        assert not any(isinstance(content, str) and "old_q_0" in content for content in serialized)
-        assert not any(isinstance(content, str) and "old_a_0" in content for content in serialized)
+        # The oldest exchange is summarized, not dropped — check for summary
+        summary_msgs = [c for c in serialized if isinstance(c, str) and "Earlier conversation summarized" in c]
+        assert len(summary_msgs) == 1
+        assert "old_q_0" in summary_msgs[0]
+        # With budget 500 tokens (2500 - 2000 reserve), exchanges are summarized
+        # 5 exchanges + question far exceed the budget
+        assert len(messages) < 12  # significantly fewer than 5 exchanges + question
 
 
 class TestChatAgentMultiSkill:

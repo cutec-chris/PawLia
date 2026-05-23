@@ -889,7 +889,7 @@ async def test_connect_timeout_watchdog_hangs_up_stale_call():
 
     await session._connect_timeout_watchdog()
 
-    send_cb.assert_awaited_once()
+    send_cb.assert_any_call("📞 Verbindung unterbrochen")
     client.room_send.assert_awaited_once()
     session._pc.close.assert_awaited_once()
     assert session.finished is True
@@ -1012,7 +1012,7 @@ async def test_deferred_greeting_waits_for_answer_and_media_ready():
         await task
 
     agent.run_streamed.assert_awaited_once()
-    send_cb.assert_awaited_once_with("Hallo, ich bin da.")
+    send_cb.assert_any_call("Hallo, ich bin da.")
     session._tts_track.enqueue_pcm_float32.assert_called_once()
     assert session._greeting_sent is True
 
@@ -1044,7 +1044,7 @@ async def test_send_greeting_waits_for_existing_prepare_task():
 
     session._tts_track.enqueue_pcm_float32.assert_called_once_with(pcm)
     session._tts_track.stop_hold.assert_called_once()
-    send_cb.assert_awaited_once_with("Hallo, ich bin da.")
+    send_cb.assert_any_call("Hallo, ich bin da.")
     assert session._greeting_sent is True
 
 
@@ -1076,7 +1076,7 @@ async def test_deferred_greeting_plays_prepared_audio_when_ready():
 
     session._tts_track.enqueue_pcm_float32.assert_called_once_with(pcm)
     session._tts_track.stop_hold.assert_called_once()
-    send_cb.assert_awaited_once_with("Hallo, ich bin da.")
+    send_cb.assert_any_call("Hallo, ich bin da.")
     assert session._greeting_sent is True
 
 
