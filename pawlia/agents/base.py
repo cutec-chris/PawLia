@@ -252,8 +252,8 @@ class BaseAgent(ABC):
           1. Strip surrogate characters from message content.
           2. Drop orphaned ToolMessages (no preceding AI(tool_calls)).
           3. Compress old tool result content to reduce token pressure.
-          4. Merge consecutive same-role messages — some APIs (e.g. Z.AI / GLM)
-             reject adjacent ToolMessage or AIMessage entries.
+          4. Merge consecutive same-role messages (AI/Human only — ToolMessages
+             must each keep their own tool_call_id).
         """
         result: List[BaseMessage] = []
         for msg in messages:
@@ -284,21 +284,25 @@ class BaseAgent(ABC):
         # Pass 3: compress old tool result content
         repaired = BaseAgent._compress_tool_results(repaired)
 
-        # Pass 4: merge consecutive same-role messages
+        # Pass 4: merge consecutive same-role messages (except ToolMessages —
+        # each must keep its own tool_call_id to match the parent AIMessage).
         merged: List[BaseMessage] = []
         for msg in repaired:
+            if isinstance(msg, ToolMessage):
+                merged.append(msg)
+                continue
             if merged and type(merged[-1]) is type(msg):
                 prev = merged[-1]
                 prev_content = prev.content if isinstance(prev.content, str) else ""
                 cur_content = msg.content if isinstance(msg.content, str) else ""
-                if isinstance(prev, ToolMessage) and isinstance(msg, ToolMessage):
-                    combined = prev_content + "\n\n---\n\n" + cur_content
-                    merged[-1] = ToolMessage(content=combined, tool_call_id=prev.tool_call_id)
-                elif isinstance(prev, AIMessage) and isinstance(msg, AIMessage):
+                if isinstance(prev, AIMessage) and isinstance(msg, AIMessage):
                     prev_tc = getattr(prev, "tool_calls", []) or []
                     cur_tc = getattr(msg, "tool_calls", []) or []
                     combined = (prev_content + "\n\n" + cur_content).strip()
                     merged[-1] = AIMessage(content=combined, tool_calls=prev_tc + cur_tc)
+                elif isinstance(prev, HumanMessage) and isinstance(msg, HumanMessage):
+                    combined = (prev_content + "\n\n" + cur_content).strip()
+                    merged[-1] = HumanMessage(content=combined)
                 else:
                     merged.append(msg)
             else:
