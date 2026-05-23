@@ -67,7 +67,7 @@ class SpeechDetector:
 
     SILENCE_THRESHOLD: float = 0.018
     SILENCE_EMPHASIS_FACTOR: float = 2.0
-    SILENCE_SECONDS: float = 1.5
+    SILENCE_SECONDS: float = 1.8
     MIN_SPEECH_SECONDS: float = 0.4
     MIN_ACTIVE_SPEECH_RATIO: float = 0.12
     MIN_CONSECUTIVE_SPEECH_FRAMES: int = 8
