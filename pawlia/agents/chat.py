@@ -574,6 +574,7 @@ class ChatAgent(BaseAgent):
         if self._estimated_message_tokens(prepared) <= budget:
             return prepared
 
+        # Phase 1: trim large individual messages
         trimmed: List[BaseMessage] = []
         for index, message in enumerate(prepared):
             if isinstance(message, ToolMessage):
@@ -587,23 +588,55 @@ class ChatAgent(BaseAgent):
         if self._estimated_message_tokens(prepared) <= budget or len(prepared) <= 1:
             return prepared
 
+        # Phase 2: summarize older messages into a single HumanMessage
+        # instead of dropping them — keeps context accessible to the LLM.
         system = prepared[:1]
         tail = prepared[1:]
-        while len(tail) > _CONTEXT_MIN_NON_SYSTEM_KEEP and self._estimated_message_tokens(system + tail) > budget:
-            drop = 2 if len(tail) - 2 >= _CONTEXT_MIN_NON_SYSTEM_KEEP else 1
-            tail = tail[drop:]
 
-        # Ensure the first message after system is a HumanMessage.
-        # Dropping pairs from the front can remove the original user message,
-        # leaving an orphaned AI(tool_calls) or ToolMessage as the first
-        # non-system entry — strict APIs (e.g. Z.AI / GLM error 1214) reject
-        # sequences that start with system → assistant or system → tool.
-        while tail and not isinstance(tail[0], HumanMessage):
-            tail = tail[1:]
-        if not tail:
-            return system + [HumanMessage(content="[Conversation trimmed due to context limit]")]
-        # Also drop any orphaned ToolMessages whose parent AI(tool_calls)
-        # was removed during trimming.
+        if self._estimated_message_tokens(system + tail) > budget and len(tail) > _CONTEXT_MIN_NON_SYSTEM_KEEP:
+            cut = len(tail) - _CONTEXT_MIN_NON_SYSTEM_KEEP
+            dropped = tail[:cut]
+            tail = tail[cut:]
+
+            summary_lines = [
+                f"[Earlier conversation summarized — {len(dropped)} message(s) condensed]"
+            ]
+            for msg in dropped:
+                if isinstance(msg, ToolMessage):
+                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    preview = content[:120].replace("\n", " ")
+                    summary_lines.append(f"[Tool: {preview}]")
+                elif isinstance(msg, HumanMessage):
+                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    preview = content[:120].replace("\n", " ")
+                    summary_lines.append(f"[User: {preview}]")
+                elif isinstance(msg, AIMessage):
+                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                    preview = content[:120].replace("\n", " ")
+                    tc = getattr(msg, "tool_calls", None)
+                    if tc:
+                        names = ", ".join(t.get("name", "?") for t in tc if isinstance(t, dict))
+                        summary_lines.append(f"[Assistant called {names}: {preview}]")
+                    else:
+                        summary_lines.append(f"[Assistant: {preview}]")
+
+            summary = HumanMessage(content="\n".join(summary_lines))
+
+            if tail and isinstance(tail[0], HumanMessage):
+                existing = tail[0].content if isinstance(tail[0].content, str) else str(tail[0].content)
+                tail = [HumanMessage(content=summary.content + "\n\n" + existing)] + tail[1:]
+            else:
+                tail = [summary] + tail
+
+        # Final cleanup: ensure first non-system is HumanMessage and
+        # drop orphaned ToolMessages whose parent AI(tool_calls)
+        # was removed during summarization.
+        if tail and not isinstance(tail[0], HumanMessage):
+            while tail and not isinstance(tail[0], HumanMessage):
+                tail = tail[1:]
+            if not tail:
+                return system + [HumanMessage(content="[Conversation summarized due to context limit]")]
+
         repaired_tail = [tail[0]]
         for msg in tail[1:]:
             if isinstance(msg, ToolMessage):
