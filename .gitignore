@@ -15,4 +15,4 @@ log/*
 logs.sh
 .codex
 containers/thalia/**/*.log
-containers/thalia/**/*.wav
+containers/thalia/**/*.wavtests/e2e_robustness_results.json

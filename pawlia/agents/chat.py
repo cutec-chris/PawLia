@@ -30,7 +30,6 @@ from langchain_openai import ChatOpenAI
 
 from pawlia.agents.base import BaseAgent, log_prompt
 from pawlia.agents.iteration_budget import IterationBudget
-from pawlia.llm import is_context_length_error
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.skills.loader import AgentSkill
 
@@ -595,57 +594,49 @@ class ChatAgent(BaseAgent):
 
         if self._estimated_message_tokens(system + tail) > budget and len(tail) > _CONTEXT_MIN_NON_SYSTEM_KEEP:
             cut = len(tail) - _CONTEXT_MIN_NON_SYSTEM_KEEP
-            dropped = tail[:cut]
-            tail = tail[cut:]
+            # Walk forward to include orphaned ToolMessages whose parent
+            # AIMessage was already cut — otherwise they'd be silently lost.
+            while cut < len(tail) and isinstance(tail[cut], ToolMessage):
+                cut += 1
+            if cut > 0:
+                dropped = tail[:cut]
+                tail = tail[cut:]
 
-            summary_lines = [
-                f"[Earlier conversation summarized — {len(dropped)} message(s) condensed]"
-            ]
-            for msg in dropped:
-                if isinstance(msg, ToolMessage):
-                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    preview = content[:120].replace("\n", " ")
-                    summary_lines.append(f"[Tool: {preview}]")
-                elif isinstance(msg, HumanMessage):
-                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    preview = content[:120].replace("\n", " ")
-                    summary_lines.append(f"[User: {preview}]")
-                elif isinstance(msg, AIMessage):
-                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                    preview = content[:120].replace("\n", " ")
-                    tc = getattr(msg, "tool_calls", None)
-                    if tc:
-                        names = ", ".join(t.get("name", "?") for t in tc if isinstance(t, dict))
-                        summary_lines.append(f"[Assistant called {names}: {preview}]")
-                    else:
-                        summary_lines.append(f"[Assistant: {preview}]")
+                summary_lines = [
+                    f"[Earlier conversation summarized — {len(dropped)} message(s) condensed]"
+                ]
+                for msg in dropped:
+                    if isinstance(msg, ToolMessage):
+                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        preview = content[:120].replace("\n", " ")
+                        summary_lines.append(f"[Tool: {preview}]")
+                    elif isinstance(msg, HumanMessage):
+                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        preview = content[:120].replace("\n", " ")
+                        summary_lines.append(f"[User: {preview}]")
+                    elif isinstance(msg, AIMessage):
+                        content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                        preview = content[:120].replace("\n", " ")
+                        tc = getattr(msg, "tool_calls", None)
+                        if tc:
+                            names = ", ".join(t.get("name", "?") for t in tc if isinstance(t, dict))
+                            summary_lines.append(f"[Assistant called {names}: {preview}]")
+                        else:
+                            summary_lines.append(f"[Assistant: {preview}]")
 
-            summary = HumanMessage(content="\n".join(summary_lines))
+                summary = HumanMessage(content="\n".join(summary_lines))
 
-            if tail and isinstance(tail[0], HumanMessage):
-                existing = tail[0].content if isinstance(tail[0].content, str) else str(tail[0].content)
-                tail = [HumanMessage(content=summary.content + "\n\n" + existing)] + tail[1:]
-            else:
-                tail = [summary] + tail
+                if tail and isinstance(tail[0], HumanMessage):
+                    existing = tail[0].content if isinstance(tail[0].content, str) else str(tail[0].content)
+                    tail = [HumanMessage(content=summary.content + "\n\n" + existing)] + tail[1:]
+                else:
+                    tail = [summary] + tail
 
-        # Final cleanup: ensure first non-system is HumanMessage and
-        # drop orphaned ToolMessages whose parent AI(tool_calls)
-        # was removed during summarization.
-        if tail and not isinstance(tail[0], HumanMessage):
-            while tail and not isinstance(tail[0], HumanMessage):
-                tail = tail[1:]
-            if not tail:
-                return system + [HumanMessage(content="[Conversation summarized due to context limit]")]
-
-        repaired_tail = [tail[0]]
-        for msg in tail[1:]:
-            if isinstance(msg, ToolMessage):
-                if repaired_tail and isinstance(repaired_tail[-1], AIMessage) and getattr(repaired_tail[-1], "tool_calls", None):
-                    repaired_tail.append(msg)
-            else:
-                repaired_tail.append(msg)
-
-        return system + repaired_tail
+        # Final cleanup via _sanitize_messages: handles surrogate cleaning,
+        # orphaned ToolMessages, tool result compression, and same-role merging
+        # in one pass — and covers the streaming path which doesn't call
+        # _invoke (and therefore wouldn't otherwise sanitize).
+        return BaseAgent._sanitize_messages(system + tail)
 
     async def run(
         self,
@@ -1533,6 +1524,7 @@ class ChatAgent(BaseAgent):
             try:
                 response = await self._invoke(retry_messages, llm=llm)
             except Exception as exc:
+                from pawlia.llm import is_context_length_error
                 if not is_context_length_error(exc) or context_retries >= _MAX_CONTEXT_RECOVERY_RETRIES:
                     raise
                 compacted = self._prepare_messages_for_context_budget(
