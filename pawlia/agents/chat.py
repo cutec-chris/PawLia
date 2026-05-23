@@ -1109,6 +1109,20 @@ class ChatAgent(BaseAgent):
                 except Exception as exc:
                     self.logger.debug("run_streamed: persist-on-cancel failed: %s", exc)
             raise
+        except Exception:
+            # LLM error (e.g. API 400, context overflow, timeout): persist the user's
+            # transcribed input so the next turn doesn't lose conversation context.
+            partial = self.strip_thinking(_partial_text) if _partial_text else None
+            result_text = partial or "[Entschuldigung, ich hatte einen technischen Fehler.]"
+            try:
+                await asyncio.shield(
+                    self._persist(user_input, result_text,
+                                  track_similarity=False, thread_id=thread_id)
+                )
+                self.logger.debug("run_streamed: persisted input on error (%d chars)", len(user_input))
+            except Exception as exc:
+                self.logger.debug("run_streamed: persist-on-error failed: %s", exc)
+            raise
 
     async def _stream_with_sentences(
         self,

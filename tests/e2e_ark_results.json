@@ -1,0 +1,129 @@
+[
+  {
+    "turn": 1,
+    "desc": "Setup researcher project + load data",
+    "status": "PASS",
+    "keywords_matched": [
+      "ark-ascended",
+      "Forschungsprojekt",
+      "projekt"
+    ],
+    "keyword_ratio": 0.75,
+    "response_len": 220,
+    "time": 23.12677526473999
+  },
+  {
+    "turn": 2,
+    "desc": "Test researcher-grounded answer on taming",
+    "status": "FAIL",
+    "keywords_matched": [
+      "taming"
+    ],
+    "keyword_ratio": 0.16666666666666666,
+    "response_len": 1403,
+    "time": 15.906477689743042
+  },
+  {
+    "turn": 3,
+    "desc": "Test context-aware follow-up (references previous taming topic + new boss topic)",
+    "status": "PASS",
+    "keywords_matched": [
+      "boss",
+      "island"
+    ],
+    "keyword_ratio": 0.25,
+    "response_len": 1695,
+    "time": 18.835687398910522
+  },
+  {
+    "turn": 4,
+    "desc": "Test cross-topic context: breeding + earlier boss/taming context",
+    "status": "PASS",
+    "keywords_matched": [
+      "breeding",
+      "stat",
+      "rex"
+    ],
+    "keyword_ratio": 0.42857142857142855,
+    "response_len": 2282,
+    "time": 20.252184867858887
+  },
+  {
+    "turn": 5,
+    "desc": "Test long-context: combines boss + island + resources knowledge",
+    "status": "FAIL",
+    "keywords_matched": [],
+    "keyword_ratio": 0.0,
+    "response_len": 2039,
+    "time": 19.710349559783936
+  },
+  {
+    "turn": 6,
+    "desc": "MEMORY TEST: must reference earlier recommendation from turn 3",
+    "status": "PASS",
+    "keywords_matched": [
+      "boss",
+      "dinos"
+    ],
+    "keyword_ratio": 0.4,
+    "response_len": 1341,
+    "time": 14.428591012954712
+  },
+  {
+    "turn": 7,
+    "desc": "MEMORY TEST: must summarize all topics (taming, bosses, breeding, resources, island)",
+    "status": "PASS",
+    "keywords_matched": [
+      "taming",
+      "boss",
+      "breeding",
+      "rex"
+    ],
+    "keyword_ratio": 0.6666666666666666,
+    "response_len": 2041,
+    "time": 17.979390144348145
+  },
+  {
+    "turn": 8,
+    "desc": "Test researcher query on specific stat data",
+    "status": "PASS",
+    "keywords_matched": [
+      "rex",
+      "spino",
+      "geschwindigkeit",
+      "bewegung"
+    ],
+    "keyword_ratio": 0.6666666666666666,
+    "response_len": 1669,
+    "time": 17.58444571495056
+  },
+  {
+    "turn": 9,
+    "desc": "MEMORY TEST: must remember first conversation topic (taming/researcher setup)",
+    "status": "PASS",
+    "keywords_matched": [
+      "taming",
+      "forschungsprojekt",
+      "erst"
+    ],
+    "keyword_ratio": 0.6,
+    "response_len": 886,
+    "time": 10.985106945037842
+  },
+  {
+    "turn": 10,
+    "desc": "Test multi-skill: researcher data + conversation context synthesis",
+    "status": "PASS",
+    "keywords_matched": [
+      "sattel",
+      "rüstung",
+      "rex",
+      "boss",
+      "tip",
+      "waffe"
+    ],
+    "keyword_ratio": 0.6666666666666666,
+    "response_len": 2868,
+    "time": 26.45555305480957
+  }
+]
