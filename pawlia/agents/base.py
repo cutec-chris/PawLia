@@ -185,14 +185,74 @@ class BaseAgent(ABC):
                 )
                 await asyncio.sleep(delay)
 
+    _TOOL_RESULT_COMPRESS_THRESHOLD = 200
+    _TOOL_RESULT_KEEP_BATCHES = 2
+    _TOOL_RESULT_SUMMARY_LIMIT = 120
+
+    @staticmethod
+    def _compress_tool_results(messages: List[BaseMessage]) -> List[BaseMessage]:
+        """Summarize old tool result content to reduce token usage.
+
+        Keeps the most recent N tool-result batches intact; older tool
+        messages have their content replaced with a short summary.
+        Prevents GLM error 1214 (accumulated multi-turn tool messages)
+        and generally reduces context pressure.
+
+        A "batch" is a run of consecutive ToolMessages following an
+        AIMessage with ``tool_calls``.
+        """
+        batches: List[List[int]] = []
+        current_batch: List[int] = []
+
+        for i, msg in enumerate(messages):
+            if isinstance(msg, ToolMessage):
+                current_batch.append(i)
+            else:
+                if current_batch:
+                    batches.append(current_batch)
+                    current_batch = []
+        if current_batch:
+            batches.append(current_batch)
+
+        if len(batches) <= BaseAgent._TOOL_RESULT_KEEP_BATCHES:
+            return messages
+
+        old_batch_indices = set()
+        for batch in batches[:-BaseAgent._TOOL_RESULT_KEEP_BATCHES]:
+            old_batch_indices.update(batch)
+
+        if not old_batch_indices:
+            return messages
+
+        result = list(messages)
+        for idx in old_batch_indices:
+            msg = result[idx]
+            if not isinstance(msg, ToolMessage):
+                continue
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if len(content) <= BaseAgent._TOOL_RESULT_COMPRESS_THRESHOLD:
+                continue
+            first_line = content.split("\n", 1)[0]
+            if len(first_line) > BaseAgent._TOOL_RESULT_SUMMARY_LIMIT:
+                first_line = first_line[:BaseAgent._TOOL_RESULT_SUMMARY_LIMIT - 3].rstrip() + "..."
+            lines = content.count("\n") + 1
+            summary = (
+                f"[Tool result compressed — {lines} lines, "
+                f"{len(content)} chars]\n{first_line}"
+            )
+            result[idx] = ToolMessage(content=summary, tool_call_id=msg.tool_call_id)
+
+        return result
+
     @staticmethod
     def _sanitize_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
         """Strip surrogate characters and repair role alternation in-place.
 
-        Three passes:
+        Four passes:
           1. Strip surrogate characters from message content.
           2. Drop orphaned ToolMessages (no preceding AI(tool_calls)).
-          3. Merge consecutive same-role messages — some APIs (e.g. Z.AI / GLM)
+          3. Compress old tool result content to reduce token pressure.
+          4. Merge consecutive same-role messages — some APIs (e.g. Z.AI / GLM)
              reject adjacent ToolMessage or AIMessage entries.
         """
         result: List[BaseMessage] = []
@@ -221,7 +281,10 @@ class BaseAgent(ABC):
                     continue
             repaired.append(msg)
 
-        # Pass 3: merge consecutive same-role messages
+        # Pass 3: compress old tool result content
+        repaired = BaseAgent._compress_tool_results(repaired)
+
+        # Pass 4: merge consecutive same-role messages
         merged: List[BaseMessage] = []
         for msg in repaired:
             if merged and type(merged[-1]) is type(msg):
