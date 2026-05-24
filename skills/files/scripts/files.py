@@ -117,6 +117,15 @@ def _safe_path(workdir: str, filename: str) -> str:
     return resolved
 
 
+def _resolve_filepath(workdir: str, filename: str) -> str | None:
+    """Resolve and validate a file path. Returns None (with error output) on failure."""
+    try:
+        return _safe_path(workdir, filename)
+    except ValueError as e:
+        _out({"success": False, "error": str(e)})
+        return None
+
+
 def _out(data) -> None:
     # Force UTF-8 output on Windows to avoid charmap codec errors with emoji/unicode
     if sys.stdout.encoding and sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
@@ -177,6 +186,19 @@ def _resolve_wikilink(workdir: str, filename: str) -> str:
 
     ref = m.group(1).strip()
 
+    _md_cache: list[tuple[str, str]] | None = None
+
+    def _md_files():
+        """Lazily collect all .md files in the workspace as (rel_path, fname)."""
+        nonlocal _md_cache
+        if _md_cache is None:
+            _md_cache = [
+                (rel, os.path.basename(rel))
+                for _abs, rel in _walk_files(workdir)
+                if rel.endswith(".md")
+            ]
+        return _md_cache
+
     # --- Path-style reference (contains slash) ---
     if "/" in ref:
         candidate = ref if ref.endswith(".md") else ref + ".md"
@@ -192,20 +214,15 @@ def _resolve_wikilink(workdir: str, filename: str) -> str:
             if os.path.isfile(os.path.join(workdir, typed_candidate)):
                 return typed_candidate
 
-        # 3. Search entire workspace for the filename (basename match)
+        # 3. Search workspace for basename match, then fuzzy
         basename = os.path.basename(candidate)
-        for dirpath, _dirs, files in os.walk(workdir):
-            if basename in files:
-                rel = os.path.relpath(os.path.join(dirpath, basename), workdir)
-                return rel.replace(os.sep, "/")
-
-        # 4. Fuzzy: search for files containing the slug parts
         slug_parts = ref.replace("/", " ").lower()
-        for dirpath, _dirs, files in os.walk(workdir):
-            for f in files:
-                if f.endswith(".md") and slug_parts in f.lower().replace("_", " ").replace("-", " "):
-                    rel = os.path.relpath(os.path.join(dirpath, f), workdir)
-                    return rel.replace(os.sep, "/")
+        for rel, fname in _md_files():
+            if fname == basename:
+                return rel
+        for rel, _ in _md_files():
+            if slug_parts in rel.lower().replace("_", " ").replace("-", " "):
+                return rel
 
         return candidate
 
@@ -214,74 +231,15 @@ def _resolve_wikilink(workdir: str, filename: str) -> str:
     if os.path.isfile(os.path.join(workdir, wiki_candidate)):
         return wiki_candidate
 
-    # Search entire workspace for {slug}.md
+    # Search workspace for {slug}.md, then fuzzy
     target = f"{ref}.md"
-    for dirpath, _dirs, files in os.walk(workdir):
-        if target in files:
-            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
-            return rel.replace(os.sep, "/")
-
-    # Fuzzy: search for files containing the slug
     slug_lower = ref.lower()
-    for dirpath, _dirs, files in os.walk(workdir):
-        for f in files:
-            if f.endswith(".md") and slug_lower in f.lower().replace("_", " ").replace("-", " "):
-                rel = os.path.relpath(os.path.join(dirpath, f), workdir)
-                return rel.replace(os.sep, "/")
-
-    # Nothing found — return wiki/topics guess (will produce "not found" naturally)
-    return wiki_candidate
-
-    # Search entire workspace for {slug}.md
-    target = f"{ref}.md"
-    for dirpath, _dirs, files in os.walk(workdir):
-        if target in files:
-            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
-            return rel.replace(os.sep, "/")
-
-    # Fuzzy: search for files containing the slug
-    slug_lower = ref.lower()
-    for dirpath, _dirs, files in os.walk(workdir):
-        for f in files:
-            if f.endswith(".md") and slug_lower in f.lower().replace("_", " ").replace("-", " "):
-                rel = os.path.relpath(os.path.join(dirpath, f), workdir)
-                return rel.replace(os.sep, "/")
-
-    # Nothing found — return wiki/topics guess (will produce "not found" naturally)
-    return wiki_candidate
-
-    # Search entire workspace for {slug}.md
-    target = f"{ref}.md"
-    for dirpath, _dirs, files in os.walk(workdir):
-        if target in files:
-            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
-            return rel.replace(os.sep, "/")
-
-    # Fuzzy: search for files containing the slug
-    slug_lower = ref.lower()
-    for dirpath, _dirs, files in os.walk(workdir):
-        for f in files:
-            if f.endswith(".md") and slug_lower in f.lower().replace("_", " ").replace("-", " "):
-                rel = os.path.relpath(os.path.join(dirpath, f), workdir)
-                return rel.replace(os.sep, "/")
-
-    # Nothing found — return wiki/topics guess (will produce "not found" naturally)
-    return wiki_candidate
-
-    # Search entire workspace for {slug}.md
-    target = f"{ref}.md"
-    for dirpath, _dirs, files in os.walk(workdir):
-        if target in files:
-            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
-            return rel.replace(os.sep, "/")
-
-    # Fuzzy: search for files containing the slug
-    slug_lower = ref.lower()
-    for dirpath, _dirs, files in os.walk(workdir):
-        for f in files:
-            if f.endswith(".md") and slug_lower in f.lower().replace("_", " ").replace("-", " "):
-                rel = os.path.relpath(os.path.join(dirpath, f), workdir)
-                return rel.replace(os.sep, "/")
+    for rel, fname in _md_files():
+        if fname == target:
+            return rel
+    for rel, _ in _md_files():
+        if slug_lower in rel.lower().replace("_", " ").replace("-", " "):
+            return rel
 
     # Nothing found — return wiki/topics guess (will produce "not found" naturally)
     return wiki_candidate
@@ -438,10 +396,8 @@ def cmd_read(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
     filename, section = _split_filename_section(args.filename)
     args.filename = _resolve_wikilink(workdir, filename)
-    try:
-        filepath = _safe_path(workdir, args.filename)
-    except ValueError as e:
-        _out({"success": False, "error": str(e)})
+    filepath = _resolve_filepath(workdir, args.filename)
+    if filepath is None:
         return
     if not os.path.exists(filepath):
         _out(_file_not_found_response(workdir, args.filename))
@@ -506,10 +462,8 @@ def cmd_outline(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
     filename, _section = _split_filename_section(args.filename)
     args.filename = _resolve_wikilink(workdir, filename)
-    try:
-        filepath = _safe_path(workdir, args.filename)
-    except ValueError as e:
-        _out({"success": False, "error": str(e)})
+    filepath = _resolve_filepath(workdir, args.filename)
+    if filepath is None:
         return
     if not os.path.isfile(filepath):
         _out(_file_not_found_response(workdir, args.filename))
@@ -530,10 +484,8 @@ def cmd_read_section(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
     filename, embedded_section = _split_filename_section(args.filename)
     args.filename = _resolve_wikilink(workdir, filename)
-    try:
-        filepath = _safe_path(workdir, args.filename)
-    except ValueError as e:
-        _out({"success": False, "error": str(e)})
+    filepath = _resolve_filepath(workdir, args.filename)
+    if filepath is None:
         return
     if not os.path.isfile(filepath):
         _out(_file_not_found_response(workdir, args.filename))
@@ -545,10 +497,8 @@ def cmd_delete(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
     filename, _section = _split_filename_section(args.filename)
     args.filename = _resolve_wikilink(workdir, filename)
-    try:
-        filepath = _safe_path(workdir, args.filename)
-    except ValueError as e:
-        _out({"success": False, "error": str(e)})
+    filepath = _resolve_filepath(workdir, args.filename)
+    if filepath is None:
         return
     if not os.path.exists(filepath):
         _out({"success": False, "error": f"File '{args.filename}' not found."})
@@ -562,10 +512,8 @@ def cmd_delete(args) -> None:
 
 def cmd_write(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
-    try:
-        filepath = _safe_path(workdir, args.filename)
-    except ValueError as e:
-        _out({"success": False, "error": str(e)})
+    filepath = _resolve_filepath(workdir, args.filename)
+    if filepath is None:
         return
     # Accept content from --content flag, CONTENT env var, or stdin
     if args.content is not None:
@@ -584,10 +532,8 @@ def cmd_write(args) -> None:
 
 def cmd_edit(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
-    try:
-        filepath = _safe_path(workdir, args.filename)
-    except ValueError as e:
-        _out({"success": False, "error": str(e)})
+    filepath = _resolve_filepath(workdir, args.filename)
+    if filepath is None:
         return
     if not os.path.exists(filepath):
         _out(_file_not_found_response(workdir, args.filename))
@@ -664,10 +610,8 @@ def cmd_grep(args) -> None:
     if args.filename:
         filename, _section = _split_filename_section(args.filename)
         args.filename = _resolve_wikilink(workdir, filename)
-        try:
-            filepath = _safe_path(workdir, args.filename)
-        except ValueError as e:
-            _out({"success": False, "error": str(e)})
+        filepath = _resolve_filepath(workdir, args.filename)
+        if filepath is None:
             return
         if not os.path.isfile(filepath):
             _out(_file_not_found_response(workdir, args.filename))
