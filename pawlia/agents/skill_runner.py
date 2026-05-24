@@ -31,7 +31,7 @@ from pawlia.tools.base import ToolExecutionResult, ToolRegistry
 
 _RE_CODE_BLOCK = re.compile(r"```(?:bash|sh)?\s*\n(.+?)```", re.DOTALL)
 _RE_ANY_CODE_BLOCK = re.compile(r"```[^\n]*\n(.+?)```", re.DOTALL)
-_RE_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
+from pawlia.agents.chat import _RE_TOOL_CALL_TAG
 
 
 def _repair_tool_args(args: Any) -> Dict[str, Any]:

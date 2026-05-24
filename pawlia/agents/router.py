@@ -6,14 +6,10 @@ backend based on the active model's provider backend.
 
 from __future__ import annotations
 
-import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from pawlia.agents.chat import DEFAULT_SYSTEM_PROMPT, ChatAgent
+from pawlia.agents.chat import DEFAULT_SYSTEM_PROMPT, ChatAgent, _SENTENCE_RE
 from pawlia.backends.hermes import HermesBackend
-
-
-_SENTENCE_RE = re.compile(r"[.!?…]\s")
 
 
 class _BackendLLMInfo:
