@@ -295,20 +295,8 @@ class ChecklistProcessor:
 
     @staticmethod
     def _read_frontmatter(filepath: str) -> dict | None:
-        try:
-            with open(filepath, encoding="utf-8") as f:
-                text = f.read()
-        except Exception:
-            return None
-        if not text.lstrip().startswith("---"):
-            return None
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return None
-        try:
-            return yaml.safe_load(parts[1]) or {}
-        except Exception:
-            return None
+        from pawlia.utils import parse_frontmatter
+        return parse_frontmatter(filepath)
 
     @staticmethod
     def _interpolate(message: str, event: dict) -> str:

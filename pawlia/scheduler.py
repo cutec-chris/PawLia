@@ -24,7 +24,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 import yaml
 
-from pawlia.automation import ChecklistProcessor, JobRunner, TaskReminderProcessor
+from pawlia.automation import ChecklistProcessor, JobRunner, TaskReminderProcessor, _load_state, _save_state, _state_path
 from pawlia.memory import _format_workspace_refs, estimate_tokens
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import load_json, save_json
@@ -45,52 +45,15 @@ logger = logging.getLogger("pawlia.scheduler")
 
 
 # ---------------------------------------------------------------------------
-# Scheduler state I/O (separate from workspace to keep vault clean)
-# ---------------------------------------------------------------------------
-
-def _state_path(session_dir: str, user_id: str) -> str:
-    return os.path.join(session_dir, user_id, "scheduler_state.json")
-
-
-def _load_state(session_dir: str, user_id: str) -> dict:
-    path = _state_path(session_dir, user_id)
-    if os.path.exists(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def _save_state(session_dir: str, user_id: str, state: dict) -> None:
-    path = _state_path(session_dir, user_id)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
-
-
-# ---------------------------------------------------------------------------
 # Markdown event parsing
 # ---------------------------------------------------------------------------
 
 def _read_event_frontmatter(filepath: str) -> dict | None:
     """Parse frontmatter from an event .md file."""
-    try:
-        with open(filepath, encoding="utf-8") as f:
-            text = f.read()
-    except Exception:
-        return None
-    if not text.lstrip().startswith("---"):
-        return None
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None
-    try:
-        fm = yaml.safe_load(parts[1]) or {}
-    except Exception:
-        return None
-    fm["_filename"] = os.path.basename(filepath)
+    from pawlia.utils import parse_frontmatter
+    fm = parse_frontmatter(filepath)
+    if fm is not None:
+        fm["_filename"] = os.path.basename(filepath)
     return fm
 
 
