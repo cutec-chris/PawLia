@@ -179,7 +179,6 @@ def _find_skill(name: str) -> Path:
 
 def _parse_frontmatter(skill_md: Path):
     """Parse YAML frontmatter from a SKILL.md file."""
-    import yaml
     with open(skill_md, encoding="utf-8") as f:
         content = f.read()
     parts = content.split("---", 2)
@@ -727,25 +726,8 @@ def _load_root_config() -> dict:
     return {}
 
 
-def cmd_implement(args):
-    """Implement skill scripts using a coding backend (aider/opencode/llm)."""
-    if str(PROJECT_ROOT) not in sys.path:
-        sys.path.insert(0, str(PROJECT_ROOT))
-    from pawlia.coding import run_implement
-
-    name = args.name
-    skill_path = _find_skill(name)
-    if not skill_path:
-        print(json.dumps({
-            "success": False,
-            "error": f"Skill '{name}' not found (checked workspace + bundled)",
-        }))
-        sys.exit(1)
-
-    config = _load_root_config()
-    task = args.task or "Implement all scripts and a harness for this skill"
-    result = run_implement(skill_path, task, config)
-
+def _output_coding_result(name: str, result: dict):
+    """Print JSON result for coding backends and exit on failure."""
     print(json.dumps({
         "success": result.get("ok", False),
         "name": name,
@@ -755,9 +737,34 @@ def cmd_implement(args):
         "output": (result.get("output") or "")[-1500:],
         "error": result.get("error", ""),
     }, ensure_ascii=False))
-
     if not result.get("ok"):
         sys.exit(1)
+
+
+def _find_and_load_skill(name: str) -> Path:
+    """Resolve skill path or print error + exit if not found."""
+    skill_path = _find_skill(name)
+    if not skill_path:
+        print(json.dumps({
+            "success": False,
+            "error": f"Skill '{name}' not found (checked workspace + bundled)",
+        }))
+        sys.exit(1)
+    return skill_path
+
+
+def cmd_implement(args):
+    """Implement skill scripts using a coding backend (aider/opencode/llm)."""
+    if str(PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(PROJECT_ROOT))
+    from pawlia.coding import run_implement
+
+    name = args.name
+    skill_path = _find_and_load_skill(name)
+    config = _load_root_config()
+    task = args.task or "Implement all scripts and a harness for this skill"
+    result = run_implement(skill_path, task, config)
+    _output_coding_result(name, result)
 
 
 def cmd_fix(args):
@@ -767,31 +774,12 @@ def cmd_fix(args):
     from pawlia.coding import run_fix
 
     name = args.name
-    skill_path = _find_skill(name)
-    if not skill_path:
-        print(json.dumps({
-            "success": False,
-            "error": f"Skill '{name}' not found (checked workspace + bundled)",
-        }))
-        sys.exit(1)
-
+    skill_path = _find_and_load_skill(name)
     config = _load_root_config()
     error = args.error or ""
     command = args.failed_cmd or ""
     result = run_fix(skill_path, error, command, config)
-
-    print(json.dumps({
-        "success": result.get("ok", False),
-        "name": name,
-        "backend": result.get("backend", "unknown"),
-        "files_written": result.get("files_written", []),
-        "files_modified": result.get("files_modified", []),
-        "output": (result.get("output") or "")[-1500:],
-        "error": result.get("error", ""),
-    }, ensure_ascii=False))
-
-    if not result.get("ok"):
-        sys.exit(1)
+    _output_coding_result(name, result)
 
 
 # ── CLI ────────────────────────────────────────────────────────────────
