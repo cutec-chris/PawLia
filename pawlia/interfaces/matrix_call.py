@@ -395,6 +395,18 @@ class CallSession:
         self._exception_handler_installed = False
         self._original_exception_handler = None
 
+        # Full-call audio recorder
+        voip_rec_cfg = voip_cfg.get("recording", {}) if isinstance(voip_cfg, dict) else {}
+        self._recorder: Optional["CallRecorder"] = None
+        if voip_rec_cfg.get("enabled", True):
+            from pawlia.audio.recorder import CallRecorder
+            self._recorder = CallRecorder(
+                call_id=call_id,
+                record_dir=voip_rec_cfg.get("directory"),
+                sample_rate=SAMPLE_RATE,
+                compress_to_flac=voip_rec_cfg.get("compress_flac", True),
+            )
+
     def _mark_activity(self) -> None:
         """Record user or bot activity to keep the call alive."""
         self._last_activity_at = time.monotonic()
@@ -942,6 +954,13 @@ class CallSession:
         if self._pc:
             await self._pc.close()
 
+        # Finalise call recording
+        if self._recorder is not None:
+            try:
+                self._recorder.finish()
+            except Exception as e:
+                logger.debug("call %s: recording finish failed: %s", self.call_id[:8], e)
+
         # Restore the original asyncio exception handler
         if getattr(self, "_exception_handler_installed", False):
             try:
@@ -1330,6 +1349,10 @@ class CallSession:
                     pcm = raw.reshape(-1, n_channels).astype(np.float32).mean(axis=1) / 32768.0
                 else:
                     pcm = raw.astype(np.float32) / 32768.0
+
+                # Record full call audio
+                if self._recorder is not None:
+                    self._recorder.push(pcm)
 
                 rms = float(np.sqrt(np.mean(pcm ** 2)))
                 if frames_received <= 5:

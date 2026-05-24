@@ -326,6 +326,12 @@ class Scheduler:
         self._git_weekly_done: Dict[str, str] = {}   # user_id → week of last weekly squash
         self._apply_git_config()
 
+        # Recording rotation config
+        rec_cfg = self._config.get("voip", {}).get("recording", {}) if self._config else {}
+        self._rec_rotation_enabled = rec_cfg.get("rotate_enabled", True)
+        self._rec_retention_days = int(rec_cfg.get("retention_days", 7))
+        self._rec_last_rotation: Optional[str] = None  # date string of last rotation
+
     @property
     def memory_indexer(self):
         if self._memory_indexer is None:
@@ -522,6 +528,17 @@ class Scheduler:
                     await self._git_sync(user_id)
                 except Exception as e:
                     logger.error("Git sync failed for %s: %s", user_id, e)
+
+        # ── Recording rotation (daily) ──
+        if self._rec_rotation_enabled:
+            today = datetime.now().strftime("%Y-%m-%d")
+            if self._rec_last_rotation != today:
+                try:
+                    from pawlia.audio.recorder import rotate_recordings
+                    rotate_recordings(retention_days=self._rec_retention_days)
+                    self._rec_last_rotation = today
+                except Exception as e:
+                    logger.error("Recording rotation failed: %s", e)
 
     async def _git_sync(self, user_id: str) -> None:
         """Auto-commit workspace changes and run daily/weekly squash when due."""
