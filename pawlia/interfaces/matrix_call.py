@@ -392,6 +392,8 @@ class CallSession:
         voip_cfg = self._voip_cfg
         self._agc = AGCController(voip_cfg, context=ctx)
         self._speech_detector = SpeechDetector(voip_cfg, context=ctx)
+        self._exception_handler_installed = False
+        self._original_exception_handler = None
 
     def _mark_activity(self) -> None:
         """Record user or bot activity to keep the call alive."""
@@ -518,7 +520,33 @@ class CallSession:
             return None
 
         for _name in ("aiortc", "aioice"):
-            logging.getLogger(_name).setLevel(logging.WARNING)
+            logging.getLogger(_name).setLevel(logging.ERROR)
+        # Suppress noisy aiohttp connection pool warnings
+        logging.getLogger("aiohttp").setLevel(logging.WARNING)
+
+        # Install a per-call asyncio exception handler to catch and suppress
+        # known non-fatal TURN CHANNEL_BIND errors that leak from aioice when
+        # the peer connection closes before all TURN tasks complete.
+        loop = asyncio.get_event_loop()
+        original_handler = loop.get_exception_handler()
+        self._original_exception_handler = original_handler
+
+        def _turn_aware_handler(loop, context):
+            exc = context.get("exception")
+            msg = str(exc) if exc else ""
+            if "CHANNEL_BIND" in msg or "TransactionFailed" in msg:
+                logger.debug(
+                    "call %s: suppressed known aioice TURN error: %s",
+                    self.call_id[:8], msg,
+                )
+                return
+            if original_handler:
+                original_handler(loop, context)
+            else:
+                loop.default_exception_handler(context)
+
+        loop.set_exception_handler(_turn_aware_handler)
+        self._exception_handler_installed = True
 
         ice_servers = await self._get_ice_servers()
         self._pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
@@ -913,6 +941,15 @@ class CallSession:
             self._prepare_greeting_task.cancel()
         if self._pc:
             await self._pc.close()
+
+        # Restore the original asyncio exception handler
+        if getattr(self, "_exception_handler_installed", False):
+            try:
+                loop = asyncio.get_event_loop()
+                loop.set_exception_handler(getattr(self, "_original_exception_handler", None))
+            except Exception:
+                pass
+
         await self._send_status("Telefonat beendet")
         logger.info("call %s hung up", self.call_id[:8])
 
