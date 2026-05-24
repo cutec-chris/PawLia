@@ -7,6 +7,7 @@ Provides a factory for creating ChatAgents per user session.
 import logging
 import os
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from pawlia.config import load_config
@@ -42,6 +43,7 @@ class App:
         self.memory = MemoryManager(self.session_dir, logger=self.logger.getChild("memory"))
         self._pkg_dir = pkg_dir
         self._skills_lock = threading.Lock()
+        self._workspace_skills_cache: Dict[str, tuple] = {}  # user_id → (skills_dict, dir_mtime)
         self._initialize_runtime()
 
         # Scheduler for proactive reminders / event notifications
@@ -95,6 +97,7 @@ class App:
         self._initialize_runtime()
         self.scheduler.reload_config(self.config)
         self.scheduler.set_app(self)
+        self._workspace_skills_cache.clear()
 
         self.logger.info(
             "Reloaded config from %s (%d bundled skills, %d model definitions)",
@@ -110,10 +113,25 @@ class App:
             "model_count": len(self.config.get("models") or {}),
         }
 
+    def _workspace_skills_mtime(self, workspace_skills_dir: str) -> float:
+        """Get the newest mtime of any SKILL.md in the workspace skills tree."""
+        max_mtime = 0.0
+        for root, dirs, files in os.walk(workspace_skills_dir):
+            for f in files:
+                if f == "SKILL.md":
+                    try:
+                        mt = os.path.getmtime(os.path.join(root, f))
+                        if mt > max_mtime:
+                            max_mtime = mt
+                    except OSError:
+                        pass
+        return max_mtime
+
     def _discover_user_workspace_skills(self, user_id: str) -> Dict[str, AgentSkill]:
         """Discover workspace skills for a single user.
 
         Returns only the skills from ``session/<user_id>/workspace/skills/``.
+        Cached by directory mtime — only re-discovers when SKILL.md files change.
         Thread-safe via ``_skills_lock``.
         """
         allow_workspace = self.config.get("skill-install", {}).get("allow_workspace", True)
@@ -125,14 +143,23 @@ class App:
         if not os.path.isdir(workspace_skills_dir):
             return {}
 
-        require_workflow = self.config.get("workflow", {}).get("require_compiled", False)
+        current_mtime = self._workspace_skills_mtime(workspace_skills_dir)
 
         with self._skills_lock:
-            return SkillLoader.discover(
+            cached = self._workspace_skills_cache.get(user_id)
+            if cached is not None:
+                cached_skills, cached_mtime = cached
+                if cached_mtime == current_mtime:
+                    return cached_skills
+
+            require_workflow = self.config.get("workflow", {}).get("require_compiled", False)
+            skills = SkillLoader.discover(
                 workspace_skills_dir, self.config,
                 workspace_dir=workspace_dir,
                 require_workflow=require_workflow,
             )
+            self._workspace_skills_cache[user_id] = (skills, current_mtime)
+            return skills
 
     def _build_user_skills(self, user_id: str, disabled: Optional[List[str]] = None) -> Dict[str, AgentSkill]:
         """Return bundled + workspace skills, minus any session-disabled ones."""
