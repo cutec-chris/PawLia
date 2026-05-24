@@ -67,6 +67,48 @@ def _ci_resolve(base: str, rel: str) -> str:
     return current
 
 
+def _suggest_similar_files(workdir: str, filename: str, limit: int = 5) -> list[str]:
+    """Return up to *limit* files that look similar to the requested filename."""
+    base = filename.replace(".md", "").lower()
+    suggestions = []
+    for _, rel_path in _walk_files(workdir):
+        if not rel_path.endswith(".md"):
+            continue
+        rel_lower = rel_path.lower()
+        # Check if any part of the requested path appears in the file
+        parts = [p.lower() for p in base.replace("/", " ").split()]
+        score = sum(1 for p in parts if p in rel_lower)
+        if score > 0:
+            suggestions.append((score, rel_path))
+    suggestions.sort(key=lambda x: -x[0])
+    return [p for _, p in suggestions[:limit]]
+
+
+def _file_not_found_response(workdir: str, filename: str) -> dict:
+    """Build a helpful 'file not found' response with suggestions."""
+    result = {"success": False, "error": f"File '{filename}' not found."}
+
+    # Suggest similar files
+    similar = _suggest_similar_files(workdir, filename)
+    if similar:
+        result["suggestions"] = similar
+        result["hint"] = (
+            "Did you mean one of these? Pass the exact path to retry. "
+            "For wikilinks like [[person/name]], the file is usually under wiki/topics/."
+        )
+
+    # If it looks like a wikilink slug, remind about wiki/topics/
+    if "/" not in filename and not filename.startswith("[["):
+        wiki_path = f"wiki/topics/{filename}"
+        if not filename.endswith(".md"):
+            wiki_path += ".md"
+        if os.path.isfile(os.path.join(workdir, wiki_path)):
+            result["suggestions"] = [wiki_path]
+            result["hint"] = f"File exists at: {wiki_path}"
+
+    return result
+
+
 def _safe_path(workdir: str, filename: str) -> str:
     resolved = os.path.realpath(_ci_resolve(workdir, filename))
     root = os.path.realpath(workdir)
@@ -123,10 +165,11 @@ def _resolve_wikilink(workdir: str, filename: str) -> str:
     """If *filename* is a [[wikilink]], resolve it to a workspace-relative path.
 
     Resolution order:
-    1. Contains a slash → treated as path (`.md` appended if missing).
-    2. Slug only → `wiki/topics/{slug}.md` if it exists.
-    3. Fallback: first `{slug}.md` found anywhere in the workspace.
-    4. If nothing found, return `wiki/topics/{slug}.md` as best guess.
+    1. Exact path match (with/without .md).
+    2. If first path component is a wiki topic dir → try wiki/topics/{path}.md.
+    3. Slug only → try wiki/topics/{slug}.md.
+    4. Fallback: search entire workspace for matching filename.
+    5. If nothing found, return best guess.
     """
     m = _WIKILINK_INPUT_RE.match(filename.strip())
     if not m:
@@ -134,19 +177,39 @@ def _resolve_wikilink(workdir: str, filename: str) -> str:
 
     ref = m.group(1).strip()
 
-    # Path-style reference (contains slash)
+    # --- Path-style reference (contains slash) ---
     if "/" in ref:
         candidate = ref if ref.endswith(".md") else ref + ".md"
+
+        # 1. Direct path match
         if os.path.isfile(os.path.join(workdir, candidate)):
             return candidate
+
+        # 2. If first component is a wiki topic dir, try wiki/topics/{path}.md
         first = ref.split("/", 1)[0]
         if first in _WIKI_TOPIC_DIRS and not ref.startswith("wiki/topics/"):
             typed_candidate = f"wiki/topics/{candidate}"
             if os.path.isfile(os.path.join(workdir, typed_candidate)):
                 return typed_candidate
+
+        # 3. Search entire workspace for the filename (basename match)
+        basename = os.path.basename(candidate)
+        for dirpath, _dirs, files in os.walk(workdir):
+            if basename in files:
+                rel = os.path.relpath(os.path.join(dirpath, basename), workdir)
+                return rel.replace(os.sep, "/")
+
+        # 4. Fuzzy: search for files containing the slug parts
+        slug_parts = ref.replace("/", " ").lower()
+        for dirpath, _dirs, files in os.walk(workdir):
+            for f in files:
+                if f.endswith(".md") and slug_parts in f.lower().replace("_", " ").replace("-", " "):
+                    rel = os.path.relpath(os.path.join(dirpath, f), workdir)
+                    return rel.replace(os.sep, "/")
+
         return candidate
 
-    # Slug-style: wiki/topics first
+    # --- Slug-style: wiki/topics first ---
     wiki_candidate = f"wiki/topics/{ref}.md"
     if os.path.isfile(os.path.join(workdir, wiki_candidate)):
         return wiki_candidate
@@ -157,6 +220,68 @@ def _resolve_wikilink(workdir: str, filename: str) -> str:
         if target in files:
             rel = os.path.relpath(os.path.join(dirpath, target), workdir)
             return rel.replace(os.sep, "/")
+
+    # Fuzzy: search for files containing the slug
+    slug_lower = ref.lower()
+    for dirpath, _dirs, files in os.walk(workdir):
+        for f in files:
+            if f.endswith(".md") and slug_lower in f.lower().replace("_", " ").replace("-", " "):
+                rel = os.path.relpath(os.path.join(dirpath, f), workdir)
+                return rel.replace(os.sep, "/")
+
+    # Nothing found — return wiki/topics guess (will produce "not found" naturally)
+    return wiki_candidate
+
+    # Search entire workspace for {slug}.md
+    target = f"{ref}.md"
+    for dirpath, _dirs, files in os.walk(workdir):
+        if target in files:
+            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
+            return rel.replace(os.sep, "/")
+
+    # Fuzzy: search for files containing the slug
+    slug_lower = ref.lower()
+    for dirpath, _dirs, files in os.walk(workdir):
+        for f in files:
+            if f.endswith(".md") and slug_lower in f.lower().replace("_", " ").replace("-", " "):
+                rel = os.path.relpath(os.path.join(dirpath, f), workdir)
+                return rel.replace(os.sep, "/")
+
+    # Nothing found — return wiki/topics guess (will produce "not found" naturally)
+    return wiki_candidate
+
+    # Search entire workspace for {slug}.md
+    target = f"{ref}.md"
+    for dirpath, _dirs, files in os.walk(workdir):
+        if target in files:
+            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
+            return rel.replace(os.sep, "/")
+
+    # Fuzzy: search for files containing the slug
+    slug_lower = ref.lower()
+    for dirpath, _dirs, files in os.walk(workdir):
+        for f in files:
+            if f.endswith(".md") and slug_lower in f.lower().replace("_", " ").replace("-", " "):
+                rel = os.path.relpath(os.path.join(dirpath, f), workdir)
+                return rel.replace(os.sep, "/")
+
+    # Nothing found — return wiki/topics guess (will produce "not found" naturally)
+    return wiki_candidate
+
+    # Search entire workspace for {slug}.md
+    target = f"{ref}.md"
+    for dirpath, _dirs, files in os.walk(workdir):
+        if target in files:
+            rel = os.path.relpath(os.path.join(dirpath, target), workdir)
+            return rel.replace(os.sep, "/")
+
+    # Fuzzy: search for files containing the slug
+    slug_lower = ref.lower()
+    for dirpath, _dirs, files in os.walk(workdir):
+        for f in files:
+            if f.endswith(".md") and slug_lower in f.lower().replace("_", " ").replace("-", " "):
+                rel = os.path.relpath(os.path.join(dirpath, f), workdir)
+                return rel.replace(os.sep, "/")
 
     # Nothing found — return wiki/topics guess (will produce "not found" naturally)
     return wiki_candidate
@@ -319,7 +444,7 @@ def cmd_read(args) -> None:
         _out({"success": False, "error": str(e)})
         return
     if not os.path.exists(filepath):
-        _out({"success": False, "error": f"File '{args.filename}' not found."})
+        _out(_file_not_found_response(workdir, args.filename))
         return
     if os.path.isdir(filepath):
         _out({"success": False, "error": f"'{args.filename}' is a directory."})
@@ -387,7 +512,7 @@ def cmd_outline(args) -> None:
         _out({"success": False, "error": str(e)})
         return
     if not os.path.isfile(filepath):
-        _out({"success": False, "error": f"File '{args.filename}' not found."})
+        _out(_file_not_found_response(workdir, args.filename))
         return
     with open(filepath, "r", encoding="utf-8") as f:
         lines = f.readlines()
@@ -411,7 +536,7 @@ def cmd_read_section(args) -> None:
         _out({"success": False, "error": str(e)})
         return
     if not os.path.isfile(filepath):
-        _out({"success": False, "error": f"File '{args.filename}' not found."})
+        _out(_file_not_found_response(workdir, args.filename))
         return
     _out(_load_section(filepath, args.filename, embedded_section or args.section))
 
@@ -465,7 +590,7 @@ def cmd_edit(args) -> None:
         _out({"success": False, "error": str(e)})
         return
     if not os.path.exists(filepath):
-        _out({"success": False, "error": f"File '{args.filename}' not found."})
+        _out(_file_not_found_response(workdir, args.filename))
         return
     if os.path.isdir(filepath):
         _out({"success": False, "error": f"'{args.filename}' is a directory."})
@@ -545,7 +670,7 @@ def cmd_grep(args) -> None:
             _out({"success": False, "error": str(e)})
             return
         if not os.path.isfile(filepath):
-            _out({"success": False, "error": f"File '{args.filename}' not found."})
+            _out(_file_not_found_response(workdir, args.filename))
             return
         targets = [(filepath, os.path.relpath(filepath, workdir).replace(os.sep, "/"))]
     else:

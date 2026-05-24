@@ -1,0 +1,135 @@
+[
+  {
+    "idx": 0,
+    "desc": "Fetch ARK data from wiki (implicit researcher/files)",
+    "status": "PASS",
+    "tool_turns": 5,
+    "keywords_matched": [
+      "taming",
+      "breeding",
+      "boss",
+      "information"
+    ],
+    "keyword_ratio": 0.8,
+    "response_len": 477,
+    "time": 14.229262351989746,
+    "response_preview": "Die drei Seiten wurden erfolgreich heruntergeladen und in einem eigenen Forschungs‑Projekt **`ark-notes`** gespeichert:  - **Taming** – `https://ark.wiki.gg/wiki/Taming` - **Breeding** – `https://ark."
+  },
+  {
+    "idx": 1,
+    "desc": "Researcher-grounded answer on taming",
+    "status": "PASS",
+    "tool_turns": 4,
+    "keywords_matched": [
+      "taming",
+      "narcotic",
+      "torpor",
+      "food"
+    ],
+    "keyword_ratio": 0.6666666666666666,
+    "response_len": 5192,
+    "time": 19.566593885421753,
+    "response_preview": "## Taming‑System in **ARK Survival Ascended** (Zusammenfassung aus den heruntergeladenen Notizen)  ### 1. Grundprinzipien | Aspekt | Beschreibung | |--------|--------------| | **Ziel** | Ein Tier bewu"
+  },
+  {
+    "idx": 2,
+    "desc": "Cross-context: breeding + boss + taming",
+    "status": "ERROR",
+    "error": "BadRequestError: Error code: 400 - {'error': {'message': \"Tool call validation failed: tool call validation failed: parameters for tool files did not match schema: errors: [missing properties: 'query', additionalProperties 'line_start', 'line_end', 'path' not allowed]\", 'type': 'invalid_request_error', 'code': 'tool_use_failed', 'failed_generation': '{\"name\": \"files\", \"arguments\": {\"path\":\"workspace/research/ark-notes/bosses--4f94e256.md\",\"line_start\":1,\"line_end\":200}}'}}",
+    "time": 7.625807285308838,
+    "response": "",
+    "tool_turns": 0,
+    "keywords_matched": [],
+    "keyword_ratio": 0,
+    "response_len": 0,
+    "response_preview": ""
+  },
+  {
+    "idx": 3,
+    "desc": "Web search + researcher synthesis",
+    "status": "PASS",
+    "tool_turns": 3,
+    "keywords_matched": [
+      "artifact",
+      "obelisk",
+      "tribute"
+    ],
+    "keyword_ratio": 0.5,
+    "response_len": 4211,
+    "time": 31.193670988082886,
+    "response_preview": "## Boss‑Arena‑Tribute auf **The Island** (ARK Survival Ascended)  | Boss | Benötigte Tribute‑Items (Standard‑Server) | Menge | Hinweis / mögliche Varianten | |------|----------------------------------"
+  },
+  {
+    "idx": 4,
+    "desc": "MEMORY: reference earlier recommendation",
+    "status": "PASS",
+    "tool_turns": 1,
+    "keywords_matched": [
+      "empfohlen",
+      "boss"
+    ],
+    "keyword_ratio": 0.4,
+    "response_len": 405,
+    "time": 2.1371471881866455,
+    "response_preview": "Ich habe leider keine vorherige Erinnerung daran, welche Dinosaurier ich dir für den Bosskampf empfohlen habe.    Möchtest du, dass ich dir jetzt erneut eine passende Auswahl an Tame‑Dinos zusammenste"
+  },
+  {
+    "idx": 5,
+    "desc": "MEMORY: summarize all topics",
+    "status": "PASS",
+    "tool_turns": 2,
+    "keywords_matched": [
+      "taming",
+      "boss",
+      "breeding",
+      "island"
+    ],
+    "keyword_ratio": 0.8,
+    "response_len": 1685,
+    "time": 17.974727392196655,
+    "response_preview": "**Bisher besprochene ARK‑Themen (nach meinem Gedächtnis)**    1. **Taming‑System** – Grundlagen, Torpor‑Management, Taming‑Effectiveness, verschiedene Taming‑Methoden (KO‑Taming, Turret‑KO, Non‑Violen"
+  },
+  {
+    "idx": 6,
+    "desc": "Specific stat query",
+    "status": "PASS",
+    "tool_turns": 2,
+    "keywords_matched": [
+      "speed",
+      "geschwindigkeit",
+      "rex",
+      "spino"
+    ],
+    "keyword_ratio": 0.8,
+    "response_len": 1321,
+    "time": 11.403560638427734,
+    "response_preview": "**Geschwindigkeits‑Werte (Basis‑Movement‑Speed) aus dem offiziellen ARK‑Wiki (ARK Survival Ascended)**    | Kreatur | Basis‑Movement‑Speed (Einheiten) | Quelle (Wiki‑Seite) | |---------|--------------"
+  },
+  {
+    "idx": 7,
+    "desc": "Boss raid equipment recommendations",
+    "status": "PASS",
+    "tool_turns": 37,
+    "keywords_matched": [
+      "sattel",
+      "waffe",
+      "rüstung",
+      "rex"
+    ],
+    "keyword_ratio": 0.5714285714285714,
+    "response_len": 5133,
+    "time": 183.6670560836792,
+    "response_preview": "**Ausrüstung für einen Boss‑Raid mit 10 Rexen (ARK Survival Ascended)**    ---  ### 1. Rex‑Sattel & Rüstung   | Item | Warum wichtig | |------|----------------| | **Rex‑Sattel** (hochwertig) | Gibt **"
+  },
+  {
+    "idx": 8,
+    "desc": "Gameplay knowledge question",
+    "status": "FAIL",
+    "tool_turns": 1,
+    "keywords_matched": [],
+    "keyword_ratio": 0.0,
+    "response_len": 335,
+    "time": 11.025431394577026,
+    "response_preview": "Ich habe den Abschnitt **„Raise‑only Taming“** aus deinen Ark‑Notizen gelesen.   Falls du jetzt Fragen zu den dort aufgeführten Kreaturen, deren Eier, Nest‑Standorten oder den speziellen Vorgehensweis"
+  }
+]
