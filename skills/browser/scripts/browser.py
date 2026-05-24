@@ -992,23 +992,14 @@ def _classify_connection_error(exc: requests.RequestException) -> str:
     return f"CONNECTION_ERROR: {exc}"
 
 
-def cmd_open(url: str):
-    session = load_session()
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    try:
-        resp, http = fetch(url, session)
-    except requests.RequestException as e:
-        classified = _classify_connection_error(e)
-        sys.exit(classified)
-
+def _render_page(session: dict, resp, http, save_history: bool = True):
+    """Render HTML response, update session, save, and print output."""
     final_url = resp.url
     html = get_html(resp)
     cookies = cookies_to_dict(http.cookies)
 
-    # Save history
     history = session.get("history", [])
-    if session.get("url"):
+    if save_history and session.get("url"):
         history.append(session["url"])
     history = history[-10:]
 
@@ -1026,6 +1017,18 @@ def cmd_open(url: str):
     })
     save_session(session)
     print(format_output(final_url, title, md, elements, forms))
+
+
+def cmd_open(url: str):
+    session = load_session()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    try:
+        resp, http = fetch(url, session)
+    except requests.RequestException as e:
+        classified = _classify_connection_error(e)
+        sys.exit(classified)
+    _render_page(session, resp, http)
 
 
 def cmd_show():
@@ -1144,34 +1147,13 @@ def _submit_form(form_id: str, form: dict, session: dict):
         cmd_open(new_url)
     else:
         # POST
-    try:
-        resp, http = fetch(action, session, method="POST", data=data)
-    except requests.RequestException as e:
-        classified = _classify_connection_error(e)
-        sys.exit(classified)
+        try:
+            resp, http = fetch(action, session, method="POST", data=data)
+        except requests.RequestException as e:
+            classified = _classify_connection_error(e)
+            sys.exit(classified)
 
-        final_url = resp.url
-        html = get_html(resp)
-        cookies = cookies_to_dict(http.cookies)
-
-        history = session.get("history", [])
-        if session.get("url"):
-            history.append(session["url"])
-        history = history[-10:]
-
-        md, elements, forms_new, title = render_html(html, final_url)
-        session.update({
-            "url": final_url,
-            "html": html,
-            "title": title,
-            "cookies": cookies,
-            "history": history,
-            "elements": elements,
-            "forms": forms_new,
-            "rendered": md,
-        })
-        save_session(session)
-        print(format_output(final_url, title, md, elements, forms_new))
+        _render_page(session, resp, http)
 
 
 def cmd_open_with_session(url: str, session: dict):
@@ -1183,23 +1165,7 @@ def cmd_open_with_session(url: str, session: dict):
     except requests.RequestException as e:
         classified = _classify_connection_error(e)
         sys.exit(classified)
-
-    final_url = resp.url
-    html = get_html(resp)
-    cookies = cookies_to_dict(http.cookies)
-
-    md, elements, forms, title = render_html(html, final_url)
-    session.update({
-        "url": final_url,
-        "html": html,
-        "title": title,
-        "cookies": cookies,
-        "elements": elements,
-        "forms": forms,
-        "rendered": md,
-    })
-    save_session(session)
-    print(format_output(final_url, title, md, elements, forms))
+    _render_page(session, resp, http, save_history=False)
 
 
 # ---------------------------------------------------------------------------
