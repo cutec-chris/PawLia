@@ -29,6 +29,7 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
     resp.raise_for_status()
     data = resp.json()
 
+    answer = data.get("message", "")
     sources = []
     for s in data.get("sources", []):
         meta = s.get("metadata", {})
@@ -38,10 +39,42 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             "snippet": s.get("pageContent", "")[:300],
         })
 
-    return {
-        "answer": data.get("message", ""),
+    # Detect unhelpful/empty results so the LLM can react appropriately
+    result_quality = "good"
+    quality_hints = []
+    if not answer or len(answer.strip()) < 20:
+        result_quality = "empty"
+        quality_hints.append("Answer is empty or very short — no information found.")
+    elif any(phrase in answer.lower() for phrase in (
+        "leider konnte ich keine",
+        "konnte leider keine",
+        "keine spezifischen informationen",
+        "no specific information",
+        "could not find",
+        "couldn't find",
+        "i was unable",
+        "i could not",
+        "no results found",
+        "no information available",
+        "nicht gefunden",
+    )):
+        result_quality = "no_results"
+        quality_hints.append("Search returned no useful results for this query.")
+
+    if not sources:
+        quality_hints.append("No sources were returned.")
+    elif len(sources) == 1 and not sources[0]["url"]:
+        quality_hints.append("Only one source with no URL — likely a generic response.")
+
+    result = {
+        "answer": answer,
         "sources": sources,
     }
+    if quality_hints:
+        result["quality"] = result_quality
+        result["hints"] = quality_hints
+
+    return result
 
 
 def main():

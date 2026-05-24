@@ -915,6 +915,83 @@ def format_output(url: str, title: str, markdown: str, elements: dict, forms: di
 # Commands
 # ---------------------------------------------------------------------------
 
+def _classify_connection_error(exc: requests.RequestException) -> str:
+    """Return a short, actionable error classification for the LLM.
+
+    The goal is to help the model decide whether a retry makes sense:
+    - DNS errors → domain doesn't exist, retry is pointless
+    - Connection refused → server is down, retry is pointless
+    - SSL errors → may work with http:// instead
+    - Timeout → may be transient, retry could help
+    """
+    err_str = str(exc).lower()
+
+    # DNS resolution failures
+    if any(kw in err_str for kw in (
+        "name does not resolve",
+        "name resolution",
+        "nodename nor servname",
+        "getaddrinfo",
+        "dns",
+    )):
+        return (
+            f"DNS_ERROR: The domain could not be resolved. "
+            f"The hostname does not exist or is not reachable from this network. "
+            f"Retry will not help — try a different URL or domain."
+        )
+
+    # Connection refused
+    if "connection refused" in err_str or "errno 111" in err_str:
+        return (
+            f"CONNECTION_REFUSED: The server actively rejected the connection. "
+            f"The host exists but nothing is listening on that port. "
+            f"Retry will not help — the service is down or the port is wrong."
+        )
+
+    # SSL/TLS errors
+    if any(kw in err_str for kw in (
+        "ssl",
+        "tls",
+        "certificate",
+        "alert internal error",
+    )):
+        return (
+            f"SSL_ERROR: The HTTPS connection failed due to a TLS/certificate issue. "
+            f"This may be a misconfigured server. "
+            f"Try using http:// instead of https://, or try a different URL."
+        )
+
+    # Timeout
+    if any(kw in err_str for kw in (
+        "timed out",
+        "timeout",
+        "connect timeout",
+    )):
+        return (
+            f"TIMEOUT: The connection timed out. "
+            f"The server may be overloaded or unreachable. "
+            f"A retry may succeed, but don't retry more than once."
+        )
+
+    # Connection reset
+    if "connection reset" in err_str or "broken pipe" in err_str:
+        return (
+            f"CONNECTION_RESET: The connection was dropped by the remote side. "
+            f"May be transient — one retry is reasonable."
+        )
+
+    # Max retries exceeded (generic)
+    if "max retries" in err_str:
+        return (
+            f"MAX_RETRIES: All connection attempts failed. "
+            f"Underlying error: {exc}. "
+            f"Check the URL and try a different domain."
+        )
+
+    # Fallback — return the original error with a hint
+    return f"CONNECTION_ERROR: {exc}"
+
+
 def cmd_open(url: str):
     session = load_session()
     if not url.startswith(("http://", "https://")):
@@ -922,7 +999,8 @@ def cmd_open(url: str):
     try:
         resp, http = fetch(url, session)
     except requests.RequestException as e:
-        sys.exit(f"Connection error: {e}")
+        classified = _classify_connection_error(e)
+        sys.exit(classified)
 
     final_url = resp.url
     html = get_html(resp)
@@ -1066,10 +1144,11 @@ def _submit_form(form_id: str, form: dict, session: dict):
         cmd_open(new_url)
     else:
         # POST
-        try:
-            resp, http = fetch(action, session, method="POST", data=data)
-        except requests.RequestException as e:
-            sys.exit(f"Connection error: {e}")
+    try:
+        resp, http = fetch(action, session, method="POST", data=data)
+    except requests.RequestException as e:
+        classified = _classify_connection_error(e)
+        sys.exit(classified)
 
         final_url = resp.url
         html = get_html(resp)
@@ -1102,7 +1181,8 @@ def cmd_open_with_session(url: str, session: dict):
     try:
         resp, http = fetch(url, session)
     except requests.RequestException as e:
-        sys.exit(f"Connection error: {e}")
+        classified = _classify_connection_error(e)
+        sys.exit(classified)
 
     final_url = resp.url
     html = get_html(resp)
