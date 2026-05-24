@@ -4,7 +4,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
+import unicodedata
+from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 import yaml
@@ -160,6 +163,104 @@ async def run_sync_in_thread(fn: Callable[..., _T], /, *args: Any, **kwargs: Any
 # ---------------------------------------------------------------------------
 # Script resolution
 # ---------------------------------------------------------------------------
+
+# ── Shared stop words (DE + EN) for keyword/query matching ──
+_STOP_WORDS = frozenset(
+    "der die das und oder ein eine ist war hat haben was wie wer wo wann "
+    "warum ich du wir sie er es mit von zu für auf in an bei nach über "
+    "unter vor hinter zwischen nicht auch noch schon nur aber denn wenn "
+    "dass weil als ob the a an and or is was are were has have what how "
+    "who where when why i you we they he she it with from to for on at "
+    "by about do did not also".split()
+)
+
+
+def slugify(name: str) -> str:
+    """Convert a topic name to a filesystem-safe slug."""
+    slug = name.lower().strip()
+    for old, new in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
+        slug = slug.replace(old, new)
+    slug = unicodedata.normalize("NFKD", slug)
+    slug = slug.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
+    return slug[:80] or "misc"
+
+
+def find_similar_slug(
+    new_slug: str, existing_slugs: list[str], threshold: float = 0.7
+) -> Optional[str]:
+    """Return the most similar existing slug if similarity >= threshold."""
+    best_slug: Optional[str] = None
+    best_ratio = 0.0
+    for existing in existing_slugs:
+        ratio = SequenceMatcher(None, new_slug, existing).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_slug = existing
+    return best_slug if best_ratio >= threshold else None
+
+
+async def rag_llm_call(cfg: dict, system_prompt: str, user_prompt: str) -> str:
+    """Make a single LLM call for RAG backends and return the stripped content."""
+    import urllib.request
+
+    provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
+    model = cfg.get("rag_model", "qwen3.5:latest")
+    host = cfg.get("embedding_host", "http://localhost:11434")
+
+    if provider == "ollama":
+        url = f"{host.rstrip('/')}/api/chat"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "options": {
+                "num_ctx": int(cfg.get("rag_numctx", 4096)),
+                "temperature": 0.1,
+            },
+        }
+    else:
+        base = cfg.get("rag_base_url", cfg.get("embedding_base_url", host))
+        url = f"{base.rstrip('/')}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.1,
+        }
+
+    body = json.dumps(payload).encode()
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if provider != "ollama":
+        api_key = cfg.get("rag_api_key", cfg.get("embedding_api_key", ""))
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+
+    def _do():
+        timeout = int(cfg.get("rag_timeout", 600))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+
+    result = await run_sync_in_thread(_do)
+
+    if provider == "ollama":
+        content = result.get("message", {}).get("content", "")
+    else:
+        content = (
+            result.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+
+    return re.sub(r"<think.*?</think>", "", content, flags=re.DOTALL).strip()
+
 
 def resolve_script(session_dir: str, user_id: str, script: str) -> str:
     """Resolve a script name to an absolute path.

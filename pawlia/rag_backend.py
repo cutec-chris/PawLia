@@ -21,9 +21,10 @@ import json
 import logging
 import os
 import re
-import unicodedata
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
+
+from pawlia.utils import _STOP_WORDS, find_similar_slug, rag_llm_call, slugify
 
 logger = logging.getLogger("pawlia.rag_backend")
 
@@ -483,14 +484,7 @@ class MarkdownTopicBackend(RagBackend):
     _MAX_RESULT_CHARS = 32_000
 
     # Common stop words (DE + EN) excluded from keyword matching.
-    _STOP_WORDS = frozenset(
-        "der die das und oder ein eine ist war hat haben was wie wer wo wann "
-        "warum ich du wir sie er es mit von zu für auf in an bei nach über "
-        "unter vor hinter zwischen nicht auch noch schon nur aber denn wenn "
-        "dass weil als ob the a an and or is was are were has have what how "
-        "who where when why i you we they he she it with from to for on at "
-        "by about do did not also".split()
-    )
+    _STOP_WORDS = _STOP_WORDS
 
     def __init__(
         self,
@@ -529,14 +523,13 @@ class MarkdownTopicBackend(RagBackend):
 
     @staticmethod
     def _slugify(name: str) -> str:
-        """Convert a topic name to a filesystem-safe slug."""
-        slug = name.lower().strip()
-        for old, new in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("ß", "ss")):
-            slug = slug.replace(old, new)
-        slug = unicodedata.normalize("NFKD", slug)
-        slug = slug.encode("ascii", "ignore").decode("ascii")
-        slug = re.sub(r"[^a-z0-9]+", "-", slug).strip("-")
-        return slug[:80] or "misc"
+        return slugify(name)
+
+    @staticmethod
+    def _find_similar_slug(
+        new_slug: str, existing_slugs: list[str], threshold: float = 0.7
+    ) -> Optional[str]:
+        return find_similar_slug(new_slug, existing_slugs, threshold)
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -559,85 +552,11 @@ class MarkdownTopicBackend(RagBackend):
             catalog[slug] = title
         return catalog
 
-    @staticmethod
-    def _find_similar_slug(
-        new_slug: str, existing_slugs: list[str], threshold: float = 0.7
-    ) -> Optional[str]:
-        """Return the most similar existing slug if similarity >= threshold, else None."""
-        from difflib import SequenceMatcher
-        best_slug: Optional[str] = None
-        best_ratio = 0.0
-        for existing in existing_slugs:
-            ratio = SequenceMatcher(None, new_slug, existing).ratio()
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_slug = existing
-        return best_slug if best_ratio >= threshold else None
-
     # ── LLM calls ────────────────────────────────────────────────────────────
 
     async def _llm_call(self, system_prompt: str, user_prompt: str) -> str:
         """Make a single LLM call and return the stripped content string."""
-        import urllib.request
-
-        cfg = self._cfg
-        provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
-        model = cfg.get("rag_model", "qwen3.5:latest")
-        host = cfg.get("embedding_host", "http://localhost:11434")
-
-        if provider == "ollama":
-            url = f"{host.rstrip('/')}/api/chat"
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "stream": False,
-                "options": {
-                    "num_ctx": int(cfg.get("rag_numctx", 4096)),
-                    "temperature": 0.1,
-                },
-            }
-        else:
-            base = cfg.get("rag_base_url", cfg.get("embedding_base_url", host))
-            url = f"{base.rstrip('/')}/chat/completions"
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.1,
-            }
-
-        body = json.dumps(payload).encode()
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if provider != "ollama":
-            api_key = cfg.get("rag_api_key", cfg.get("embedding_api_key", ""))
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-
-        def _do():
-            timeout = int(cfg.get("rag_timeout", 600))
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return json.loads(resp.read().decode())
-
-        from pawlia.utils import run_sync_in_thread
-        result = await run_sync_in_thread(_do)
-
-        if provider == "ollama":
-            content = result.get("message", {}).get("content", "")
-        else:
-            content = (
-                result.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
-
-        return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        return await rag_llm_call(self._cfg, system_prompt, user_prompt)
 
     async def _llm_extract_topics(
         self, text: str, existing_topics: dict[str, str]
