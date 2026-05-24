@@ -170,6 +170,35 @@ def detect_backend(config: Dict[str, Any]) -> str:
 
 # ── Aider backend ─────────────────────────────────────────────────────
 
+def _run_backend(
+    backend: str,
+    cmd: list[str],
+    cwd: str | None = None,
+    files_modified: list[str] | None = None,
+) -> Dict[str, Any]:
+    """Run a coding backend subprocess and return a standardised result dict."""
+    logger.info("Running %s: %s", backend, " ".join(cmd[:6]) + "...")
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd=cwd,
+        )
+        return {
+            "ok": proc.returncode == 0,
+            "backend": backend,
+            "output": (proc.stdout or "")[-3000:],
+            "error": (proc.stderr or "")[-1500:] if proc.returncode != 0 else "",
+            "files_modified": files_modified or [],
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "backend": backend, "error": f"{backend} timed out after 300s"}
+    except Exception as e:
+        return {"ok": False, "backend": backend, "error": str(e)}
+
+
 def _run_aider(
     skill_path: Path,
     task_prompt: str,
@@ -194,29 +223,8 @@ def _run_aider(
         if fpath.is_file():
             cmd.append(str(fpath))
 
-    logger.info("Running aider: %s", " ".join(cmd[:6]) + "...")
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=str(skill_path),
-        )
-        return {
-            "ok": proc.returncode == 0,
-            "backend": "aider",
-            "output": (proc.stdout or "")[-3000:],
-            "error": (proc.stderr or "")[-1500:] if proc.returncode != 0 else "",
-            "files_modified": list(existing_files.keys()),
-        }
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "backend": "aider", "error": "aider timed out after 300s"}
-    except Exception as e:
-        return {"ok": False, "backend": "aider", "error": str(e)}
+    return _run_backend("aider", cmd, cwd=str(skill_path), files_modified=list(existing_files.keys()))
 
-
-# ── OpenCode backend ──────────────────────────────────────────────────
 
 def _run_opencode(
     skill_path: Path,
@@ -238,25 +246,7 @@ def _run_opencode(
 
     cmd.append(task_prompt)
 
-    logger.info("Running opencode: %s", " ".join(cmd[:6]) + "...")
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        return {
-            "ok": proc.returncode == 0,
-            "backend": "opencode",
-            "output": (proc.stdout or "")[-3000:],
-            "error": (proc.stderr or "")[-1500:] if proc.returncode != 0 else "",
-            "files_modified": [],
-        }
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "backend": "opencode", "error": "opencode timed out after 300s"}
-    except Exception as e:
-        return {"ok": False, "backend": "opencode", "error": str(e)}
+    return _run_backend("opencode", cmd)
 
 
 # ── LLM backend (fallback) ───────────────────────────────────────────
