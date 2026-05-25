@@ -439,6 +439,48 @@ class _FallbackLLMWrapper:
 
         return system + [summarized] + tail
 
+    def _summarize_to_fit(self, idx: int, messages: List[BaseMessage],
+                          force: bool = False) -> Optional[List[BaseMessage]]:
+        """Try progressively more aggressive summarization until messages fit
+        into the context window of model *idx*.
+
+        Starts by keeping many recent exchange pairs intact and summarising
+        only the oldest portion.  If that still overflows the window the
+        number of kept pairs is halved repeatedly, trading recall precision
+        for context density.
+
+        Returns the first list that fits, or ``None`` if even the most
+        aggressive level (keep 0 recent pairs, everything summarised) does
+        not fit.
+        """
+        if not force and self._fits_context(idx, messages):
+            return messages
+
+        total_pairs = max(1, (len(messages) - 1) // 2)  # excl system message
+
+        keep_levels = []
+        k = total_pairs
+        while k >= 2:
+            keep_levels.append(k)
+            k = max(1, k // 2)
+        if 1 not in keep_levels:
+            keep_levels.append(1)
+        if 0 not in keep_levels:
+            keep_levels.append(0)
+
+        for keep_recent in keep_levels:
+            summarized = self.summarize_context(messages, keep_recent=keep_recent)
+            if summarized == messages:
+                continue
+            if self._fits_context(idx, summarized):
+                logger.info(
+                    "LLM progressive summarization: %d → %d messages (keep_recent=%d) fits '%s'",
+                    len(messages), len(summarized), keep_recent, self._labels[idx],
+                )
+                return summarized
+
+        return None
+
     def _raise_if_all_blacklisted(self) -> None:
         now = self._now()
         active = [
@@ -476,15 +518,19 @@ class _FallbackLLMWrapper:
                 )
                 continue
             if not self._fits_context(idx, messages):
-                logger.warning(
-                    "LLM skip: model '%s' context window too small for estimated prompt, trying next fallback",
-                    self._labels[idx],
-                )
-                last_exc = RuntimeError(
-                    f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
-                )
-                saw_context_error = True
-                continue
+                fitted = self._summarize_to_fit(idx, messages)
+                if fitted is not None:
+                    messages = fitted
+                else:
+                    logger.warning(
+                        "LLM skip: model '%s' context window too small even after progressive summarization, trying next fallback",
+                        self._labels[idx],
+                    )
+                    last_exc = RuntimeError(
+                        f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
+                    )
+                    saw_context_error = True
+                    continue
             try:
                 result = llm.invoke(messages, **kwargs)
                 self._note_success(idx)
@@ -493,18 +539,11 @@ class _FallbackLLMWrapper:
                 last_exc = exc
                 self._note_failure(idx, exc)
                 saw_context_error = saw_context_error or is_context_length_error(exc)
-                # First context error → summarize immediately and retry
-                # with the SAME model instead of falling through.
                 if is_context_length_error(exc):
-                    summarized = self.summarize_context(messages)
-                    if summarized != messages:
-                        logger.info(
-                            "LLM context overflow: summarized %d → %d messages, retrying '%s'",
-                            len(messages), len(summarized),
-                            self._labels[idx],
-                        )
+                    fitted = self._summarize_to_fit(idx, messages, force=True)
+                    if fitted is not None:
                         try:
-                            result = llm.invoke(summarized, **kwargs)
+                            result = llm.invoke(fitted, **kwargs)
                             self._note_success(idx)
                             return result
                         except Exception as retry_exc:
@@ -547,15 +586,19 @@ class _FallbackLLMWrapper:
                 )
                 continue
             if not self._fits_context(idx, messages):
-                logger.warning(
-                    "LLM skip: model '%s' context window too small for estimated prompt, trying next fallback",
-                    self._labels[idx],
-                )
-                last_exc = RuntimeError(
-                    f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
-                )
-                saw_context_error = True
-                continue
+                fitted = self._summarize_to_fit(idx, messages)
+                if fitted is not None:
+                    messages = fitted
+                else:
+                    logger.warning(
+                        "LLM skip: model '%s' context window too small even after progressive summarization, trying next fallback",
+                        self._labels[idx],
+                    )
+                    last_exc = RuntimeError(
+                        f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
+                    )
+                    saw_context_error = True
+                    continue
             try:
                 result = await llm.ainvoke(messages, **kwargs)
                 self._note_success(idx)
@@ -564,18 +607,11 @@ class _FallbackLLMWrapper:
                 last_exc = exc
                 self._note_failure(idx, exc)
                 saw_context_error = saw_context_error or is_context_length_error(exc)
-                # First context error → summarize immediately and retry
-                # with the SAME model instead of falling through.
                 if is_context_length_error(exc):
-                    summarized = self.summarize_context(messages)
-                    if summarized != messages:
-                        logger.info(
-                            "LLM context overflow: summarized %d → %d messages, retrying '%s'",
-                            len(messages), len(summarized),
-                            self._labels[idx],
-                        )
+                    fitted = self._summarize_to_fit(idx, messages, force=True)
+                    if fitted is not None:
                         try:
-                            result = await llm.ainvoke(summarized, **kwargs)
+                            result = await llm.ainvoke(fitted, **kwargs)
                             self._note_success(idx)
                             return result
                         except Exception as retry_exc:
@@ -626,15 +662,19 @@ class _FallbackLLMWrapper:
                 )
                 continue
             if not self._fits_context(idx, messages):
-                logger.warning(
-                    "LLM skip(stream): model '%s' context window too small for estimated prompt, trying next fallback",
-                    self._labels[idx],
-                )
-                last_exc = RuntimeError(
-                    f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
-                )
-                saw_context_error = True
-                continue
+                fitted = self._summarize_to_fit(idx, messages)
+                if fitted is not None:
+                    messages = fitted
+                else:
+                    logger.warning(
+                        "LLM skip(stream): model '%s' context window too small even after progressive summarization, trying next fallback",
+                        self._labels[idx],
+                    )
+                    last_exc = RuntimeError(
+                        f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
+                    )
+                    saw_context_error = True
+                    continue
             yielded_any = False
             try:
                 async for chunk in llm.astream(messages, **kwargs):
@@ -648,18 +688,11 @@ class _FallbackLLMWrapper:
                     raise
                 last_exc = exc
                 saw_context_error = saw_context_error or is_context_length_error(exc)
-                # First context error → summarize immediately and retry
-                # with the SAME model instead of falling through.
                 if is_context_length_error(exc):
-                    summarized = self.summarize_context(messages)
-                    if summarized != messages:
-                        logger.info(
-                            "LLM context overflow(stream): summarized %d → %d messages, retrying '%s'",
-                            len(messages), len(summarized),
-                            self._labels[idx],
-                        )
+                    fitted = self._summarize_to_fit(idx, messages, force=True)
+                    if fitted is not None:
                         try:
-                            async for chunk in llm.astream(summarized, **kwargs):
+                            async for chunk in llm.astream(fitted, **kwargs):
                                 yield chunk
                             self._note_success(idx)
                             return
