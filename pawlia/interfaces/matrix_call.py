@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from pawlia.app import App
 
 logger = logging.getLogger("pawlia.interfaces.matrix_call")
+SAMPLE_RATE = 48000
 
 # ---------------------------------------------------------------------------
 # Outgoing audio track (TTS playback)
@@ -71,7 +72,7 @@ if _AIORTC_AVAILABLE:
         """
 
         kind = "audio"
-        SAMPLE_RATE = 48000
+        SAMPLE_RATE = SAMPLE_RATE
         SAMPLES_PER_FRAME = 960  # 20 ms @ 48 kHz
 
         def __init__(self) -> None:
@@ -1311,7 +1312,6 @@ class CallSession:
 
     async def _audio_pipeline(self, track) -> None:
         """Continuously read audio frames, detect speech, transcribe, respond."""
-        SAMPLE_RATE = 48000
         fps = 50  # aiortc default: 20 ms frames
         min_speech_frames = int(self._speech_detector.MIN_SPEECH_SECONDS * fps)
         pre_speech_frames = int(max(0.0, self._speech_detector.PRE_SPEECH_SECONDS) * fps)

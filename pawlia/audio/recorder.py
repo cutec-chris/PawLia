@@ -32,7 +32,7 @@ class CallRecorder:
         compress_to_flac: bool = True,
     ) -> None:
         self.call_id = call_id
-        self.record_dir = record_dir
+        self.record_dir = record_dir or DEFAULT_RECORD_DIR
         self.sample_rate = sample_rate
         self.compress_to_flac = compress_to_flac
         self._frames: List[np.ndarray] = []
