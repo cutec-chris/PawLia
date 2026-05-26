@@ -349,6 +349,65 @@ class ChatAgent(BaseAgent):
 
         return True
 
+    async def _execute_skill_calls(
+        self,
+        tool_calls: List[Dict],
+        thread_id: Optional[str],
+        on_skill_start: Optional[SkillStartCallback],
+        on_skill_step: Optional[InterimCallback],
+        on_skill_done: Optional[SkillDoneCallback],
+    ) -> Tuple[List[ToolMessage], List[Dict[str, Any]], bool]:
+        """Execute a batch of LLM tool calls and return results.
+
+        Returns (tool_messages, tool_calls_info_entries, skill_creator_called).
+        """
+        tool_messages: List[ToolMessage] = []
+        tool_calls_info: List[Dict[str, Any]] = []
+        skill_creator_called = False
+
+        for tool_call in tool_calls:
+            skill_name, normalized_args, error = self._decode_skill_call(tool_call)
+            query = normalized_args.get("query", "")
+            skill = self.skills.get(skill_name)
+
+            if error:
+                self.logger.warning("Skill call rejected: %s", error)
+                result = error
+            elif skill:
+                self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
+                if on_skill_start:
+                    try:
+                        await on_skill_start(skill_name, query)
+                    except Exception as exc:
+                        self.logger.debug("on_skill_start error: %s", exc)
+                runner = self.skill_runner_factory(skill, thread_id)
+                runner.on_step = on_skill_step
+                result = await runner.run(query=query)
+                result = self._process_directives(result, thread_id)
+                result = self._wrap_with_trust_header(result, skill, query)
+                if skill_name == "skill-creator":
+                    skill_creator_called = True
+                if on_skill_done:
+                    try:
+                        await on_skill_done(skill_name, result)
+                    except Exception as exc:
+                        self.logger.debug("on_skill_done error: %s", exc)
+            else:
+                self.logger.warning("Unknown skill called: %s", skill_name)
+                result = f"Error: Unknown skill '{skill_name}'."
+
+            tool_calls_info.append({
+                "name": skill_name,
+                "args": normalized_args,
+                "result": self._limit_tool_result(result, limit=_PERSIST_TOOL_RESULT_LIMIT),
+            })
+            tool_messages.append(ToolMessage(
+                content=self._limit_tool_result(result),
+                tool_call_id=tool_call.get("id", ""),
+            ))
+
+        return tool_messages, tool_calls_info, skill_creator_called
+
     @staticmethod
     def _wrap_with_trust_header(result: str, skill: "AgentSkill", query: str) -> str:
         """Frame a skill's raw output as a colleague's report with trust level.
@@ -790,51 +849,11 @@ class ChatAgent(BaseAgent):
 
             messages.append(final)
 
-            skill_creator_called = False
-            for tool_call in final.tool_calls:
-                skill_name, normalized_args, error = self._decode_skill_call(tool_call)
-                query = normalized_args.get("query", "")
-                skill = self.skills.get(skill_name)
-
-                if error:
-                    self.logger.warning("Skill call rejected: %s", error)
-                    result = error
-                elif skill:
-                    self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
-                    if _on_skill_start:
-                        try:
-                            await _on_skill_start(skill_name, query)
-                        except Exception as exc:
-                            self.logger.debug("on_skill_start error: %s", exc)
-                    runner = self.skill_runner_factory(skill, thread_id)
-                    runner.on_step = _on_skill_step
-                    result = await runner.run(query=query)
-                    result = self._process_directives(result, thread_id)
-                    result = self._wrap_with_trust_header(result, skill, query)
-                    if skill_name == "skill-creator":
-                        skill_creator_called = True
-                    if _on_skill_done:
-                        try:
-                            await _on_skill_done(skill_name, result)
-                        except Exception as exc:
-                            self.logger.debug("on_skill_done error: %s", exc)
-                else:
-                    self.logger.warning("Unknown skill called: %s", skill_name)
-                    result = f"Error: Unknown skill '{skill_name}'."
-
-                tool_calls_info.append({
-                    "name": skill_name,
-                    "args": normalized_args,
-                    "result": self._limit_tool_result(
-                        result,
-                        limit=_PERSIST_TOOL_RESULT_LIMIT,
-                    ),
-                })
-
-                messages.append(ToolMessage(
-                    content=self._limit_tool_result(result),
-                    tool_call_id=tool_call.get("id", ""),
-                ))
+            tool_msgs, new_info, skill_creator_called = await self._execute_skill_calls(
+                final.tool_calls, thread_id, _on_skill_start, _on_skill_step, _on_skill_done,
+            )
+            messages.extend(tool_msgs)
+            tool_calls_info.extend(new_info)
 
             # Refresh workspace skills only when skill-creator ran (it may have added/changed skills)
             if skill_creator_called and self._refresh_and_rebind_skills():
@@ -985,50 +1004,11 @@ class ChatAgent(BaseAgent):
             messages.append(accumulated)
             tool_calls_info: List[Dict[str, Any]] = []
 
-            skill_creator_called = False
-            for tool_call in accumulated.tool_calls:
-                skill_name, normalized_args, error = self._decode_skill_call(tool_call)
-                query = normalized_args.get("query", "")
-                skill = self.skills.get(skill_name)
-
-                if error:
-                    self.logger.warning("Skill call rejected: %s", error)
-                    skill_result = error
-                elif skill:
-                    self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
-                    if _on_skill_start:
-                        try:
-                            await _on_skill_start(skill_name, query)
-                        except Exception:
-                            pass
-                    runner = self.skill_runner_factory(skill, thread_id)
-                    runner.on_step = _on_skill_step
-                    skill_result = await runner.run(query=query)
-                    skill_result = self._process_directives(skill_result, thread_id)
-                    skill_result = self._wrap_with_trust_header(skill_result, skill, query)
-                    if skill_name == "skill-creator":
-                        skill_creator_called = True
-                    if _on_skill_done:
-                        try:
-                            await _on_skill_done(skill_name, skill_result)
-                        except Exception:
-                            pass
-                else:
-                    self.logger.warning("Unknown skill called: %s", skill_name)
-                    skill_result = f"Error: Unknown skill '{skill_name}'."
-
-                tool_calls_info.append({
-                    "name": skill_name,
-                    "args": normalized_args,
-                    "result": self._limit_tool_result(
-                        skill_result,
-                        limit=_PERSIST_TOOL_RESULT_LIMIT,
-                    ),
-                })
-                messages.append(ToolMessage(
-                    content=self._limit_tool_result(skill_result),
-                    tool_call_id=tool_call.get("id", ""),
-                ))
+            tool_msgs, new_info, skill_creator_called = await self._execute_skill_calls(
+                accumulated.tool_calls, thread_id, _on_skill_start, _on_skill_step, _on_skill_done,
+            )
+            messages.extend(tool_msgs)
+            tool_calls_info.extend(new_info)
 
             # Refresh workspace skills only when skill-creator ran (it may have added/changed skills)
             if skill_creator_called and self._refresh_and_rebind_skills():
@@ -1060,50 +1040,11 @@ class ChatAgent(BaseAgent):
                     break
 
                 messages.append(next_response)
-                skill_creator_called = False
-                for tool_call in next_response.tool_calls:
-                    skill_name, normalized_args, error = self._decode_skill_call(tool_call)
-                    query = normalized_args.get("query", "")
-                    skill = self.skills.get(skill_name)
-
-                    if error:
-                        self.logger.warning("Skill call rejected: %s", error)
-                        skill_result = error
-                    elif skill:
-                        self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
-                        if _on_skill_start:
-                            try:
-                                await _on_skill_start(skill_name, query)
-                            except Exception:
-                                pass
-                        runner = self.skill_runner_factory(skill, thread_id)
-                        runner.on_step = _on_skill_step
-                        skill_result = await runner.run(query=query)
-                        skill_result = self._process_directives(skill_result, thread_id)
-                        skill_result = self._wrap_with_trust_header(skill_result, skill, query)
-                        if skill_name == "skill-creator":
-                            skill_creator_called = True
-                        if _on_skill_done:
-                            try:
-                                await _on_skill_done(skill_name, skill_result)
-                            except Exception:
-                                pass
-                    else:
-                        self.logger.warning("Unknown skill called: %s", skill_name)
-                        skill_result = f"Error: Unknown skill '{skill_name}'."
-
-                    tool_calls_info.append({
-                        "name": skill_name,
-                        "args": normalized_args,
-                        "result": self._limit_tool_result(
-                            skill_result,
-                            limit=_PERSIST_TOOL_RESULT_LIMIT,
-                        ),
-                    })
-                    messages.append(ToolMessage(
-                        content=self._limit_tool_result(skill_result),
-                        tool_call_id=tool_call.get("id", ""),
-                    ))
+                tool_msgs, new_info, skill_creator_called = await self._execute_skill_calls(
+                    next_response.tool_calls, thread_id, _on_skill_start, _on_skill_step, _on_skill_done,
+                )
+                messages.extend(tool_msgs)
+                tool_calls_info.extend(new_info)
 
                 # Refresh workspace skills only when skill-creator ran
                 if skill_creator_called and self._refresh_and_rebind_skills():
