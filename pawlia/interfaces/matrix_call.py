@@ -80,7 +80,7 @@ if _AIORTC_AVAILABLE:
         SAMPLE_RATE = SAMPLE_RATE
         SAMPLES_PER_FRAME = 960  # 20 ms @ 48 kHz
 
-        def __init__(self) -> None:
+        def __init__(self, recorder: "Optional[CallRecorder]" = None) -> None:
             super().__init__()
             self._queue: asyncio.Queue[Any] = asyncio.Queue()
             self._pts = 0
@@ -92,6 +92,7 @@ if _AIORTC_AVAILABLE:
             self._hold_pcm: Optional[np.ndarray] = None  # int16 mono @ 48 kHz
             self._hold_pos: int = 0
             self._hold_active: bool = False
+            self._recorder = recorder
 
         @property
         def is_playing(self) -> bool:
@@ -204,18 +205,18 @@ if _AIORTC_AVAILABLE:
 
         def enqueue_pcm_float32(self, pcm: np.ndarray) -> None:
             """Enqueue float32 mono PCM for playback (chunks it into 20 ms frames)."""
-            # Debug: Check if we received valid audio data
             if pcm is None or len(pcm) == 0:
                 logger.warning("TTS: Received empty or None audio data")
                 return
 
-            # Ensure proper range and convert to int16
             pcm_normalized = np.clip(pcm, -1.0, 1.0)
             pcm_int16 = (pcm_normalized * 32767).astype(np.int16)
 
-            # Debug: Log audio statistics
             logger.debug("TTS: Enqueuing audio - samples: %d, min: %.4f, max: %.4f, mean: %.4f",
                        len(pcm), float(np.min(pcm)), float(np.max(pcm)), float(np.mean(pcm)))
+
+            if self._recorder is not None:
+                self._recorder.push_pawlia(pcm_normalized)
 
             sentence_id = self._next_sentence_id
             self._next_sentence_id += 1
@@ -569,7 +570,7 @@ class CallSession:
 
         ice_servers = await self._get_ice_servers()
         self._pc = RTCPeerConnection(configuration=RTCConfiguration(iceServers=ice_servers))
-        self._tts_track = _TTSAudioTrack()
+        self._tts_track = _TTSAudioTrack(recorder=self._recorder)
         self._pc.addTrack(self._tts_track)
 
         @self._pc.on("track")
