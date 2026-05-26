@@ -3,6 +3,10 @@ import textwrap
 from pawlia.memory import _format_workspace_refs
 from pawlia.workspace_search import WorkspaceSearch
 
+# Small synthetic test corpora produce low BM25 scores; relax thresholds so
+# unit tests don't depend on the production conservative defaults.
+_RELAXED = {"min_score": 0.1, "min_raw_score": 0.5}
+
 
 def test_workspace_search_returns_obsidian_section_refs(tmp_path):
     workspace = tmp_path / "workspace"
@@ -39,7 +43,7 @@ def test_workspace_search_returns_obsidian_section_refs(tmp_path):
         encoding="utf-8",
     )
 
-    hits = WorkspaceSearch(str(workspace)).search("How is the Proxmox setup configured?")
+    hits = WorkspaceSearch(str(workspace), config=_RELAXED).search("How is the Proxmox setup configured?")
 
     assert hits
     assert hits[0].page_ref == "[[topic/homelab]]"
@@ -65,7 +69,7 @@ def test_workspace_refs_format_reads_page_but_shows_section(tmp_path):
         encoding="utf-8",
     )
 
-    hits = WorkspaceSearch(str(workspace)).search("Tell me about the Proxmox setup")
+    hits = WorkspaceSearch(str(workspace), config=_RELAXED).search("Tell me about the Proxmox setup")
     rendered = _format_workspace_refs(hits, user_query="Tell me about the Proxmox setup")
 
     assert "[[topic/homelab#Proxmox Setup]]" in rendered
@@ -90,7 +94,7 @@ def test_workspace_search_uses_path_style_refs_for_typed_wiki_pages(tmp_path):
         encoding="utf-8",
     )
 
-    hits = WorkspaceSearch(str(workspace)).search("Who is Max from ops?")
+    hits = WorkspaceSearch(str(workspace), config=_RELAXED).search("Who is Max from ops?")
 
     assert hits
     assert hits[0].page_ref == "[[person/max]]"
@@ -115,7 +119,7 @@ def test_workspace_search_keeps_non_wiki_paths_obsidian_compatible(tmp_path):
         encoding="utf-8",
     )
 
-    hits = WorkspaceSearch(str(workspace)).search("When is the maintenance window?")
+    hits = WorkspaceSearch(str(workspace), config=_RELAXED).search("When is the maintenance window?")
 
     assert hits
     assert hits[0].page_ref == "[[research/ops/README]]"

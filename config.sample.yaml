@@ -119,6 +119,7 @@ interfaces:
 #   preanswer_stt_silence_seconds: 0.4
 #   recording:
 #     enabled: false                  # opt-in: record full calls as WAV/FLAC (default: false)
+#                                     # note: always enabled when log level is DEBUG
 #     directory: log/call_recordings  # where to store recordings
 #     compress_flac: true             # convert WAV to FLAC after call ends
 #     retention_days: 7               # delete recordings older than this many days
