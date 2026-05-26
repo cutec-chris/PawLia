@@ -854,6 +854,30 @@ class MemoryManager:
             os.remove(path)
         return session.private
 
+    def seed_thread_context(
+        self,
+        session: Session,
+        thread_id: str,
+        bot_text: str,
+    ) -> None:
+        """Seed a new thread context with an initial bot message.
+
+        Used when the bot sends a message that may later receive thread
+        replies (e.g. automation output). The bot message is stored as an
+        exchange with an empty user side so it shows up as context when
+        the user replies.
+        """
+        if thread_id in session.private_threads:
+            return
+        entry = self._format_exchange_entry(
+            "",
+            bot_text,
+            tz_name=session.timezone,
+        )
+        self._append_thread_block_to_daily(
+            session.user_id, session.current_date_str, thread_id, entry,
+        )
+
     def append_thread_exchange(
         self,
         session: Session,

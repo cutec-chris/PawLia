@@ -470,16 +470,18 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return None
         return bytes_to_data_uri(resp.body, resp.content_type or mimetype)
 
-    async def _send_text(room_id: str, text: str) -> None:
+    async def _send_text(room_id: str, text: str) -> Optional[str]:
         try:
-            await client.room_send(
+            resp = await client.room_send(
                 room_id=room_id,
                 message_type="m.room.message",
                 content=_make_content(text),
                 ignore_unverified_devices=True,
             )
+            return getattr(resp, "event_id", None)
         except Exception as e:
             logger.error("Matrix: send_text failed for %s: %s", room_id, e)
+            return None
 
     async def _send_thread_reply(room_id: str, root_event_id: str, text: str) -> None:
         """Send a message as a Matrix thread reply rooted at root_event_id."""
@@ -1054,7 +1056,10 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         if not session_id.startswith("mx_"):
             return
         room_id = session_id[3:]
-        await _send_text(room_id, message)
+        event_id = await _send_text(room_id, message)
+        if event_id:
+            session = app.memory.load_session(session_id)
+            app.memory.seed_thread_context(session, event_id, message)
 
     app.scheduler.register(_matrix_notify)
 
