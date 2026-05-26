@@ -50,7 +50,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from langchain_core.messages import (
     AIMessage,
@@ -406,10 +406,12 @@ class _FallbackLLMWrapper:
             return messages  # nothing to summarize
 
         system = messages[:1]
-        tail = messages[-(keep_recent * 2):]  # keep last N pairs
-
-        # Summarize the middle portion
-        middle = messages[1:-(keep_recent * 2)]
+        if keep_recent == 0:
+            tail = []
+            middle = messages[1:]
+        else:
+            tail = messages[-(keep_recent * 2):]  # keep last N pairs
+            middle = messages[1:-(keep_recent * 2)]
         if not middle:
             return system + tail
 
