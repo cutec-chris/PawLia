@@ -541,7 +541,7 @@ class CallSession:
         # Install a per-call asyncio exception handler to catch and suppress
         # known non-fatal TURN CHANNEL_BIND errors that leak from aioice when
         # the peer connection closes before all TURN tasks complete.
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         original_handler = loop.get_exception_handler()
         self._original_exception_handler = original_handler
 
@@ -578,11 +578,11 @@ class CallSession:
                     if r.track == track:
                         logger.debug("call %s: receiver params: %s",
                                      self.call_id[:8], getattr(r, "_track", None))
-                asyncio.ensure_future(self._audio_pipeline(track))
+                asyncio.create_task(self._audio_pipeline(track))
             elif track.kind == "video":
                 # Drain decoded video frames so aiortc doesn't buffer them indefinitely.
                 # Replace with frame-processing logic once video input to the model is implemented.
-                asyncio.ensure_future(self._drain_video_track(track))
+                asyncio.create_task(self._drain_video_track(track))
 
         @self._pc.on("connectionstatechange")
         async def on_conn_state():
@@ -603,11 +603,11 @@ class CallSession:
                     self._ice_reconnect_task = None
             elif state == "disconnected":
                 if not self._ice_reconnect_task or self._ice_reconnect_task.done():
-                    self._ice_reconnect_task = asyncio.ensure_future(
+                    self._ice_reconnect_task = asyncio.create_task(
                         self._ice_reconnect_watchdog()
                     )
             elif state == "failed":
-                asyncio.ensure_future(self._notify_disconnect())
+                asyncio.create_task(self._notify_disconnect())
                 self._done.set()
             elif state == "closed":
                 self._done.set()
@@ -649,18 +649,18 @@ class CallSession:
         await self._run_preanswer_warmup()
 
         # Auto-hangup watchdog
-        asyncio.ensure_future(self._watchdog())
-        asyncio.ensure_future(self._connect_timeout_watchdog())
+        asyncio.create_task(self._watchdog())
+        asyncio.create_task(self._connect_timeout_watchdog())
         # Send our ICE candidates once gathering completes (parsed from local SDP)
-        asyncio.ensure_future(self._flush_local_candidates(_gathering_done))
+        asyncio.create_task(self._flush_local_candidates(_gathering_done))
         # Periodic RTP receiver stats for diagnostics
-        asyncio.ensure_future(self._log_receiver_stats())
+        asyncio.create_task(self._log_receiver_stats())
         # Greet the caller once signaling and media are both ready.  Warmup may
         # prepare the LLM/TTS result ahead of time, but playback is gated here.
         if not self._greeting_sent:
-            self._greeting_task = asyncio.ensure_future(self._send_greeting_when_ready())
+            self._greeting_task = asyncio.create_task(self._send_greeting_when_ready())
 
-        asyncio.ensure_future(self._send_status("Anruf angenommen – Verbindung wird aufgebaut…"))
+        asyncio.create_task(self._send_status("Anruf angenommen – Verbindung wird aufgebaut…"))
         logger.info("call %s accepted in room %s", self.call_id[:8], self.room_id)
         return self._pc.localDescription.sdp
 
@@ -966,7 +966,7 @@ class CallSession:
         # Restore the original asyncio exception handler
         if getattr(self, "_exception_handler_installed", False):
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 loop.set_exception_handler(getattr(self, "_original_exception_handler", None))
             except Exception:
                 pass
@@ -1107,7 +1107,7 @@ class CallSession:
             self._tts_track.start_hold()
 
         # Keep typing indicator alive (Matrix times it out after ~30s)
-        typing_task = asyncio.ensure_future(self._keep_typing())
+        typing_task = asyncio.create_task(self._keep_typing())
 
         try:
             first_sentence_received = False
@@ -1890,7 +1890,7 @@ class CallManager:
         # Wire up fallback notifications → status messages in the call thread
         if hasattr(agent, "set_callbacks"):
             agent.set_callbacks(
-                on_fallback=lambda from_m, to_m: asyncio.ensure_future(
+                on_fallback=lambda from_m, to_m: asyncio.create_task(
                     session._send_status(f"⚙ Fallback: {from_m} → {to_m}")
                 )
             )
