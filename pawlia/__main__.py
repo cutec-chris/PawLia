@@ -205,6 +205,12 @@ async def _run(args) -> None:
             _supervise("matrix", lambda: start_matrix(app, iface_cfg["matrix"]))
         ))
 
+    if "discord" in iface_cfg:
+        from pawlia.interfaces.discord import start_discord
+        tasks.append(asyncio.create_task(
+            _supervise("discord", lambda: start_discord(app, iface_cfg["discord"]))
+        ))
+
     if "telegram" in iface_cfg:
         from pawlia.interfaces.telegram import start_telegram
         tasks.append(asyncio.create_task(

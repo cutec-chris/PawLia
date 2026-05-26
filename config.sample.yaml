@@ -83,6 +83,21 @@ interfaces:
   #   # stun_servers:                        # STUN for VoIP (optional)
   #   #   - stun:stun.l.google.com:19302
 
+  # discord:
+  #   token: YOUR_BOT_TOKEN                # Discord bot token from Developer Portal
+  #   # allowed_users:                      # optional — restrict to these Discord user IDs
+  #   #   - "123456789012345678"
+  #   # allowed_channels:                   # optional — restrict to these channel IDs
+  #   #   - "987654321098765432"
+  #   # always_thread: true                 # auto-reply in threads (default: true)
+  #   # require_mention: false              # only respond to @mention (default: false)
+  #   # slash_commands: true                # register slash commands (default: true)
+  #   # voice:                              # voice channel support (default: enabled)
+  #   #   enabled: true                     # set to false to disable voice channels
+  #   #   silence_threshold: 1.5            # seconds of silence to end utterance
+  #   #   min_speech_duration: 0.5          # minimum seconds of speech to process
+  #   #   timeout: 300                      # auto-disconnect after inactivity (seconds)
+
   # openai:                                  # OpenAI- & Ollama-compatible REST API
   #   port: 11435                            # POST /v1/chat/completions, GET /v1/models
   #   # host: 0.0.0.0                        # GET /api/tags, POST /api/chat (Ollama format)
