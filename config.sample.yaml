@@ -117,6 +117,11 @@ interfaces:
 #   preanswer_warmup_enabled: true    # warm STT + prepare greeting before answering calls
 #   preanswer_warmup_timeout_seconds: 25.0
 #   preanswer_stt_silence_seconds: 0.4
+#   recording:
+#     enabled: false                  # opt-in: record full calls as WAV/FLAC (default: false)
+#     directory: log/call_recordings  # where to store recordings
+#     compress_flac: true             # convert WAV to FLAC after call ends
+#     retention_days: 7               # delete recordings older than this many days
 
 # Speech-to-text transcription (voice messages + VoIP calls).
 # Any OpenAI-compatible /audio/transcriptions endpoint works.

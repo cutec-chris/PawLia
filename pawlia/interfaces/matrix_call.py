@@ -399,7 +399,7 @@ class CallSession:
         # Full-call audio recorder
         voip_rec_cfg = voip_cfg.get("recording", {}) if isinstance(voip_cfg, dict) else {}
         self._recorder: Optional["CallRecorder"] = None
-        if voip_rec_cfg.get("enabled", True):
+        if voip_rec_cfg.get("enabled", False):
             from pawlia.audio.recorder import CallRecorder
             self._recorder = CallRecorder(
                 call_id=call_id,
