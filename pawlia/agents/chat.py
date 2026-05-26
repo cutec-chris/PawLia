@@ -279,7 +279,7 @@ class ChatAgent(BaseAgent):
             self.logger.warning("Workspace search failed: %s", exc)
             self.session.workspace_refs = []  # prevent retry on next turn
 
-    def _handle_workspace_context(self, user_input: str) -> None:
+    def _handle_workspace_context(self, user_input: str, *, allow_workspace_search: bool = False) -> None:
         """Re-run workspace search on every substantive message.
 
         BM25 over the workspace is cheap, and caching hits from an earlier
@@ -290,10 +290,14 @@ class ChatAgent(BaseAgent):
 
         - Skips short/small-talk messages ("hi", "ok", "danke", …).
         - Marks a topic heading in the daily log on significant shifts.
+        - Disabled by default; enable per session via ``workspace-search.enabled: true``
+          in the session config.
         """
         if not (self.memory and self.session):
             return
-        try:
+        if not allow_workspace_search and not self._workspace_search_cfg.get("enabled", False):
+            return
+        try:                                                               
             from pawlia.workspace_search import WorkspaceSearch
         except ImportError:
             return
@@ -706,6 +710,7 @@ class ChatAgent(BaseAgent):
         on_skill_start: Optional[SkillStartCallback] = None,
         on_skill_step: Optional[InterimCallback] = None,
         on_skill_done: Optional[SkillDoneCallback] = None,
+        workspace_search: bool = False,
     ) -> str:
         """Process user input and return a response.
 
@@ -728,7 +733,7 @@ class ChatAgent(BaseAgent):
         _on_skill_done = on_skill_done or self.on_skill_done
 
         # Workspace context: search on first substantive turn, re-search on topic shift
-        self._handle_workspace_context(user_input)
+        self._handle_workspace_context(user_input, allow_workspace_search=workspace_search)
 
         prompt = self.build_system_prompt(system_prompt=system_prompt)
 
@@ -904,6 +909,7 @@ class ChatAgent(BaseAgent):
         on_skill_step: Optional[InterimCallback] = None,
         on_skill_done: Optional[SkillDoneCallback] = None,
         allow_skills: bool = True,
+        workspace_search: bool = False,
     ) -> str:
         """Like :meth:`run` but streams the LLM and calls *on_sentence* per sentence.
 
@@ -918,7 +924,7 @@ class ChatAgent(BaseAgent):
         _on_skill_done = on_skill_done or self.on_skill_done
 
         # Workspace context: search on first substantive turn, re-search on topic shift
-        self._handle_workspace_context(user_input)
+        self._handle_workspace_context(user_input, allow_workspace_search=workspace_search)
 
         prompt = self.build_system_prompt(system_prompt=system_prompt)
 

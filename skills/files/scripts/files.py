@@ -458,6 +458,43 @@ def cmd_read(args) -> None:
     _out(result)
 
 
+def cmd_search(args) -> None:
+    """BM25 search across workspace markdown files.
+
+    Returns a list of hits with filename, headings, and a short snippet
+    so the model can gauge relevance without having to ``files read``
+    every candidate first.
+    """
+    workdir = _workdir(args.user_id, args.session_dir)
+    limit = getattr(args, "limit", 10) or 10
+    try:
+        from pawlia.workspace_search import WorkspaceSearch
+    except ImportError:
+        _out({"success": False, "error": "workspace_search module not available"})
+        return
+
+    searcher = WorkspaceSearch(workdir, config={"top_k": limit})
+    try:
+        hits = searcher.search(args.query)
+    except Exception as e:
+        _out({"success": False, "error": f"search failed: {e}"})
+        return
+
+    results = []
+    for hit in hits:
+        rel = os.path.relpath(hit.path, workdir)
+        with open(hit.path, "r", encoding="utf-8") as f:
+            headings = _parse_headings(f.readlines())
+        results.append({
+            "filename": rel,
+            "heading": hit.heading,
+            "headings": [h["title"] for h in headings],
+            "snippet": hit.snippet,
+            "score": round(hit.score, 4),
+        })
+    _out({"success": True, "query": args.query, "results": results, "count": len(results)})
+
+
 def cmd_outline(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
     filename, _section = _split_filename_section(args.filename)
@@ -696,6 +733,11 @@ def main():
     _base(p)
     p.add_argument("--filename", required=True)
 
+    p = sub.add_parser("search")
+    _base(p)
+    p.add_argument("--query", required=True)
+    p.add_argument("--limit", type=int, default=10)
+
     args = parser.parse_args()
 
     if not args.user_id or not args.session_dir:
@@ -711,6 +753,7 @@ def main():
         "outline": cmd_outline,
         "read-section": cmd_read_section,
         "delete": cmd_delete,
+        "search": cmd_search,
     }
     fn = dispatch.get(args.cmd)
     if not fn:

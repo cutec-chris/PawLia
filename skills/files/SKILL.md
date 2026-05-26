@@ -102,6 +102,20 @@ python <scripts_dir>/files.py grep --pattern "<regex>" --filename "<name>"
 
 Returns a list of `{filename, line, text}` matches. Use this to locate where a string lives before editing.
 
+## BM25 workspace search
+
+```
+python <scripts_dir>/files.py search --query "<search terms>"
+```
+
+Search across all workspace markdown files using BM25 (keyword relevance). Returns files with their headings and a snippet — the model can gauge relevance without reading every file.
+
+```
+python <scripts_dir>/files.py search --query "Ordnungsamt Biederitz" --limit 5
+```
+
+Returns `{filename, heading, headings (list), snippet, score}` for each hit. Use this before `files read` or `files read-section` to find the right file first. Prefer this over `grep` when you don't know the exact filename.
+
 ## Outline a markdown file
 
 ```
