@@ -486,7 +486,7 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
     session._tts_track.stop_after_current_sentence.assert_not_called()
     session._cancel_active_response.assert_not_awaited()
     session._respond_to_transcript.assert_not_awaited()
-    send_cb.assert_not_awaited()
+    send_cb.assert_awaited_once_with("~~🎙️ *hm*~~ *(verworfen)*")
 
 
 @pytest.mark.asyncio

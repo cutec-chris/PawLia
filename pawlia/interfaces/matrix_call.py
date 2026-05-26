@@ -59,6 +59,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger("pawlia.interfaces.matrix_call")
 SAMPLE_RATE = 48000
 
+_KEYWORD_INTERRUPT_RE = re.compile(
+    r"\b(?:halt|stop|stopp|wait|warte|warten|moment|sekunde|pause|pawlia)\b",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Outgoing audio track (TTS playback)
 # ---------------------------------------------------------------------------
@@ -1099,7 +1104,7 @@ class CallSession:
         from pawlia.tts import synthesize_pcm
 
         if announce_transcript:
-            logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
+            logger.info("call %s: transcribed: %s", self.call_id[:8], text)
             await self._send_cb(f"🎙️ *{text}*")
 
         # Start hold audio while waiting for agent response
@@ -1173,9 +1178,16 @@ class CallSession:
 
         await self._send_cb(response)
 
+    async def _send_discarded_transcript(self, text: str) -> None:
+        """Show a discarded (non-keyword barge-in) transcript in the Matrix thread
+        without queuing it for a response.  The caller sees it with a strikethrough
+        marker so they can trace what was ignored later."""
+        logger.debug("call %s: non-keyword speech during playback, discarded: %s", self.call_id[:8], text)
+        await self._send_cb(f"~~🎙️ *{text}*~~ *(verworfen)*")
+
     async def _queue_transcript_response(self, text: str) -> None:
         """Show the transcript now, but reply only after the caller is quiet."""
-        logger.info("call %s: transcribed: %s", self.call_id[:8], text[:120])
+        logger.info("call %s: transcribed: %s", self.call_id[:8], text)
         await self._send_cb(f"🎙️ *{text}*")
         self._pending_transcripts.append(text)
 
@@ -1520,7 +1532,7 @@ class CallSession:
             logger.info(
                 "call %s: ignoring likely standalone STT hallucination: %s",
                 self.call_id[:8],
-                text[:120],
+                text,
             )
             if started_hold and self._tts_track:
                 self._tts_track.stop_hold()
@@ -1528,24 +1540,22 @@ class CallSession:
 
         try:
             if interrupt_playback:
-                if not self._speech_detector.is_meaningful_interrupt(text):
+                if _KEYWORD_INTERRUPT_RE.search(text):
                     logger.info(
-                        "call %s: ignoring non-meaningful barge-in transcript: %s",
+                        "call %s: keyword barge-in detected, interrupting playback: %s",
                         self.call_id[:8],
-                        text[:120],
+                        text,
                     )
-                    return
-                logger.info(
-                    "call %s: meaningful barge-in transcript detected, interrupting playback: %s",
-                    self.call_id[:8],
-                    text[:120],
-                )
-                if self._tts_track:
-                    self._tts_track.stop_after_current_sentence()
-                await self._cancel_active_response()
-                current_task = asyncio.current_task()
-                if current_task:
-                    self._track_response_task(current_task)
+                    if self._tts_track:
+                        self._tts_track.stop_after_current_sentence()
+                    await self._cancel_active_response()
+                    current_task = asyncio.current_task()
+                    if current_task:
+                        self._track_response_task(current_task)
+                    await self._queue_transcript_response(text)
+                else:
+                    await self._send_discarded_transcript(text)
+                return
 
             await self._queue_transcript_response(text)
         except asyncio.CancelledError:
