@@ -1324,6 +1324,9 @@ class CallSession:
 
         return task
 
+    VAD_SETTLE_FRAMES: int = 40
+    VAD_SETTLE_EMA_ALPHA: float = 0.08
+
     async def _audio_pipeline(self, track) -> None:
         """Continuously read audio frames, detect speech, transcribe, respond."""
         fps = 50  # aiortc default: 20 ms frames
@@ -1395,17 +1398,30 @@ class CallSession:
                 if not speech_buffer and pre_speech_frames > 0:
                     pre_speech_buffer.append(pcm)
 
-                # Update background noise floor using AGC-adjusted RMS so that
-                # the adaptive silence threshold tracks the same level that
-                # is_speech_like_frame sees — avoids wind/road noise being
-                # classified as speech when AGC gain is high.
-                self._speech_detector.update_noise_floor(adjusted_rms, during_speech=bool(speech_buffer))
+                # Let noise floor and AGC converge before enabling speech detection.
+                # During the first 0.8 s (40 frames) a faster EMA pulls the noise
+                # floor toward the real background level so that the adaptive
+                # silence threshold is properly calibrated from the very first
+                # utterance.  Without this settling period a misfit between the
+                # starting noise floor (0.05) and the actual environment — combined
+                # with rapidly changing AGC gain — causes false speech-like
+                # triggers or missed pauses at the start of a call.
+                if frames_received <= self.VAD_SETTLE_FRAMES:
+                    if not bool(speech_buffer):
+                        settle_alpha = self.VAD_SETTLE_EMA_ALPHA
+                        nf = self._speech_detector.noise_floor
+                        self._speech_detector._noise_floor = (
+                            settle_alpha * adjusted_rms + (1.0 - settle_alpha) * nf
+                        )
+                    speech_like_frame = False
+                else:
+                    self._speech_detector.update_noise_floor(adjusted_rms, during_speech=bool(speech_buffer))
+
+                    speech_like_frame = self._speech_detector.is_speech_like_frame(
+                        pcm, SAMPLE_RATE, adjusted_rms,
+                    )
 
                 silence_threshold = int(max(1.2, self._speech_detector.SILENCE_SECONDS) * fps)
-
-                speech_like_frame = self._speech_detector.is_speech_like_frame(
-                    pcm, SAMPLE_RATE, adjusted_rms,
-                )
 
                 # While TTS is playing, buffer possible interruptions
                 if self._tts_track and self._tts_track.is_playing:

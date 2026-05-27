@@ -91,7 +91,7 @@ class SpeechDetector:
         context: str = "",
     ) -> None:
         self._context = context
-        self._noise_floor: float = 0.01
+        self._noise_floor: float = 0.05
         self._last_speech_duration: float = 0.0
         self._webrtc_vad = None
         self._apply_config(voip_cfg or {})
