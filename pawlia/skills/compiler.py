@@ -24,6 +24,10 @@ from pawlia.utils import collect_skill_dirs, parse_frontmatter
 
 logger = logging.getLogger(__name__)
 
+# Skills that should never be compiled into workflow.yaml because their
+# tasks involve free-form, multi-line text that breaks rigid building-block
+# command substitution (e.g. implement/fix with arbitrary task descriptions).
+_SKIP_COMPILE = {"skill-creator"}
 
 _ANGLE_PLACEHOLDER_RE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_]*)>")
 
@@ -128,6 +132,10 @@ async def compile_skill(
         return None
 
     skill_name = metadata["name"]
+    if skill_name in _SKIP_COMPILE:
+        logger.info("Skill '%s' is blacklisted from compilation — skipping", skill_name)
+        return None
+
     version = str(metadata.get("metadata", {}).get("version", "1.0"))
 
     # Check if already compiled and up-to-date
@@ -182,6 +190,11 @@ async def compile_skill(
             )
             if attempt < max_retries:
                 continue
+            return None
+
+        # Check if the compiler judged the skill unsuitable for workflow compilation
+        if raw_content == "UNSUITABLE" or raw_content.splitlines()[0].strip() == "UNSUITABLE":
+            logger.info("Compiler judged skill '%s' as unsuitable for workflow compilation — skipping", skill_name)
             return None
 
         raw = _extract_yaml(raw_content)

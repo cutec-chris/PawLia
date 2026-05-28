@@ -103,5 +103,8 @@ class TestWorkflowExecutorConfigInjection:
         )
 
         assert "/tmp/skill/scripts/search.py" in command.replace("\\", "/")
-        assert '--query "hello"' in command
+        # query is a param → shlex.quote strips template quotes and applies shell
+        # quoting (bare word here because "hello" has no shell metacharacters)
+        assert "--query hello" in command
+        # url is skill_config → substituted verbatim, template quotes kept
         assert '--url "http://example.test"' in command

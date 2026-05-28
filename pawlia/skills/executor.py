@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shlex
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -353,10 +354,21 @@ class WorkflowExecutor:
             result = result.replace(f"{{{key}}}", value)
             result = result.replace(f"<{key}>", value)
 
-        # Replace both {key} and <key> for all params
+        # Replace both {key} and <key> for all params.
+        # If the template wraps the placeholder in quotes (e.g. "{task}"),
+        # strip those quotes and apply shlex.quote so that spaces and
+        # shell metacharacters in LLM-generated arguments don't break the
+        # command. This is backwards-compatible with existing workflow.yaml
+        # files that already quote placeholders.
         for key, value in params.items():
-            result = result.replace(f"{{{key}}}", str(value))
-            result = result.replace(f"<{key}>", str(value))
+            quoted = shlex.quote(str(value))
+            for quoted_pat in [
+                f'"{{{key}}}"', f"'{{{key}}}'",
+                f'"<{key}>"', f"'<{key}>'",
+            ]:
+                result = result.replace(quoted_pat, quoted)
+            result = result.replace(f"{{{key}}}", quoted)
+            result = result.replace(f"<{key}>", quoted)
 
         return result
 
