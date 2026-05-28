@@ -390,12 +390,14 @@ class SpeechDetector:
         speech_like_frame: bool,
         silence_count: int,
         resume_speech_count: int,
+        min_frames: Optional[int] = None,
     ) -> tuple[bool, int]:
         """Require a short sustained return before breaking an in-progress pause."""
         if not speech_like_frame or silence_count <= 0:
             return False, 0
         resume_speech_count += 1
-        return resume_speech_count >= self.MIN_RESUME_SPEECH_FRAMES, resume_speech_count
+        threshold = min_frames if min_frames is not None else self.MIN_RESUME_SPEECH_FRAMES
+        return resume_speech_count >= threshold, resume_speech_count
 
     @staticmethod
     def start_buffer(

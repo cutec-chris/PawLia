@@ -502,6 +502,10 @@ class CallSession:
             voip_cfg, "hangup_on_media_end", self.HANGUP_ON_MEDIA_END,
             context=ctx,
         )
+        self.VAD_MAX_CHUNK_SECONDS = get_float_config(
+            voip_cfg, "vad_max_chunk_seconds", self.VAD_MAX_CHUNK_SECONDS,
+            context=ctx, minimum=0.0,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -1326,6 +1330,7 @@ class CallSession:
 
     VAD_SETTLE_FRAMES: int = 40
     VAD_SETTLE_EMA_ALPHA: float = 0.08
+    VAD_MAX_CHUNK_SECONDS: float = 0.0
 
     async def _audio_pipeline(self, track) -> None:
         """Continuously read audio frames, detect speech, transcribe, respond."""
@@ -1337,6 +1342,8 @@ class CallSession:
         pre_speech_buffer: "deque[np.ndarray]" = deque(maxlen=max(pre_speech_frames, 1))
         silence_count = 0
         resume_speech_count = 0
+        speech_buffer_start_frame = 0
+        max_chunk_frames = int(self.VAD_MAX_CHUNK_SECONDS * fps) if self.VAD_MAX_CHUNK_SECONDS > 0 else 0
 
         logger.info("call %s: audio pipeline started", self.call_id[:8])
         frames_received = 0
@@ -1423,6 +1430,45 @@ class CallSession:
 
                 silence_threshold = int(max(1.2, self._speech_detector.SILENCE_SECONDS) * fps)
 
+                # In noisy environments require more consecutive frames to cancel a pause,
+                # so brief road/wind bursts don't reset silence_count.
+                nf_ratio = self._speech_detector.noise_floor / max(
+                    self._speech_detector.SILENCE_THRESHOLD, 1e-6
+                )
+                effective_resume_frames = min(
+                    20,
+                    max(
+                        self._speech_detector.MIN_RESUME_SPEECH_FRAMES,
+                        int(self._speech_detector.MIN_RESUME_SPEECH_FRAMES * nf_ratio),
+                    ),
+                )
+
+                # Force-flush an open speech buffer that has been running too long.
+                # Prevents indefinitely-held chunks when noise keeps resetting the
+                # silence counter (e.g. intermittent road noise on a bike).
+                # Disabled when VAD_MAX_CHUNK_SECONDS == 0.
+                if (
+                    max_chunk_frames > 0
+                    and speech_buffer
+                    and (frames_received - speech_buffer_start_frame) >= max_chunk_frames
+                ):
+                    logger.info(
+                        "call %s: max chunk duration reached (%.0fs), force-flushing",
+                        self.call_id[:8], self.VAD_MAX_CHUNK_SECONDS,
+                    )
+                    task = self._finalize_speech_chunk(
+                        speech_buffer, SAMPLE_RATE, fps, min_speech_frames,
+                        is_barge_in=False,
+                    )
+                    if task is not None and self._tts_track:
+                        self._tts_track.start_hold()
+                    speech_buffer = []
+                    pre_speech_buffer.clear()
+                    silence_count = 0
+                    resume_speech_count = 0
+                    speech_buffer_start_frame = 0
+                    self._mark_user_speech_ended()
+
                 # While TTS is playing, buffer possible interruptions
                 if self._tts_track and self._tts_track.is_playing:
                     if (
@@ -1436,10 +1482,12 @@ class CallSession:
                             )
                             self._mark_user_speech_started()
                             speech_buffer = SpeechDetector.start_buffer(pre_speech_buffer, pcm)
+                            speech_buffer_start_frame = frames_received
                         else:
                             speech_buffer.append(pcm)
                         resume_confirmed, resume_speech_count = self._speech_detector.resume_after_pause(
                             speech_like_frame, silence_count, resume_speech_count,
+                            min_frames=effective_resume_frames,
                         )
                         if resume_confirmed:
                             silence_count = 0
@@ -1462,6 +1510,7 @@ class CallSession:
                             pre_speech_buffer.clear()
                             silence_count = 0
                             resume_speech_count = 0
+                            speech_buffer_start_frame = 0
                             self._mark_user_speech_ended()
                     continue
 
@@ -1473,10 +1522,12 @@ class CallSession:
                                     self.call_id[:8], rms)
                         self._mark_user_speech_started()
                         speech_buffer = SpeechDetector.start_buffer(pre_speech_buffer, pcm)
+                        speech_buffer_start_frame = frames_received
                     else:
                         speech_buffer.append(pcm)
                     resume_confirmed, resume_speech_count = self._speech_detector.resume_after_pause(
                         speech_like_frame, silence_count, resume_speech_count,
+                        min_frames=effective_resume_frames,
                     )
                     if resume_confirmed:
                         silence_count = 0
@@ -1502,6 +1553,7 @@ class CallSession:
                         pre_speech_buffer.clear()
                         silence_count = 0
                         resume_speech_count = 0
+                        speech_buffer_start_frame = 0
                         self._mark_user_speech_ended()
         except Exception as e:
             logger.error("call %s: audio pipeline error: %s", self.call_id[:8], e)
