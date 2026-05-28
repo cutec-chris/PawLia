@@ -20,6 +20,7 @@ from pawlia.agents.chat import ChatAgent
 from pawlia.agents.router import RouterAgent
 from pawlia.agents.skill_runner import SkillRunnerAgent
 from pawlia.scheduler import Scheduler
+from pawlia.tools.files_tools import ReadFileTool, ListFilesTool, GrepFilesTool
 
 
 class App:
@@ -228,6 +229,13 @@ class App:
             # Model-size-aware tool-turn budget
             chat_model_name = self.llm.default_model_name("chat", agent_overrides=overrides)
             chat_max_turns = self.llm.max_tool_turns_for_model(chat_model_name)
+            # Build direct tools (executed inline without SkillRunner overhead)
+            direct_tools = {
+                "read_file": ReadFileTool(),
+                "list_files": ListFilesTool(),
+                "grep_files": GrepFilesTool(),
+            }
+
             agent = ChatAgent(
                 llm=chat_llm,
                 skills=user_skills,
@@ -238,6 +246,7 @@ class App:
                 vision_llm=vision_llm,
                 workspace_search_cfg=ws_search_cfg,
                 max_tool_turns=chat_max_turns,
+                direct_tools=direct_tools,
                 **kwargs,
             )
             # Resolve session/thread-specific agent selectors at run() time.

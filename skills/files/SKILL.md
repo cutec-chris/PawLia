@@ -1,6 +1,6 @@
 ---
 name: files
-description: Read, write, edit, list, grep, outline, read-section, and delete files in the user's personal workspace. Use for creating notes, saving text, reading previously saved files, making targeted edits to existing files, searching across the workspace, writing workspace config files like identity.md, soul.md, user.md, and deleting files like bootstrap.md. Do NOT use for reading or editing skill scripts or SKILL.md files — delegate the whole task to the skill-creator skill instead. Filenames are resolved case-insensitively — if a file exists under a different casing it is used as-is; new files keep the casing you provide.
+description: Write, edit, delete, outline, and read-section files in the user's personal workspace. For simple reads, listing, or searching use the direct tools read_file, list_files, or grep_files instead — they are faster and do not require spawning a skill runner. Use this skill for creating notes, saving text, making targeted edits, writing workspace config files like identity.md, soul.md, user.md, and deleting files like bootstrap.md. Do NOT use for reading or editing skill scripts or SKILL.md files — delegate the whole task to the skill-creator skill instead. Filenames are resolved case-insensitively — if a file exists under a different casing it is used as-is; new files keep the casing you provide.
 license: MIT
 metadata:
   author: Christian Ulrich
