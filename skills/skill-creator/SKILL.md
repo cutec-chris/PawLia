@@ -17,7 +17,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "3.2"
-  max_tool_turns: 50
+  max_tool_turns: 150
 ---
 
 # Skill Creator
