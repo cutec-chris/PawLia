@@ -15,7 +15,8 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 VALID_FOCUS_MODES = {"webSearch", "academicSearch", "writingAssistant", "wolframAlphaSearch", "youtubeSearch", "redditSearch"}
 
 
-def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 60) -> dict:
+def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 60,
+           chat_model: str | None = None, chat_model_provider: str | None = None) -> dict:
     base_url = url.rstrip("/")
     if focus_mode not in VALID_FOCUS_MODES:
         focus_mode = "webSearch"
@@ -25,6 +26,11 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
         "optimizationMode": "balanced",
         "history": [],
     }
+    if chat_model and chat_model_provider:
+        payload["chatModel"] = {
+            "provider": chat_model_provider,
+            "model": chat_model,
+        }
     resp = requests.post(f"{base_url}/api/search", json=payload, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
@@ -87,16 +93,21 @@ def main():
 
     try:
         url = args.url
+        chat_model = None
+        chat_model_provider = None
         if not url:
             raw_config = os.environ.get("PAWLIA_SKILL_CONFIG", "{}")
             try:
-                url = json.loads(raw_config).get("url", "")
+                config = json.loads(raw_config)
+                url = config.get("url", "")
+                chat_model = config.get("chat_model")
+                chat_model_provider = config.get("chat_model_provider")
             except json.JSONDecodeError:
                 url = ""
         if not url:
             raise ValueError("Missing Perplexica URL. Set skill-config.perplexica.url or pass --url.")
 
-        result = search(args.query, url, args.focus, args.timeout)
+        result = search(args.query, url, args.focus, args.timeout, chat_model, chat_model_provider)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)

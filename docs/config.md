@@ -461,6 +461,8 @@ skill-config:
     timeout: 10
   perplexica:
     url: http://localhost:3000
+    chat_model_provider: ollama
+    chat_model: llama3.1
 ```
 
 ### RAG backends (memory & researcher)

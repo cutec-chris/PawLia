@@ -241,6 +241,8 @@ skill-config:
 
   # perplexica:
   #   url: http://localhost:3000
+  #   chat_model_provider: ollama
+  #   chat_model: llama3.1
 
   # researcher:                          # Research projects
   #   embedding_provider: ollama
