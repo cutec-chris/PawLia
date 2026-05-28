@@ -39,6 +39,7 @@ RUN apk add --no-cache \
         npm \
         espeak-ng \
         ffmpeg \
+        flac \
         wget \
         py3-numpy \
         py3-onnxruntime \

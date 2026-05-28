@@ -1118,6 +1118,21 @@ class CallSession:
                     wf.setsampwidth(2)
                     wf.setframerate(sample_rate)
                     wf.writeframes(pcm_int16.tobytes())
+                # Compress to FLAC if available to save space
+                try:
+                    import shutil
+                    import subprocess
+                    if shutil.which("flac"):
+                        flac_path = fpath.rsplit(".", 1)[0] + ".flac"
+                        subprocess.run(
+                            ["flac", "--best", "--silent", "-o", flac_path, fpath],
+                            capture_output=True, timeout=10,
+                        )
+                        if os.path.exists(flac_path):
+                            os.remove(fpath)
+                            fpath = flac_path
+                except Exception:
+                    pass
                 logger.debug("call %s: debug audio saved to %s", self.call_id[:8], fpath)
             except Exception as e:
                 logger.debug("call %s: could not save debug audio: %s", self.call_id[:8], e)

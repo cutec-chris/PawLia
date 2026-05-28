@@ -9,7 +9,7 @@ import logging
 import os
 import wave
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -42,8 +42,9 @@ class CallRecorder:
         self.compress_to_flac = compress_to_flac
         self._frames: List[np.ndarray] = []
         self._total_samples = 0
-        self._frames_pawlia: List[np.ndarray] = []
-        self._total_samples_pawlia = 0
+        # Each entry is (offset_samples, pcm) so Pawlia audio is placed at the
+        # correct timeline position relative to the caller stream.
+        self._frames_pawlia: List[Tuple[int, np.ndarray]] = []
 
     def push(self, pcm: np.ndarray) -> None:
         """Append a single PCM frame from the *caller* (float32 mono, [-1.0, 1.0])."""
@@ -51,14 +52,17 @@ class CallRecorder:
         self._total_samples += len(pcm)
 
     def push_pawlia(self, pcm: np.ndarray) -> None:
-        """Append a single PCM frame from *Pawlia's TTS* (float32 mono, [-1.0, 1.0])."""
-        self._frames_pawlia.append(pcm)
-        self._total_samples_pawlia += len(pcm)
+        """Append a single PCM frame from *Pawlia's TTS* (float32 mono, [-1.0, 1.0]).
+
+        The frame is tagged with the current caller sample offset so it can be
+        written at the correct timeline position in the final stereo file.
+        """
+        self._frames_pawlia.append((self._total_samples, pcm))
 
     def finish(self) -> Optional[str]:
         """Write accumulated audio to disk. Returns the output file path or None."""
         has_caller = self._frames and self._total_samples > 0
-        has_pawlia = self._frames_pawlia and self._total_samples_pawlia > 0
+        has_pawlia = bool(self._frames_pawlia)
 
         if not has_caller and not has_pawlia:
             logger.debug("call %s: no audio recorded, skipping", self.call_id[:8])
@@ -72,16 +76,20 @@ class CallRecorder:
         try:
             if has_pawlia:
                 caller = np.concatenate(self._frames) if has_caller else np.zeros(0, dtype=np.float32)
-                pawlia = np.concatenate(self._frames_pawlia)
-                max_len = max(len(caller), len(pawlia))
-                stereo = np.empty((max_len, 2), dtype=np.float32)
+                # Caller stream defines the baseline timeline length.
+                max_len = len(caller)
+                pawlia_total = 0
+                for offset, pcm in self._frames_pawlia:
+                    pawlia_total += len(pcm)
+                    max_len = max(max_len, offset + len(pcm))
+
+                stereo = np.zeros((max_len, 2), dtype=np.float32)
                 if len(caller):
                     stereo[: len(caller), 0] = caller
-                if len(caller) < max_len:
-                    stereo[len(caller):, 0] = 0.0
-                stereo[: len(pawlia), 1] = pawlia
-                if len(pawlia) < max_len:
-                    stereo[len(pawlia):, 1] = 0.0
+                for offset, pcm in self._frames_pawlia:
+                    end = min(offset + len(pcm), max_len)
+                    stereo[offset:end, 1] = pcm[: end - offset]
+
                 stereo_int16 = (np.clip(stereo, -1.0, 1.0) * 32767).astype(np.int16)
                 with wave.open(wav_path, "wb") as wf:
                     wf.setnchannels(2)
@@ -92,7 +100,7 @@ class CallRecorder:
                     "call %s: recorded %.1fs caller + %.1fs pawlia (stereo) → %s",
                     self.call_id[:8],
                     self._total_samples / self.sample_rate,
-                    self._total_samples_pawlia / self.sample_rate,
+                    pawlia_total / self.sample_rate,
                     wav_path,
                 )
             else:
