@@ -26,16 +26,15 @@ FOCUS_TO_SOURCES = {
 }
 
 def _cache_path() -> str:
-    """Return the cache file path inside the session directory (like other configs)."""
+    """Return the cache file path inside the session directory."""
     session_dir = os.environ.get("PAWLIA_SESSION_DIR", "")
     user_id = os.environ.get("PAWLIA_USER_ID", "")
     if session_dir and user_id:
-        cache_dir = os.path.join(session_dir, user_id, ".cache")
+        return os.path.join(session_dir, user_id, ".perplexica.json")
     elif session_dir:
-        cache_dir = os.path.join(session_dir, ".cache")
+        return os.path.join(session_dir, ".perplexica.json")
     else:
-        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "pawlia")
-    return os.path.join(cache_dir, "perplexica-model-cache.json")
+        return os.path.join(os.path.expanduser("~"), ".cache", "pawlia", "perplexica-model-cache.json")
 
 
 def _cache_key(url: str) -> str:
@@ -262,19 +261,6 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
     if not models_to_try:
         raise RuntimeError("No chat models available to try.")
 
-    # Only probe the top 5 fastest models so we don't queue 16 requests.
-    models_to_try = models_to_try[:5]
-
-    # If we have a cached model, try it first alone (fast path)
-    if cached_model and cached_model in models_to_try:
-        try:
-            result = _search_single(query, base_url, sources, cached_model, embedding_model, timeout)
-            _save_cached_model(url, cached_model)
-            return result
-        except Exception:
-            # Cached model failed, fall through to parallel sweep
-            pass
-
     errors = []
 
     def _worker(chat_model: dict):
@@ -284,10 +270,12 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             label = f"{chat_model.get('providerId', '?')}/{chat_model.get('key', '?')}"
             return {"_error": True, "_label": label, "_exc": str(e)}
 
-    # Fire the remaining candidates all in parallel so the fastest one wins
-    # immediately without waiting for a slow model to free up a worker slot.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(models_to_try)) as executor:
-        futures = {executor.submit(_worker, m): m for m in models_to_try}
+    # Fire every candidate in its own thread so the truly fastest one wins
+    # immediately.  We shut down with wait=False so a slow/hanging model
+    # doesn't block returning the winning result.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(models_to_try))
+    futures = {executor.submit(_worker, m): m for m in models_to_try}
+    try:
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
             if result.get("_error"):
@@ -296,6 +284,8 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             # Remember the working model for next time
             _save_cached_model(url, futures[future])
             return result
+    finally:
+        executor.shutdown(wait=False)
 
     raise RuntimeError(f"All chat models failed. Errors: {'; '.join(errors)}")
 
