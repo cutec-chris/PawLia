@@ -37,6 +37,17 @@ timestamp="$(date +%Y%m%d-%H%M%S)"
 safe_host="$(printf '%s' "$ssh_host" | tr '@:' '__')"
 safe_container="$(printf '%s' "$container" | tr '/' '_')"
 
+# finde den zeitstempel des letzten fetch, um nur neue debug_audio dateien zu laden
+last_fetch_touch_ts=""
+prev_dir=$(find "$output_dir" -maxdepth 1 -type d -name "${safe_host}-${safe_container}-*" 2>/dev/null | sort -r | head -1)
+if [ -n "$prev_dir" ]; then
+    prev_stamp=$(basename "$prev_dir")
+    prefix="${safe_host}-${safe_container}-"
+    prev_stamp=${prev_stamp#"$prefix"}
+    # wandle 20260528-111020 → 202605281110.20 für touch -t
+    last_fetch_touch_ts=$(echo "$prev_stamp" | sed 's/^\([0-9]\{8\}\)-\([0-9]\{2\}\)\([0-9]\{2\}\)\([0-9]\{2\}\)/\1\2\3.\4/')
+fi
+
 mkdir -p "$output_dir"
 
 fetch_dir="${output_dir}/${safe_host}-${safe_container}-${timestamp}"
@@ -57,7 +68,16 @@ echo "Logs gespeichert in: $target_file"
 if [ "$fetch_debug_audio" = "1" ]; then
     mkdir -p "$audio_target_dir"
     echo "Lade Debug-Audio aus ${debug_audio_dir} von ${container} auf ${ssh_host} ..."
-    remote_audio_command="podman exec '$container' sh -lc 'if [ -d \"$debug_audio_dir\" ]; then tar -C \"$debug_audio_dir\" -cf - .; fi'"
+
+    if [ -n "$last_fetch_touch_ts" ]; then
+        echo "  (nur Dateien neuer als letzter Fetch ${prev_stamp})"
+        inner_cmd="AUDIO_DIR=\"$debug_audio_dir\"; cd \"\$AUDIO_DIR\" 2>/dev/null || exit 0; REF=\$(mktemp) && touch -t \"$last_fetch_touch_ts\" \"\$REF\" && find . -type f -newer \"\$REF\" -print | tar -cf - -T - 2>/dev/null; rm -f \"\$REF\""
+    else
+        inner_cmd="if [ -d \"$debug_audio_dir\" ]; then tar -C \"$debug_audio_dir\" -cf - .; fi"
+    fi
+
+    remote_audio_command="podman exec '$container' sh -lc '$inner_cmd'"
+
     if ssh "$ssh_host" "$remote_audio_command" \
         | tar -C "$audio_target_dir" -xf - 2>/dev/null
     then
@@ -65,7 +85,7 @@ if [ "$fetch_debug_audio" = "1" ]; then
             echo "Debug-Audio gespeichert in: $audio_target_dir"
         else
             rmdir "$audio_target_dir"
-            echo "Kein Debug-Audio gefunden."
+            echo "Kein (neues) Debug-Audio gefunden."
         fi
     else
         rmdir "$audio_target_dir" 2>/dev/null || true
