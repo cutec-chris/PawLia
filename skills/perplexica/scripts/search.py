@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Perplexica/Vane AI search CLI script. Outputs JSON results to stdout."""
 import argparse
+import concurrent.futures
+import hashlib
 import json
 import os
 import sys
@@ -22,6 +24,39 @@ FOCUS_TO_SOURCES = {
     "youtubeSearch": ["web"],
     "redditSearch": ["discussions"],
 }
+
+# Cache file to remember the fastest working model per instance
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "pawlia")
+CACHE_FILE = os.path.join(CACHE_DIR, "perplexica-model-cache.json")
+
+
+def _cache_key(url: str) -> str:
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+def _load_cached_model(url: str) -> dict | None:
+    try:
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get(_cache_key(url))
+    except Exception:
+        pass
+    return None
+
+
+def _save_cached_model(url: str, model: dict):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        data = {}
+        if os.path.exists(CACHE_FILE):
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        data[_cache_key(url)] = model
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 def get_providers(url: str, timeout: int = 10) -> list[dict]:
@@ -59,34 +94,47 @@ def _pick_first_available(providers: list[dict], model_key: str) -> dict | None:
     return None
 
 
-def resolve_models(url: str, config: dict, timeout: int = 10) -> tuple[dict, dict]:
-    """Resolve chatModel and embeddingModel from config + provider list.
-
-    Falls back to the first available model if not explicitly configured.
-    """
-    providers = get_providers(url, timeout)
-    if not providers:
-        raise RuntimeError("Could not fetch providers from the Vane/Perplexica instance.")
-
+def resolve_chat_models(providers: list[dict], config: dict, cached: dict | None = None) -> list[dict]:
+    """Build a prioritized list of chat model dicts to try."""
     chat_cfg = config.get("chat_model_provider") or config.get("chat_model_provider_name")
     chat_model = config.get("chat_model")
-    emb_cfg = config.get("embedding_model_provider") or config.get("embedding_model_provider_name")
-    emb_model = config.get("embedding_model")
 
-    chat_model_obj = None
-    embedding_model_obj = None
+    result = []
+    seen_keys = set()
 
+    # 0. Cached model (fastest from previous run) always goes first
+    if cached and cached.get("providerId") and cached.get("key"):
+        result.append(dict(cached))
+        seen_keys.add((cached["providerId"], cached["key"]))
+
+    # 1. Explicitly configured model
     if chat_cfg and chat_model:
         provider_id = find_provider_id(providers, chat_cfg)
         if provider_id:
             for p in providers:
                 if p.get("id") == provider_id:
                     matched_key = find_model_key(p.get("chatModels", []), chat_model)
-                    if matched_key:
-                        chat_model_obj = {"providerId": provider_id, "key": matched_key}
+                    if matched_key and (provider_id, matched_key) not in seen_keys:
+                        result.append({"providerId": provider_id, "key": matched_key})
+                        seen_keys.add((provider_id, matched_key))
                     break
-    if not chat_model_obj:
-        chat_model_obj = _pick_first_available(providers, "chatModels")
+
+    # 2. All remaining chat models from all providers
+    for p in providers:
+        pid = p.get("id")
+        for m in p.get("chatModels", []):
+            key = m.get("key")
+            if key and (pid, key) not in seen_keys:
+                result.append({"providerId": pid, "key": key})
+                seen_keys.add((pid, key))
+
+    return result
+
+
+def resolve_embedding_model(providers: list[dict], config: dict) -> dict:
+    """Resolve embedding model from config or pick first available."""
+    emb_cfg = config.get("embedding_model_provider") or config.get("embedding_model_provider_name")
+    emb_model = config.get("embedding_model")
 
     if emb_cfg and emb_model:
         provider_id = find_provider_id(providers, emb_cfg)
@@ -95,37 +143,25 @@ def resolve_models(url: str, config: dict, timeout: int = 10) -> tuple[dict, dic
                 if p.get("id") == provider_id:
                     matched_key = find_model_key(p.get("embeddingModels", []), emb_model)
                     if matched_key:
-                        embedding_model_obj = {"providerId": provider_id, "key": matched_key}
-                    break
-    if not embedding_model_obj:
-        embedding_model_obj = _pick_first_available(providers, "embeddingModels")
+                        return {"providerId": provider_id, "key": matched_key}
 
-    if not chat_model_obj:
-        raise RuntimeError("No chat model available on the Vane/Perplexica instance.")
-    if not embedding_model_obj:
-        raise RuntimeError("No embedding model available on the Vane/Perplexica instance.")
-
-    return chat_model_obj, embedding_model_obj
+    fallback = _pick_first_available(providers, "embeddingModels")
+    if fallback:
+        return fallback
+    raise RuntimeError("No embedding model available on the Vane/Perplexica instance.")
 
 
-def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 60,
-           chat_model: dict | None = None, embedding_model: dict | None = None) -> dict:
-    base_url = url.rstrip("/")
-    if focus_mode not in VALID_FOCUS_MODES:
-        focus_mode = "webSearch"
-
-    sources = FOCUS_TO_SOURCES.get(focus_mode, ["web"])
-
+def _search_single(query: str, base_url: str, sources: list[str], chat_model: dict,
+                   embedding_model: dict, timeout: int) -> dict:
+    """Perform a single search request with a specific chat model."""
     payload: dict = {
         "query": query,
         "sources": sources,
         "optimizationMode": "balanced",
         "history": [],
         "stream": False,
+        "chatModel": chat_model,
     }
-
-    if chat_model:
-        payload["chatModel"] = chat_model
     if embedding_model:
         payload["embeddingModel"] = embedding_model
 
@@ -179,7 +215,55 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
         result["quality"] = result_quality
         result["hints"] = quality_hints
 
+    model_label = f"{chat_model.get('providerId', '?')}/{chat_model.get('key', '?')}"
+    result["model_used"] = model_label
     return result
+
+
+def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 60,
+           chat_models: list[dict] | None = None, embedding_model: dict | None = None,
+           cached_model: dict | None = None) -> dict:
+    base_url = url.rstrip("/")
+    if focus_mode not in VALID_FOCUS_MODES:
+        focus_mode = "webSearch"
+
+    sources = FOCUS_TO_SOURCES.get(focus_mode, ["web"])
+    models_to_try = chat_models or []
+    if not models_to_try:
+        raise RuntimeError("No chat models available to try.")
+
+    # If we have a cached model, try it first alone (fast path)
+    if cached_model and cached_model in models_to_try:
+        try:
+            result = _search_single(query, base_url, sources, cached_model, embedding_model, timeout)
+            _save_cached_model(url, cached_model)
+            return result
+        except Exception:
+            # Cached model failed, fall through to parallel sweep
+            pass
+
+    errors = []
+
+    def _worker(chat_model: dict):
+        try:
+            return _search_single(query, base_url, sources, chat_model, embedding_model, timeout)
+        except Exception as e:
+            label = f"{chat_model.get('providerId', '?')}/{chat_model.get('key', '?')}"
+            return {"_error": True, "_label": label, "_exc": str(e)}
+
+    # Fire all remaining requests in parallel, return the first successful one
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(models_to_try)) as executor:
+        futures = {executor.submit(_worker, m): m for m in models_to_try}
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result.get("_error"):
+                errors.append(f"{result['_label']}: {result['_exc']}")
+                continue
+            # Remember the working model for next time
+            _save_cached_model(url, futures[future])
+            return result
+
+    raise RuntimeError(f"All chat models failed. Errors: {'; '.join(errors)}")
 
 
 def main():
@@ -203,8 +287,18 @@ def main():
         if not url:
             raise ValueError("Missing Perplexica/Vane URL. Set skill-config.perplexica.url or pass --url.")
 
-        chat_model, embedding_model = resolve_models(url, config, timeout=10)
-        result = search(args.query, url, args.focus, args.timeout, chat_model, embedding_model)
+        providers = get_providers(url, timeout=10)
+        if not providers:
+            raise RuntimeError("Could not fetch providers from the Vane/Perplexica instance.")
+
+        cached = _load_cached_model(url)
+        chat_models = resolve_chat_models(providers, config, cached=cached)
+        if not chat_models:
+            raise RuntimeError("No chat models available on the Vane/Perplexica instance.")
+
+        embedding_model = resolve_embedding_model(providers, config)
+
+        result = search(args.query, url, args.focus, args.timeout, chat_models, embedding_model, cached_model=cached)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)
