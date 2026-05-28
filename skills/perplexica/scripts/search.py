@@ -25,9 +25,17 @@ FOCUS_TO_SOURCES = {
     "redditSearch": ["discussions"],
 }
 
-# Cache file to remember the fastest working model per instance
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "pawlia")
-CACHE_FILE = os.path.join(CACHE_DIR, "perplexica-model-cache.json")
+def _cache_path() -> str:
+    """Return the cache file path inside the session directory (like other configs)."""
+    session_dir = os.environ.get("PAWLIA_SESSION_DIR", "")
+    user_id = os.environ.get("PAWLIA_USER_ID", "")
+    if session_dir and user_id:
+        cache_dir = os.path.join(session_dir, user_id, ".cache")
+    elif session_dir:
+        cache_dir = os.path.join(session_dir, ".cache")
+    else:
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "pawlia")
+    return os.path.join(cache_dir, "perplexica-model-cache.json")
 
 
 def _cache_key(url: str) -> str:
@@ -35,9 +43,10 @@ def _cache_key(url: str) -> str:
 
 
 def _load_cached_model(url: str) -> dict | None:
+    cache_file = _cache_path()
     try:
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+        if os.path.exists(cache_file):
+            with open(cache_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return data.get(_cache_key(url))
     except Exception:
@@ -46,14 +55,15 @@ def _load_cached_model(url: str) -> dict | None:
 
 
 def _save_cached_model(url: str, model: dict):
+    cache_file = _cache_path()
     try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         data = {}
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+        if os.path.exists(cache_file):
+            with open(cache_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
         data[_cache_key(url)] = model
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        with open(cache_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
@@ -94,6 +104,24 @@ def _pick_first_available(providers: list[dict], model_key: str) -> dict | None:
     return None
 
 
+def _model_speed_score(key: str) -> int:
+    """Lower score = faster/better priority for simple queries."""
+    k = key.lower()
+    if "instant" in k:
+        return 0
+    if "mini" in k or "turbo" in k:
+        return 1
+    if "8b" in k:
+        return 2
+    if "32b" in k or "70b" in k:
+        return 3
+    if "compound" in k:
+        return 5
+    if "whisper" in k:
+        return 10
+    return 4
+
+
 def resolve_chat_models(providers: list[dict], config: dict, cached: dict | None = None) -> list[dict]:
     """Build a prioritized list of chat model dicts to try."""
     chat_cfg = config.get("chat_model_provider") or config.get("chat_model_provider_name")
@@ -119,14 +147,16 @@ def resolve_chat_models(providers: list[dict], config: dict, cached: dict | None
                         seen_keys.add((provider_id, matched_key))
                     break
 
-    # 2. All remaining chat models from all providers
+    # 2. All remaining chat models from all providers, sorted by speed preference
+    remaining = []
     for p in providers:
         pid = p.get("id")
         for m in p.get("chatModels", []):
             key = m.get("key")
             if key and (pid, key) not in seen_keys:
-                result.append({"providerId": pid, "key": key})
-                seen_keys.add((pid, key))
+                remaining.append({"providerId": pid, "key": key})
+    remaining.sort(key=lambda m: _model_speed_score(m["key"]))
+    result.extend(remaining)
 
     return result
 
@@ -157,7 +187,7 @@ def _search_single(query: str, base_url: str, sources: list[str], chat_model: di
     payload: dict = {
         "query": query,
         "sources": sources,
-        "optimizationMode": "balanced",
+        "optimizationMode": "speed",
         "history": [],
         "stream": False,
         "chatModel": chat_model,
@@ -251,9 +281,11 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             label = f"{chat_model.get('providerId', '?')}/{chat_model.get('key', '?')}"
             return {"_error": True, "_label": label, "_exc": str(e)}
 
-    # Fire all remaining requests in parallel, return the first successful one
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(models_to_try)) as executor:
-        futures = {executor.submit(_worker, m): m for m in models_to_try}
+    # Fire top models in parallel (max 3 at a time), cancel the rest as soon
+    # as the first one succeeds so we don't keep burning resources.
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+    futures = {executor.submit(_worker, m): m for m in models_to_try}
+    try:
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
             if result.get("_error"):
@@ -262,6 +294,12 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             # Remember the working model for next time
             _save_cached_model(url, futures[future])
             return result
+    finally:
+        # Cancel anything that hasn't started yet and shut down without
+        # waiting for slow/hanging requests to finish.
+        for f in futures:
+            f.cancel()
+        executor.shutdown(wait=False)
 
     raise RuntimeError(f"All chat models failed. Errors: {'; '.join(errors)}")
 
