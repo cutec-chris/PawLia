@@ -164,19 +164,11 @@ async def main() -> None:
         with open(os.path.join(user_dir, "workspace", filename), "w", encoding="utf-8") as f:
             f.write(content)
 
-    # Use GLM-5.1 (Z.AI) — the model that had the 1214 error.
-    # Inject a model config entry and point the chat agent to it.
-    models_cfg = app.config.get("models") or {}
-    models_cfg["glm51"] = {
-        "model": "GLM-5.1",
-        "provider": "zai",
-        "temperature": 0.7,
-    }
+    # Use the configured fast model (gpt-oss-120b via Groq)
+    # Ensure chat agent uses it
     agents_cfg = app.config.get("agents") or {}
-    agents_cfg["chat"] = "glm51"
-    agents_cfg["default"] = "glm51"
-    models_cfg["glm51"] = models_cfg["glm51"]
-    app.config["models"] = models_cfg
+    agents_cfg["chat"] = "fast"
+    agents_cfg["default"] = "fast"
     app.config["agents"] = agents_cfg
 
     agent = app.make_agent(USER_ID)

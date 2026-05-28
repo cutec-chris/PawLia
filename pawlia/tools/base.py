@@ -72,7 +72,9 @@ class Tool(ABC):
         if args is None:
             return {}
         if isinstance(args, dict):
-            return dict(args)
+            # Strip null values so optional params don't trigger schema
+            # violations on strict APIs (e.g. Groq rejects "filename": null).
+            return {k: v for k, v in args.items() if v is not None}
         if isinstance(args, str):
             properties = list(self.input_schema().get("properties", {}))
             if len(properties) == 1:

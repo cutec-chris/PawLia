@@ -1298,7 +1298,8 @@ class ChatAgent(BaseAgent):
         if self._agent_llm_resolver:
             agent_type = "vision" if images else "chat"
             llm = self._agent_llm_resolver(agent_type, thread_id)
-            bound = llm.bind_tools(self._skill_specs, tool_choice="auto") if self._skill_specs else llm
+            all_specs = self._skill_specs + getattr(self, "_direct_tool_specs", [])
+            bound = llm.bind_tools(all_specs, tool_choice="auto") if all_specs else llm
             if self._on_fallback:
                 for l in (bound, llm):
                     if hasattr(l, "set_on_fallback"):
