@@ -461,8 +461,11 @@ skill-config:
     timeout: 10
   perplexica:
     url: http://localhost:3000
-    chat_model_provider: ollama
-    chat_model: llama3.1
+    # optional: override auto-detected models
+    # chat_model_provider: Groq
+    # chat_model: llama-3.1-8b-instant
+    # embedding_model_provider: Transformers
+    # embedding_model: Xenova/all-MiniLM-L6-v2
 ```
 
 ### RAG backends (memory & researcher)

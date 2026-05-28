@@ -13,7 +13,7 @@ When the user sends a message, the dispatcher (ChatAgent) decides whether to cal
 | `memory` | Long-term conversation memory — search past chat logs and trigger the Dream Wiki | `skill-config.memory.rag_model` + `embedding_host`; other settings depend on `rag_backend` |
 | `researcher` | Per-project document collections in `workspace/research/<project>/`. Scrapes URLs and runs keyword / embedding search over the saved Markdown. The Dream Wiki is *not* fed by research projects — only by conversations. | `skill-config.researcher` (embedding settings optional — falls back to keyword search) |
 | `searxng` | Web search via a SearXNG instance | `skill-config.searxng.url` |
-| `perplexica` | AI-powered search via Perplexica | `skill-config.perplexica.url` |
+| `perplexica` | AI-powered search via Perplexica or Vane | `skill-config.perplexica.url` (+ model config for Vane) |
 | `browser` | Browse and extract content from web pages | — |
 | `files` | Read, write, edit, grep, outline, and delete files in the workspace | — |
 | `organizer` | Calendar events (Full Calendar), tasks (Obsidian Tasks), reminders — Obsidian vault native | — |

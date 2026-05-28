@@ -1,17 +1,17 @@
 ---
 name: perplexica
-description: Perform AI-powered web searches using a Perplexica instance. Returns a synthesized answer with cited sources. Use when the user asks for current information, research topics, news, or complex questions requiring web search with summarization.
+description: Perform AI-powered web searches using a Perplexica or Vane instance. Returns a synthesized answer with cited sources. Use when the user asks for current information, research topics, news, or complex questions requiring web search with summarization.
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "1.0"
+  version: "1.1"
   trust: external
-  compatibility: Requires Perplexica instance configuration
+  compatibility: Requires Perplexica or Vane instance configuration
   requires_config:
     - url
 ---
 
-# Perplexica AI Search
+# Perplexica / Vane AI Search
 
 ## Instructions
 
@@ -19,8 +19,13 @@ metadata:
    ```
    python <scripts_dir>/search.py --query "<query>" --focus <focus_mode>
    ```
-   The script reads the Perplexica URL from `skill-config.perplexica.url`. You may pass `--url "<url>"` only if an explicit override is needed.
-   Optional: set `skill-config.perplexica.chat_model_provider` and `skill-config.perplexica.chat_model` to override the LLM used by Perplexica (e.g. `ollama` + `llama3.1`).
+   The script reads the instance URL from `skill-config.perplexica.url`. You may pass `--url "<url>"` only if an explicit override is needed.
+   
+   **Optional model configuration**: By default, the skill automatically picks the first available chat and embedding model from the instance. You only need to set these if you want to override the default:
+   - `skill-config.perplexica.chat_model_provider` (provider display name, e.g. `Groq`)
+   - `skill-config.perplexica.chat_model` (model key, e.g. `llama-3.1-8b-instant`)
+   - `skill-config.perplexica.embedding_model_provider` + `skill-config.perplexica.embedding_model`
+   
    Valid values for `--focus`: `webSearch` (default), `academicSearch`, `youtubeSearch`, `redditSearch`, `wolframAlphaSearch`. Omit `--focus` if unsure — it defaults to `webSearch`.
 2. The script outputs a JSON object with `answer` (string) and `sources` (array of objects with `title`, `url`, `snippet` fields)
 3. Return the answer followed by the sources
