@@ -1411,7 +1411,7 @@ class CallSession:
                         settle_alpha = self.VAD_SETTLE_EMA_ALPHA
                         nf = self._speech_detector.noise_floor
                         self._speech_detector._noise_floor = (
-                            settle_alpha * adjusted_rms + (1.0 - settle_alpha) * nf
+                            settle_alpha * rms + (1.0 - settle_alpha) * nf
                         )
                     speech_like_frame = False
                 else:
