@@ -262,6 +262,9 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
     if not models_to_try:
         raise RuntimeError("No chat models available to try.")
 
+    # Only probe the top 5 fastest models so we don't queue 16 requests.
+    models_to_try = models_to_try[:5]
+
     # If we have a cached model, try it first alone (fast path)
     if cached_model and cached_model in models_to_try:
         try:
@@ -281,11 +284,10 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             label = f"{chat_model.get('providerId', '?')}/{chat_model.get('key', '?')}"
             return {"_error": True, "_label": label, "_exc": str(e)}
 
-    # Fire top models in parallel (max 3 at a time), cancel the rest as soon
-    # as the first one succeeds so we don't keep burning resources.
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
-    futures = {executor.submit(_worker, m): m for m in models_to_try}
-    try:
+    # Fire the remaining candidates all in parallel so the fastest one wins
+    # immediately without waiting for a slow model to free up a worker slot.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(models_to_try)) as executor:
+        futures = {executor.submit(_worker, m): m for m in models_to_try}
         for future in concurrent.futures.as_completed(futures):
             result = future.result()
             if result.get("_error"):
@@ -294,12 +296,6 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             # Remember the working model for next time
             _save_cached_model(url, futures[future])
             return result
-    finally:
-        # Cancel anything that hasn't started yet and shut down without
-        # waiting for slow/hanging requests to finish.
-        for f in futures:
-            f.cancel()
-        executor.shutdown(wait=False)
 
     raise RuntimeError(f"All chat models failed. Errors: {'; '.join(errors)}")
 
