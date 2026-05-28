@@ -170,6 +170,7 @@ class WorkflowExecutor:
         log_prompt(messages, name=self.log_name)
 
         outputs: List[str] = []
+        directives: List[str] = []
 
         for step in range(workflow.max_steps):
             response = None
@@ -205,6 +206,8 @@ class WorkflowExecutor:
             if not response.tool_calls:
                 text = (response.content or "").strip()
                 if text:
+                    if directives:
+                        return "\n".join(directives) + "\n" + text
                     return text
                 break
 
@@ -250,6 +253,9 @@ class WorkflowExecutor:
                 command = self._substitute(block.command, cmd_params)
                 result = self._run_bash(command, env_extra=env_extra)
                 outputs.append(result.output)
+                for line in result.output.splitlines():
+                    if '"__directive__"' in line:
+                        directives.append(line)
 
                 # Programmatic verification
                 if block.verify and not self._verify(
@@ -277,7 +283,10 @@ class WorkflowExecutor:
                         tool_call_id=tc["id"],
                     ))
 
-        return outputs[-1] if outputs else ""
+        last = outputs[-1] if outputs else ""
+        if directives:
+            return "\n".join(directives) + "\n" + last
+        return last
 
     # ------------------------------------------------------------------
     # Tool generation
