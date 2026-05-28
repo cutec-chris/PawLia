@@ -437,7 +437,7 @@ class TestChatAgentPersist:
         assert len(messages) == 4
         assert messages[1].content == "prev_q"
         assert isinstance(messages[2], AIMessage)
-        assert "Earlier skill use:" in messages[2].content
+        assert "[Earlier skill use — internal context:]" in messages[2].content
         assert "searxng: python tutorials for absolute beginners" in messages[2].content
         assert "Result line Result line" in messages[2].content
         assert len(messages[2].content) < 500

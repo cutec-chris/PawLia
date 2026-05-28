@@ -377,6 +377,7 @@ class ChatAgent(BaseAgent):
             if error:
                 self.logger.warning("Skill call rejected: %s", error)
                 result = error
+                raw_result = result
             elif skill:
                 self.logger.info("Delegating to skill '%s': %s", skill_name, query[:80])
                 if on_skill_start:
@@ -388,6 +389,7 @@ class ChatAgent(BaseAgent):
                 runner.on_step = on_skill_step
                 result = await runner.run(query=query)
                 result = self._process_directives(result, thread_id)
+                raw_result = result
                 result = self._wrap_with_trust_header(result, skill, query)
                 if skill_name == "skill-creator":
                     skill_creator_called = True
@@ -399,11 +401,12 @@ class ChatAgent(BaseAgent):
             else:
                 self.logger.warning("Unknown skill called: %s", skill_name)
                 result = f"Error: Unknown skill '{skill_name}'."
+                raw_result = result
 
             tool_calls_info.append({
                 "name": skill_name,
                 "args": normalized_args,
-                "result": self._limit_tool_result(result, limit=_PERSIST_TOOL_RESULT_LIMIT),
+                "result": self._limit_tool_result(raw_result, limit=_PERSIST_TOOL_RESULT_LIMIT),
             })
             tool_messages.append(ToolMessage(
                 content=self._limit_tool_result(result),
@@ -578,7 +581,7 @@ class ChatAgent(BaseAgent):
         if len(tool_calls_info) > _REPLAY_TOOL_CALLS_LIMIT:
             lines.append(f"- ... {len(tool_calls_info) - _REPLAY_TOOL_CALLS_LIMIT} more earlier skill call(s)")
 
-        summary = "Earlier skill use:\n" + "\n".join(lines)
+        summary = "[Earlier skill use — internal context:]\n" + "\n".join(lines)
         return f"{bot_text}\n\n{summary}" if bot_text else summary
 
     @staticmethod
