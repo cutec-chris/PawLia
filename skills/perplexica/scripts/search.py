@@ -25,6 +25,7 @@ FOCUS_TO_SOURCES = {
     "redditSearch": ["discussions"],
 }
 
+
 def _cache_path() -> str:
     """Return the cache file path inside the session directory."""
     session_dir = os.environ.get("PAWLIA_SESSION_DIR", "")
@@ -41,28 +42,32 @@ def _cache_key(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:16]
 
 
-def _load_cached_model(url: str) -> dict | None:
-    cache_file = _cache_path()
+def _load_cache(url: str) -> dict | None:
+    """Load cached chatModel + embeddingModel for a URL."""
     try:
-        if os.path.exists(cache_file):
-            with open(cache_file, "r", encoding="utf-8") as f:
+        path = _cache_path()
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data.get(_cache_key(url))
+            entry = data.get(_cache_key(url), {})
+            if entry.get("chatModel") and entry.get("embeddingModel"):
+                return entry
     except Exception:
         pass
     return None
 
 
-def _save_cached_model(url: str, model: dict):
-    cache_file = _cache_path()
+def _save_cache(url: str, chat_model: dict, embedding_model: dict):
+    """Save chatModel + embeddingModel pair for a URL."""
     try:
-        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        path = _cache_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         data = {}
-        if os.path.exists(cache_file):
-            with open(cache_file, "r", encoding="utf-8") as f:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        data[_cache_key(url)] = model
-        with open(cache_file, "w", encoding="utf-8") as f:
+        data[_cache_key(url)] = {"chatModel": chat_model, "embeddingModel": embedding_model}
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
@@ -260,8 +265,7 @@ def _search_single(query: str, base_url: str, sources: list[str], chat_model: di
 
 
 def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 60,
-           chat_models: list[dict] | None = None, embedding_model: dict | None = None,
-           cached_model: dict | None = None) -> dict:
+           chat_models: list[dict] | None = None, embedding_model: dict | None = None) -> dict:
     base_url = url.rstrip("/")
     if focus_mode not in VALID_FOCUS_MODES:
         focus_mode = "webSearch"
@@ -291,8 +295,8 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             if result.get("_error"):
                 errors.append(f"{result['_label']}: {result['_exc']}")
                 continue
-            # Remember the working model for next time
-            _save_cached_model(url, futures[future])
+            # Remember the working model pair for next time
+            _save_cache(url, futures[future], embedding_model)
             return result
     finally:
         executor.shutdown(wait=False)
@@ -321,18 +325,32 @@ def main():
         if not url:
             raise ValueError("Missing Perplexica/Vane URL. Set skill-config.perplexica.url or pass --url.")
 
+        cache = _load_cache(url)
+        if cache:
+            # Fast path: we already know both models, skip the /api/providers round-trip
+            chat_models = [cache["chatModel"]]
+            embedding_model = cache["embeddingModel"]
+            try:
+                result = search(args.query, url, args.focus, args.timeout, chat_models, embedding_model)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return
+            except Exception:
+                # Cached model failed, fall through to discovery
+                pass
+
+        # Discovery path: fetch providers, then probe models
         providers = get_providers(url, timeout=10)
         if not providers:
             raise RuntimeError("Could not fetch providers from the Vane/Perplexica instance.")
 
-        cached = _load_cached_model(url)
-        chat_models = resolve_chat_models(providers, config, cached=cached)
+        cached_chat = cache.get("chatModel") if cache else None
+        chat_models = resolve_chat_models(providers, config, cached=cached_chat)
         if not chat_models:
             raise RuntimeError("No chat models available on the Vane/Perplexica instance.")
 
         embedding_model = resolve_embedding_model(providers, config)
 
-        result = search(args.query, url, args.focus, args.timeout, chat_models, embedding_model, cached_model=cached)
+        result = search(args.query, url, args.focus, args.timeout, chat_models, embedding_model)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({"error": str(e)}), file=sys.stderr)
