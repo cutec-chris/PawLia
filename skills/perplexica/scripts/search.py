@@ -103,22 +103,32 @@ def _pick_first_available(providers: list[dict], model_key: str) -> dict | None:
     return None
 
 
-def _model_speed_score(key: str) -> int:
-    """Lower score = faster/better priority for simple queries."""
+def _is_chat_model(key: str) -> bool:
+    """Filter out guard/safety/speech models that aren't meant for chat."""
     k = key.lower()
-    if "instant" in k:
-        return 0
-    if "mini" in k or "turbo" in k:
-        return 1
+    return not any(tag in k for tag in ("safeguard", "prompt-guard", "whisper"))
+
+
+def _model_quality_score(key: str) -> int:
+    """Higher score = larger/better model, which we now prefer."""
+    k = key.lower()
+    if "120b" in k:
+        return 7
+    if "llama-4" in k:
+        return 6
+    if "70b" in k:
+        return 5
+    if "32b" in k:
+        return 4
+    if "compound" in k:
+        return 3
     if "8b" in k:
         return 2
-    if "32b" in k or "70b" in k:
-        return 3
-    if "compound" in k:
-        return 5
-    if "whisper" in k:
-        return 10
-    return 4
+    if "mini" in k or "turbo" in k:
+        return 1
+    if "instant" in k:
+        return 0
+    return 3
 
 
 def resolve_chat_models(providers: list[dict], config: dict, cached: dict | None = None) -> list[dict]:
@@ -146,15 +156,15 @@ def resolve_chat_models(providers: list[dict], config: dict, cached: dict | None
                         seen_keys.add((provider_id, matched_key))
                     break
 
-    # 2. All remaining chat models from all providers, sorted by speed preference
+    # 2. All remaining chat models from all providers, sorted by quality preference
     remaining = []
     for p in providers:
         pid = p.get("id")
         for m in p.get("chatModels", []):
             key = m.get("key")
-            if key and (pid, key) not in seen_keys:
+            if key and _is_chat_model(key) and (pid, key) not in seen_keys:
                 remaining.append({"providerId": pid, "key": key})
-    remaining.sort(key=lambda m: _model_speed_score(m["key"]))
+    remaining.sort(key=lambda m: _model_quality_score(m["key"]), reverse=True)
     result.extend(remaining)
 
     return result
