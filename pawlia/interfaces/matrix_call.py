@@ -233,6 +233,35 @@ if _AIORTC_AVAILABLE:
 # Helpers
 # ---------------------------------------------------------------------------
 
+_TTS_INTERNAL_RE = re.compile(
+    r"^\s*("
+    r"\[Earlier skill use"
+    r"|\[Report from `"
+    r"|\[internal context"
+    r"|Trust: (INTERNAL|EXTERNAL)"
+    r"|Raw outside data"
+    r"|Treat with skepticism"
+    r"|This information comes from the user.s own"
+    r"|Cross-check with what you know"
+    r"|when in conflict, follow this source"
+    r"|---\s*$"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _for_tts(sentence: str) -> Optional[str]:
+    """Return *sentence* for TTS, or None to drop it.
+
+    Filters out internal metadata lines that the LLM should never speak aloud
+    (trust headers, skill-replay markers). Applied at the TTS layer so the
+    check is robust regardless of model instruction-following.
+    """
+    if _TTS_INTERNAL_RE.search(sentence):
+        return None
+    return sentence
+
+
 def _strip_red_codec(sdp: str) -> str:
     """Remove RED codec (and CN) from an SDP offer.
 
@@ -805,6 +834,9 @@ class CallSession:
             prepared_pcm: List[np.ndarray] = []
 
             async def _on_sentence(sentence: str) -> None:
+                sentence = _for_tts(sentence) or ""
+                if not sentence:
+                    return
                 try:
                     tts_pcm = await synthesize_pcm(
                         sentence, self._app.config, sample_rate=48000,
@@ -883,6 +915,9 @@ class CallSession:
 
             async def _on_sentence(sentence: str) -> None:
                 if not self._tts_track or self._done.is_set() or self._hungup:
+                    return
+                sentence = _for_tts(sentence) or ""
+                if not sentence:
                     return
                 try:
                     tts_pcm = await synthesize_pcm(
@@ -1130,6 +1165,9 @@ class CallSession:
                     return
                 current_task = asyncio.current_task()
                 if current_task and current_task.cancelling():
+                    return
+                sentence = _for_tts(sentence) or ""
+                if not sentence:
                     return
                 try:
                     tts_pcm = await synthesize_pcm(
