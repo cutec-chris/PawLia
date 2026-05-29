@@ -171,8 +171,8 @@ class TestMemoryManager:
 
             daily_path = mm._daily_path("u1", session.current_date_str)
             daily = mm._read(daily_path)
-            assert "## Thread abc" in daily
-            assert "PAWLIA_THREAD_SECTION" in daily
+            assert "## sub" in daily
+            assert "pawlia-thread: abc" in daily
             assert "sub" in daily
             assert MemoryManager._extract_main_history(daily).strip().endswith("Assistant: root")
             assert MemoryManager._extract_thread_history(daily, "abc").strip().endswith("Assistant: reply")
@@ -263,7 +263,7 @@ class TestMemoryManager:
 
             session2 = mm.load_session("u1")
             daily = mm._read(mm._daily_path("u1", session2.current_date_str))
-            assert "## Thread abc" in daily
+            assert "pawlia-thread: abc" in daily
             assert "thread reply" in daily
             assert not os.path.exists(legacy_path)
             assert mm.get_thread_context(session2, "abc")[0] == ("old", "thread reply", None)

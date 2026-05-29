@@ -236,7 +236,7 @@ async def test_process_speech_writes_debug_wav(tmp_path):
     debug_dir = tmp_path / "log" / "debug_audio"
     files = list(debug_dir.glob("*.flac"))
     assert len(files) == 1
-    assert files[0].stat().st_size > 0
+    assert files[0].stat().st_size > 42  # fLaC marker (4) + STREAMINFO block (38)
 
 
 def test_should_transcribe_chunk_rejects_background_noise():

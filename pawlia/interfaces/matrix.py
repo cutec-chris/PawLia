@@ -625,11 +625,12 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             await _send_text(room.room_id, format_bg_enqueue(bg_args))
             return
 
-        async def _send(text: str) -> None:
+        async def _send(text: str) -> Optional[str]:
             if thread_id:
                 await _send_thread_reply(room.room_id, thread_id, text)
+                return None
             else:
-                await _send_text(room.room_id, text)
+                return await _send_text(room.room_id, text)
 
         # Keep typing notification alive while agent works
         typing_stop = asyncio.Event()
@@ -717,7 +718,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             typing_task.cancel()
             await client.room_typing(room.room_id, typing_state=False)
             logger.info("Matrix: response in %s%s: %s", room.room_id, ctx, preview_text(response))
-            await _send(response)
+            sent_event_id = await _send(response)
+            # Pre-seed so if user creates a thread from this response, context is preserved on restart
+            if not thread_id and sent_event_id:
+                session = app.memory.load_session(session_id)
+                app.memory.seed_thread_context(session, sent_event_id, response)
         except Exception as e:
             typing_stop.set()
             try:

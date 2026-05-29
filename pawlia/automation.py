@@ -332,9 +332,6 @@ class JobRunner:
             force_run = job.get("force_run", False)
             if not force_run and not self._is_due(job, now):
                 continue
-            if force_run:
-                job.pop("force_run", None)
-                changed = True
 
             instruction = job.get("instruction", "")
             job_name = job.get("name", "Job")
@@ -346,6 +343,12 @@ class JobRunner:
             if not self._app:
                 logger.error("Job '%s': no app reference, cannot execute", job_name)
                 continue
+
+            # Committed to running — clear the flag and persist now so a crash
+            # during execution doesn't cause the job to fire again on restart.
+            if force_run:
+                job.pop("force_run", None)
+                save_json(jobs_path, jobs)
 
             logger.info("Running job '%s' for %s via LLM", job_name, user_id)
 

@@ -397,23 +397,45 @@ class MemoryManager:
             yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False)
 
     @staticmethod
-    def _thread_marker_start(thread_id: str) -> str:
-        return "<!-- PAWLIA_THREAD_SECTION -->"
+    def _make_thread_title(text: str, max_len: int = 60) -> str:
+        flat = " ".join(text.split())
+        if len(flat) <= max_len:
+            return flat or "Thread"
+        return flat[:max_len].rstrip() + "…"
 
     @staticmethod
-    def _thread_marker_end(thread_id: str) -> str:
-        return "<!-- /PAWLIA_THREAD_SECTION -->"
+    def _title_from_body(body: str) -> str:
+        for line in body.splitlines():
+            if line.startswith("[") and "] User: " in line:
+                user_text = line.split("] User: ", 1)[1]
+                return MemoryManager._make_thread_title(user_text)
+        return ""
 
     @classmethod
-    def _thread_section_pattern(cls, thread_id: Optional[str] = None) -> re.Pattern[str]:
+    def _new_thread_section_pattern(cls, thread_id: Optional[str] = None) -> re.Pattern[str]:
+        """Pattern for new format: ## title\n<!-- pawlia-thread: id -->\nbody<!-- /pawlia-thread -->"""
         if thread_id is None:
             return re.compile(
-                r"\n*## Thread [^\n]+\n<!-- PAWLIA_THREAD_SECTION -->\n?(.*?)\n<!-- /PAWLIA_THREAD_SECTION -->\n*",
+                r"\n*(## [^\n]+)\n<!-- pawlia-thread: ([^\n]+) -->\n(.*?)<!-- /pawlia-thread -->",
                 re.DOTALL,
             )
         escaped = re.escape(thread_id)
         return re.compile(
-            rf"\n*## Thread {escaped}\n<!-- PAWLIA_THREAD_SECTION -->\n?(.*?)\n<!-- /PAWLIA_THREAD_SECTION -->\n*",
+            r"\n*(## [^\n]+)\n<!-- pawlia-thread: " + escaped + r" -->\n(.*?)<!-- /pawlia-thread -->",
+            re.DOTALL,
+        )
+
+    @classmethod
+    def _old_thread_section_pattern(cls, thread_id: Optional[str] = None) -> re.Pattern[str]:
+        """Pattern for old format: ## Thread id\n<!-- PAWLIA_THREAD_SECTION -->\nbody<!-- /PAWLIA_THREAD_SECTION -->"""
+        if thread_id is None:
+            return re.compile(
+                r"\n*## Thread [^\n]+\n<!-- PAWLIA_THREAD_SECTION -->\n?(.*?)\n?<!-- /PAWLIA_THREAD_SECTION -->",
+                re.DOTALL,
+            )
+        escaped = re.escape(thread_id)
+        return re.compile(
+            r"\n*## Thread " + escaped + r"\n<!-- PAWLIA_THREAD_SECTION -->\n?(.*?)\n?<!-- /PAWLIA_THREAD_SECTION -->",
             re.DOTALL,
         )
 
@@ -504,12 +526,17 @@ class MemoryManager:
 
     @classmethod
     def _extract_main_history(cls, daily_text: str) -> str:
-        return cls._thread_section_pattern().sub("\n", daily_text).rstrip()
+        text = cls._new_thread_section_pattern().sub("", daily_text)
+        text = cls._old_thread_section_pattern().sub("", text)
+        return text.rstrip()
 
     @classmethod
     def _extract_thread_history(cls, daily_text: str, thread_id: str) -> str:
-        match = cls._thread_section_pattern(thread_id).search(daily_text)
-        return match.group(1).strip() if match else ""
+        m = cls._new_thread_section_pattern(thread_id).search(daily_text)
+        if m:
+            return m.group(2).strip()  # group 2 = body (groups: 1=heading, 2=body)
+        m = cls._old_thread_section_pattern(thread_id).search(daily_text)
+        return m.group(1).strip() if m else ""
 
     @staticmethod
     def _format_exchange_entry(
@@ -532,35 +559,58 @@ class MemoryManager:
         return entry
 
     @classmethod
-    def _render_thread_section(cls, thread_id: str, body: str) -> str:
+    def _render_thread_section(cls, thread_id: str, body: str, title: str = "") -> str:
+        heading = title.strip() or "Thread"
         return (
-            f"## Thread {thread_id}\n"
-            f"{cls._thread_marker_start(thread_id)}\n"
+            f"## {heading}\n"
+            f"<!-- pawlia-thread: {thread_id} -->\n"
             f"{body.strip()}\n"
-            f"{cls._thread_marker_end(thread_id)}"
+            f"<!-- /pawlia-thread -->"
         )
 
     @classmethod
-    def _upsert_thread_section(cls, daily_text: str, thread_id: str, block: str) -> str:
-        pattern = cls._thread_section_pattern(thread_id)
-        match = pattern.search(daily_text)
-        cleaned_block = block.strip()
-        if match:
-            current = match.group(1).strip()
-            body = f"{current}\n{cleaned_block}" if current else cleaned_block
-            replacement = cls._render_thread_section(thread_id, body)
-            return f"{daily_text[:match.start()]}{replacement}{daily_text[match.end():]}".rstrip() + "\n"
+    def _upsert_thread_section(cls, daily_text: str, thread_id: str, block: str, title: str = "") -> str:
+        cleaned = block.strip()
 
-        section = cls._render_thread_section(thread_id, cleaned_block)
+        # Try new format
+        pat = cls._new_thread_section_pattern(thread_id)
+        m = pat.search(daily_text)
+        if m:
+            existing_title = m.group(1).lstrip("#").strip()
+            existing_body = m.group(2).strip()
+            body = f"{existing_body}\n{cleaned}" if existing_body else cleaned
+            replacement = cls._render_thread_section(thread_id, body, existing_title)
+            before = daily_text[:m.start()].rstrip()
+            after = daily_text[m.end():].lstrip("\n")
+            return (before + "\n\n" + replacement + ("\n\n" + after if after.strip() else "\n")).rstrip() + "\n"
+
+        # Try old format — migrate to new format on update
+        pat_old = cls._old_thread_section_pattern(thread_id)
+        m = pat_old.search(daily_text)
+        if m:
+            existing_body = m.group(1).strip()
+            body = f"{existing_body}\n{cleaned}" if existing_body else cleaned
+            used_title = title or cls._title_from_body(existing_body) or "Thread"
+            replacement = cls._render_thread_section(thread_id, body, used_title)
+            before = daily_text[:m.start()].rstrip()
+            after = daily_text[m.end():].lstrip("\n")
+            return (before + "\n\n" + replacement + ("\n\n" + after if after.strip() else "\n")).rstrip() + "\n"
+
+        # New section
+        section = cls._render_thread_section(thread_id, cleaned, title)
         if daily_text.strip():
             return daily_text.rstrip() + "\n\n" + section + "\n"
         return section + "\n"
 
     @classmethod
     def _append_main_entry_to_daily_text(cls, daily_text: str, entry: str) -> str:
-        thread_match = re.search(r"^## Thread ", daily_text, re.MULTILINE)
         cleaned_entry = entry.strip()
-        if thread_match:
+        # Find the first thread section (new or old) to insert before it
+        new_m = re.search(r"\n## [^\n]+\n<!-- pawlia-thread: ", daily_text)
+        old_m = re.search(r"\n## Thread [^\n]+\n<!-- PAWLIA_THREAD_SECTION -->", daily_text)
+        candidates = [m for m in [new_m, old_m] if m]
+        if candidates:
+            thread_match = min(candidates, key=lambda m: m.start())
             before = daily_text[:thread_match.start()].rstrip()
             after = daily_text[thread_match.start():].lstrip("\n")
             if before:
@@ -579,10 +629,10 @@ class MemoryManager:
         current = self._read(path)
         self._write_daily_text(user_id, date_str, self._append_main_entry_to_daily_text(current, entry))
 
-    def _append_thread_block_to_daily(self, user_id: str, date_str: str, thread_id: str, block: str) -> None:
+    def _append_thread_block_to_daily(self, user_id: str, date_str: str, thread_id: str, block: str, title: str = "") -> None:
         path = self._daily_path(user_id, date_str)
         current = self._read(path)
-        self._write_daily_text(user_id, date_str, self._upsert_thread_section(current, thread_id, block))
+        self._write_daily_text(user_id, date_str, self._upsert_thread_section(current, thread_id, block, title))
 
     def migrate_session(self, user_id: str) -> int:
         """Migrate a session directory to the current on-disk log format."""
@@ -869,13 +919,14 @@ class MemoryManager:
         """
         if thread_id in session.private_threads:
             return
+        title = self._make_thread_title(bot_text)
         entry = self._format_exchange_entry(
             "",
             bot_text,
             tz_name=session.timezone,
         )
         self._append_thread_block_to_daily(
-            session.user_id, session.current_date_str, thread_id, entry,
+            session.user_id, session.current_date_str, thread_id, entry, title,
         )
 
     def append_thread_exchange(
@@ -888,6 +939,7 @@ class MemoryManager:
     ) -> None:
         """Append an exchange to a thread section in the daily log."""
         exchanges = self.get_thread_context(session, thread_id)
+        is_first = not exchanges
         exchanges.append((user_text, bot_text, tool_calls_info))
         if thread_id in session.private_threads:
             return
@@ -897,7 +949,8 @@ class MemoryManager:
             tool_calls_info=tool_calls_info,
             tz_name=session.timezone,
         )
-        self._append_thread_block_to_daily(session.user_id, session.current_date_str, thread_id, entry)
+        title = self._make_thread_title(user_text) if is_first and user_text else ""
+        self._append_thread_block_to_daily(session.user_id, session.current_date_str, thread_id, entry, title)
 
     def build_system_prompt(
         self,

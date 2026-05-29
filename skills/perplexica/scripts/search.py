@@ -59,6 +59,8 @@ def _load_cache(url: str) -> dict | None:
 
 def _save_cache(url: str, chat_model: dict, embedding_model: dict):
     """Save chatModel + embeddingModel pair for a URL."""
+    if not chat_model or not embedding_model:
+        return
     try:
         path = _cache_path()
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -127,12 +129,13 @@ def _model_quality_score(key: str) -> int:
         return 4
     if "compound" in k:
         return 3
-    if "8b" in k:
-        return 2
-    if "mini" in k or "turbo" in k:
-        return 1
+    # Check speed/size suffixes before raw size tags so "8b-instant" scores 0 not 2
     if "instant" in k:
         return 0
+    if "mini" in k or "turbo" in k:
+        return 1
+    if "8b" in k:
+        return 2
     return 3
 
 
@@ -195,12 +198,13 @@ def resolve_embedding_model(providers: list[dict], config: dict) -> dict:
     raise RuntimeError("No embedding model available on the Vane/Perplexica instance.")
 
 
-def _search_single(query: str, base_url: str, sources: list[str], chat_model: dict,
-                   embedding_model: dict, timeout: int) -> dict:
+def _search_single(query: str, base_url: str, sources: list[str], focus_mode: str,
+                   chat_model: dict, embedding_model: dict, timeout: int) -> dict:
     """Perform a single search request with a specific chat model."""
     payload: dict = {
         "query": query,
-        "sources": sources,
+        "sources": sources,        # Vane API
+        "focusMode": focus_mode,   # standard Perplexica API fallback
         "optimizationMode": "speed",
         "history": [],
         "stream": False,
@@ -279,15 +283,14 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
 
     def _worker(chat_model: dict):
         try:
-            return _search_single(query, base_url, sources, chat_model, embedding_model, timeout)
+            return _search_single(query, base_url, sources, focus_mode, chat_model, embedding_model, timeout)
         except Exception as e:
             label = f"{chat_model.get('providerId', '?')}/{chat_model.get('key', '?')}"
             return {"_error": True, "_label": label, "_exc": str(e)}
 
-    # Fire every candidate in its own thread so the truly fastest one wins
-    # immediately.  We shut down with wait=False so a slow/hanging model
-    # doesn't block returning the winning result.
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(models_to_try))
+    # Cap concurrency: no need to hammer the server with more than 5 parallel probes.
+    max_workers = min(len(models_to_try), 5)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     futures = {executor.submit(_worker, m): m for m in models_to_try}
     try:
         for future in concurrent.futures.as_completed(futures):
@@ -295,8 +298,9 @@ def search(query: str, url: str, focus_mode: str = "webSearch", timeout: int = 6
             if result.get("_error"):
                 errors.append(f"{result['_label']}: {result['_exc']}")
                 continue
-            # Remember the working model pair for next time
-            _save_cache(url, futures[future], embedding_model)
+            # Only cache a model that returned a useful answer (quality key absent = good)
+            if "quality" not in result:
+                _save_cache(url, futures[future], embedding_model)
             return result
     finally:
         executor.shutdown(wait=False)
@@ -334,8 +338,8 @@ def main():
                 result = search(args.query, url, args.focus, args.timeout, chat_models, embedding_model)
                 print(json.dumps(result, ensure_ascii=False, indent=2))
                 return
-            except Exception:
-                # Cached model failed, fall through to discovery
+            except (RuntimeError, requests.RequestException, OSError):
+                # Cached model failed (network/API error), fall through to discovery
                 pass
 
         # Discovery path: fetch providers, then probe models
@@ -343,8 +347,8 @@ def main():
         if not providers:
             raise RuntimeError("Could not fetch providers from the Vane/Perplexica instance.")
 
-        cached_chat = cache.get("chatModel") if cache else None
-        chat_models = resolve_chat_models(providers, config, cached=cached_chat)
+        # Don't re-insert the just-failed cached model at position 0
+        chat_models = resolve_chat_models(providers, config, cached=None)
         if not chat_models:
             raise RuntimeError("No chat models available on the Vane/Perplexica instance.")
 
