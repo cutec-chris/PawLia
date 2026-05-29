@@ -234,9 +234,9 @@ async def test_process_speech_writes_debug_wav(tmp_path):
         matrix_call.logger.setLevel(old_level)
 
     debug_dir = tmp_path / "log" / "debug_audio"
-    files = list(debug_dir.glob("*.wav"))
+    files = list(debug_dir.glob("*.flac"))
     assert len(files) == 1
-    assert files[0].stat().st_size > 44
+    assert files[0].stat().st_size > 0
 
 
 def test_should_transcribe_chunk_rejects_background_noise():
