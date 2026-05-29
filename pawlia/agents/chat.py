@@ -898,8 +898,12 @@ class ChatAgent(BaseAgent):
                 break
 
             messages = _remove_workspace_refs_from_messages(messages, user_input)
+            # Skip interim on turn 1: the model's first decision often includes
+            # stray intro text (identity phrases, "I'll search for X…") that
+            # should not be sent as a separate message before any tool runs.
+            # From turn 2 onward the model is mid-task and interim is useful.
             interim = self.extract_text(final)
-            if interim and self.on_interim:
+            if interim and self.on_interim and turn > 1:
                 try:
                     await self.on_interim(interim)
                 except Exception as exc:

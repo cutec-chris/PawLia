@@ -234,8 +234,8 @@ class TestChatAgent:
 
 class TestChatAgentInterim:
     @pytest.mark.asyncio
-    async def test_interim_sent_on_skill_call(self):
-        """When LLM returns text + tool_calls, interim callback fires."""
+    async def test_interim_not_sent_on_turn1_skill_call(self):
+        """Turn-1 text alongside a tool call is suppressed (prevents bootstrap-greeting leaks)."""
         skill = _make_skill("searxng", "Web search")
 
         turn1 = _make_ai_message("Let me search for that!", tool_calls=[
@@ -261,8 +261,43 @@ class TestChatAgentInterim:
         )
 
         result = await agent.run("Search something")
+        # Turn 1 interim is suppressed to prevent intro/bootstrap text leaking
+        assert len(interim_messages) == 0
+        assert "results" in result
+
+    @pytest.mark.asyncio
+    async def test_interim_sent_on_turn2_skill_call(self):
+        """Text alongside a tool call on turn 2+ is forwarded as interim."""
+        skill = _make_skill("searxng", "Web search")
+
+        turn1 = _make_ai_message("", tool_calls=[
+            {"id": "c1", "name": "searxng", "args": {"query": "test"}}
+        ])
+        turn2 = _make_ai_message("Let me refine this!", tool_calls=[
+            {"id": "c2", "name": "searxng", "args": {"query": "test refined"}}
+        ])
+        turn3 = _make_ai_message("Here are the results.")
+
+        llm = _mock_llm([turn1, turn2, turn3])
+
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock(return_value="data")
+
+        interim_messages = []
+
+        async def on_interim(text):
+            interim_messages.append(text)
+
+        agent = ChatAgent(
+            llm=llm,
+            skills={"searxng": skill},
+            skill_runner_factory=lambda s, thread_id=None: mock_runner,
+            on_interim=on_interim,
+        )
+
+        result = await agent.run("Search something")
         assert len(interim_messages) == 1
-        assert "Let me search" in interim_messages[0]
+        assert "Let me refine" in interim_messages[0]
         assert "results" in result
 
     @pytest.mark.asyncio
