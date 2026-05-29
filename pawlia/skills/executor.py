@@ -394,7 +394,7 @@ class WorkflowExecutor:
         raw = self.tool_registry.execute_detailed("bash", {"command": command}, ctx)
         output = raw.to_tool_message() if not raw.ok else str(raw.output)
         exit_code = 0 if raw.ok else 1
-        self.logger.debug("Result (exit=%d): %s", exit_code, output[:300])
+        self.logger.debug("Result (exit=%d): %s", exit_code, output)
         return StepResult(output=output, exit_code=exit_code)
 
     def _verify(self, output: str, exit_code: int, spec: VerifySpec) -> bool:
