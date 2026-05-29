@@ -329,8 +329,12 @@ class JobRunner:
         for job in jobs:
             if not job.get("enabled", True):
                 continue
-            if not self._is_due(job, now):
+            force_run = job.get("force_run", False)
+            if not force_run and not self._is_due(job, now):
                 continue
+            if force_run:
+                job.pop("force_run", None)
+                changed = True
 
             instruction = job.get("instruction", "")
             job_name = job.get("name", "Job")

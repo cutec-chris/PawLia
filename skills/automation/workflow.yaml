@@ -4,8 +4,8 @@ compiled_at: '2026-05-19'
 compiled_by: glm-5.1
 workflows:
 - id: manage-automations
-  trigger: When the user wants to create, list, delete, or toggle a scheduled automation
-    job
+  trigger: When the user wants to create, list, delete, toggle, or manually run/trigger
+    a scheduled automation job
   max_steps: 3
   goal_check:
     prompt: Was the automation job successfully created, listed, deleted, or toggled?
@@ -31,3 +31,8 @@ workflows:
       "{job_id}"
     description: Enable or disable an existing automation job
     status_desc: Schalte Automatisierung {job_id} um
+  - id: run-job
+    command: python {scripts_dir}/../organizer/scripts/organizer.py run-job --job-id
+      "{job_id}"
+    description: Manually trigger an automation job immediately for testing
+    status_desc: Führe Automatisierung {job_id} manuell aus

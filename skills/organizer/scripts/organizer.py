@@ -13,7 +13,7 @@ Subcommands:
   add-event, list-events, delete-event
   add-task, list-tasks, complete-task, delete-task
   add-reminder, list-reminders, delete-reminder
-  add-job, list-jobs, delete-job, toggle-job
+  add-job, list-jobs, delete-job, toggle-job, run-job
 """
 
 import argparse
@@ -953,6 +953,26 @@ def cmd_toggle_job(args) -> None:
     _out({"success": True, "message": f"Job {state}."})
 
 
+def cmd_run_job(args) -> None:
+    path = _jobs_path(args.user_id, args.session_dir)
+    jobs = _load_json(path)
+    job = None
+    for j in jobs:
+        if j.get("id") == args.job_id:
+            job = j
+            break
+    if not job:
+        _out({"success": False, "error": "Job not found."})
+        return
+    job["force_run"] = True
+    _save_json(path, jobs)
+    _out({
+        "success": True,
+        "message": f"Job '{job.get('name', args.job_id)}' wird beim nächsten Scheduler-Tick ausgeführt.",
+        "instruction": job.get("instruction", ""),
+    })
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1057,6 +1077,11 @@ def main():
     _base(p)
     p.add_argument("--job-id", required=True)
 
+    # run-job
+    p = sub.add_parser("run-job")
+    _base(p)
+    p.add_argument("--job-id", required=True, help="Job ID to trigger manually")
+
     args = parser.parse_args()
 
     if not args.user_id or not args.session_dir:
@@ -1078,6 +1103,7 @@ def main():
         "list-jobs": cmd_list_jobs,
         "delete-job": cmd_delete_job,
         "toggle-job": cmd_toggle_job,
+        "run-job": cmd_run_job,
     }
 
     fn = dispatch.get(args.cmd)

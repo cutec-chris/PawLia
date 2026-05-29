@@ -88,10 +88,19 @@ Toggle a job (enable/disable):
 python <scripts_dir>/../organizer/scripts/organizer.py toggle-job --job-id "<id>"
 ```
 
+### Manual trigger (for testing)
+
+To test a job immediately without waiting for the scheduled time:
+```bash
+python <scripts_dir>/../organizer/scripts/organizer.py run-job --job-id "<id>"
+```
+
+This flags the job for immediate execution on the next scheduler tick (within 60 seconds). Use this after the skill-creator has modified a skill to verify the automation works correctly.
+
 ## Output
 
 After registering, confirm to the user:
 - What the automation does (the instruction)
 - How often it runs (the schedule)
 - If a skill was built: mention the skill name
-- That they can ask to list, disable, or delete it later
+- That they can ask to list, disable, delete, or manually trigger it later

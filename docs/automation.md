@@ -289,6 +289,16 @@ python <scripts_dir>/automation.py add-job --name "Tagesbericht" \
 | `weekly:DOW:HH:MM` | Weekly (0=Mon..6=Sun) | `weekly:4:09:00` |
 | `monthly:DD:HH:MM` | Monthly on day DD | `monthly:1:10:00` |
 
+### Manual trigger
+
+To test a job immediately without waiting for its schedule, use the `run-job` command:
+
+```bash
+python organizer.py run-job --job-id "job-a1b2c3d4"
+```
+
+This sets a `force_run` flag on the job. The scheduler executes it on the next tick (within 60 seconds), regardless of the configured schedule. Use this after the skill-creator has built or fixed a skill to verify the automation works end-to-end.
+
 ### Writing checklist scripts
 
 Checklist scripts are plain Python (or Node.js / Bash) files stored in `session/<user>/automations/` or `workspace/.scripts/`.

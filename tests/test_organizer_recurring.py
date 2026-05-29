@@ -104,3 +104,45 @@ def test_add_event_persists_event_reminders_and_scheduler_checklist(tmp_path):
     listed = mod._read_event_md(str(event_path))
     assert listed is not None
     assert listed["reminders"] == [{"minutes_before": 40, "message": "Bereitmachen"}]
+
+
+def test_run_job_sets_force_run_and_returns_instruction(tmp_path, capsys):
+    mod = _load_organizer()
+
+    # Add a job first
+    add_args = argparse.Namespace(
+        user_id="u1",
+        session_dir=str(tmp_path),
+        name="Morgenbericht",
+        schedule="08:00",
+        instruction="Erstelle einen Morgenbericht",
+        no_notify=False,
+        notify_on_error=False,
+    )
+    mod.cmd_add_job(add_args)
+
+    # Capture the job ID from stdout
+    captured = capsys.readouterr()
+    import json
+    add_result = json.loads(captured.out)
+    job_id = add_result["job_id"]
+
+    # Run the job manually
+    run_args = argparse.Namespace(
+        user_id="u1",
+        session_dir=str(tmp_path),
+        job_id=job_id,
+    )
+    mod.cmd_run_job(run_args)
+
+    # Check stdout
+    captured = capsys.readouterr()
+    run_result = json.loads(captured.out)
+    assert run_result["success"] is True
+    assert "Morgenbericht" in run_result["message"]
+    assert run_result["instruction"] == "Erstelle einen Morgenbericht"
+
+    # Verify jobs.json has force_run set
+    jobs = mod._load_json(str(tmp_path / "u1" / "automations" / "jobs.json"))
+    assert len(jobs) == 1
+    assert jobs[0].get("force_run") is True
