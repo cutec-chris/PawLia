@@ -415,6 +415,8 @@ class Scheduler:
         user_ids = [
             uid for uid in os.listdir(self.session_dir)
             if os.path.isdir(os.path.join(self.session_dir, uid))
+            and not uid.startswith(".")
+            and uid not in {"nio_store", "web_user"}
         ]
 
         # ── High priority (every tick) ──
