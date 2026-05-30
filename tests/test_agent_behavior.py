@@ -218,6 +218,30 @@ async def test_plain_text_tool_intent_is_nudged_into_a_real_call(
     assert "tutorials" in out.lower()
 
 
+class _ApiError(Exception):
+    """Mimics a provider 400 'tool_use_failed' error."""
+    status_code = 400
+
+
+async def test_tool_use_failed_error_is_recovered_without_failing_the_turn(make_chat_agent):
+    """When the provider rejects a turn with tool_use_failed, the agent injects
+    a synthetic tool result and retries instead of crashing."""
+    err = _ApiError(
+        "Error code: 400 - tool_use_failed: model called a tool; "
+        'failed_generation: {"name": "searxng", "arguments": {}}'
+    )
+    llm = ScriptedLLM().on(
+        "hello",
+        Reply(error=err),
+        Reply(text="Recovered and answered."),
+    )
+    agent = make_chat_agent(llm=llm, skills=["searxng"])
+
+    out = await agent.run("hello there")
+
+    assert "Recovered" in out
+
+
 # ---------------------------------------------------------------------------
 # Interim ("working on it") callbacks
 # ---------------------------------------------------------------------------

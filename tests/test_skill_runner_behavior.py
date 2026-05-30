@@ -158,6 +158,17 @@ async def test_select_workflow_returns_none_when_model_does_not_call_a_tool():
     assert chosen is None
 
 
+async def test_workflow_execute_runs_a_block_and_returns_its_output(tool_registry):
+    llm = ScriptedLLM().on("go", Reply(tool_calls=[{"name": "step_a", "args": {}}]))
+    executor = WorkflowExecutor(tool_registry=tool_registry, context={}, llm=llm)
+    workflow = Workflow(id="wf", trigger="t", max_steps=1, building_blocks=[
+        BuildingBlock(id="step_a", command="echo workflow_out", description="A")])
+
+    result = await executor.execute(workflow, "go")
+
+    assert "workflow_out" in result
+
+
 def test_workflow_block_tools_disallow_extra_arguments():
     executor = WorkflowExecutor(tool_registry=ToolRegistry(), context={}, llm=ScriptedLLM())
     workflow = Workflow(id="workflow_a", trigger="A", building_blocks=[

@@ -49,10 +49,16 @@ ToolCall = dict  # {"id", "name", "args"}
 # ---------------------------------------------------------------------------
 @dataclass
 class Reply:
-    """One scripted LLM response: free text and/or one or more tool calls."""
+    """One scripted LLM response: free text, tool calls, or a raised error.
+
+    Setting ``error`` makes the corresponding invocation raise it (so error
+    recovery / retry paths can be exercised). The route still advances, so a
+    subsequent invocation returns the next scripted reply.
+    """
 
     text: str = ""
     tool_calls: List[ToolCall] = field(default_factory=list)
+    error: object = None
 
     def to_ai_message(self, ids: List[int]) -> AIMessage:
         msg = AIMessage(content=self.text)
@@ -148,7 +154,10 @@ class ScriptedLLM:
     # -- duck-typed LLM surface --------------------------------------------
     def invoke(self, messages, **kwargs) -> AIMessage:
         self._s.calls.append(list(messages))
-        return self._reply_for(messages).to_ai_message(self._s.ids)
+        reply = self._reply_for(messages)
+        if reply.error is not None:
+            raise reply.error
+        return reply.to_ai_message(self._s.ids)
 
     async def ainvoke(self, messages, **kwargs) -> AIMessage:
         return self.invoke(messages, **kwargs)
