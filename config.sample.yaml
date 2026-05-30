@@ -50,12 +50,14 @@ models:
 # e.g. `chat: smart,fast` (tries smart first, then fast if it errors).
 # Fallback chain: chat/vision/skill_runner → default
 #                 skill.<name> → skill_runner → default
+# Note: skill_runner and skills are optional — if omitted, they fall back to chat.
+#       Session overrides set via /model chat also propagate to skills automatically.
 agents:
   default: fast       # global fallback — must point to a key in models:
   # chat: smart,fast
-  # skill_runner: fast
+  # skill_runner: fast   # optional — inherits chat if omitted
   # vision: vision
-  # skills:           # per-skill overrides
+  # skills:              # per-skill overrides (optional)
   #   searxng: groq-fast,fast
   #   browser: smart,fast
 

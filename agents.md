@@ -309,6 +309,8 @@ agents:
 - `get("skill.<name>")` → `agents.skills.<name>` → `agents.skill_runner` → `agents.chat` → `agents.default`
 - `get("compiler")` → `agents.compiler` → `agents.skill_runner` → `agents.chat` → `agents.default` (used by the skill workflow compiler)
 
+**Session override inheritance:** When you set a session override with `/model chat <models>`, that selection is automatically inherited by `skill_runner` and all `skill.*` roles **unless** you explicitly set them too. This lets you control the fallback chain for chat and skills from a single override without touching the global config.
+
 **Valid agent paths for `/model <path> <name>`:** `default`, `chat`, `skill_runner`, `vision`, `compiler`, `skills.<name>` (see `_VALID_AGENT_PATHS` in `pawlia/interfaces/common.py`).
 
 **Legacy format** (inline model config) is also supported for backwards compatibility.
