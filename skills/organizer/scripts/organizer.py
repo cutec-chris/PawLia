@@ -581,6 +581,35 @@ def _write_tasks_md(path: str, tasks: list[dict]) -> None:
         f.write("\n".join(lines) + "\n" if lines else "")
 
 
+def _find_tasks_in_workspace(workspace_dir: str) -> list[tuple[dict, str]]:
+    """Scan all .md files in workspace (excluding tasks.md and calendar/) for task lines.
+
+    Returns list of (task_dict, source_file) tuples.
+    """
+    results: list[tuple[dict, str]] = []
+    for root, _dirs, files in os.walk(workspace_dir):
+        # Skip calendar/ directory
+        if root.endswith("calendar") or "/calendar/" in root:
+            continue
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            # Skip the canonical tasks.md
+            if fname == "tasks.md" and root == workspace_dir:
+                continue
+            path = os.path.join(root, fname)
+            rel = os.path.relpath(path, workspace_dir)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        task = _line_to_task(line)
+                        if task:
+                            results.append((task, rel))
+            except Exception:
+                continue
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Calendar commands
 # ---------------------------------------------------------------------------
@@ -690,6 +719,29 @@ def cmd_delete_event(args) -> None:
 # Task commands
 # ---------------------------------------------------------------------------
 
+def _find_project_note(workspace_dir: str, project: str) -> str | None:
+    """Search for a project note by name in workspace/wiki/topics/ and workspace root.
+
+    Returns the file path relative to workspace_dir, or None.
+    """
+    candidates: list[str] = []
+    slug = project.lower().replace(" ", "-").replace("_", "-")
+    candidates.append(os.path.join("wiki", "topics", f"{slug}.md"))
+    candidates.append(f"{slug}.md")
+    candidates.append(os.path.join("wiki", "topics", f"{project}.md"))
+    candidates.append(f"{project}.md")
+    # Also try with underscores
+    uslug = project.lower().replace(" ", "_").replace("-", "_")
+    candidates.append(os.path.join("wiki", "topics", f"{uslug}.md"))
+    candidates.append(f"{uslug}.md")
+
+    for rel in candidates:
+        abspath = os.path.join(workspace_dir, rel)
+        if os.path.isfile(abspath):
+            return rel
+    return None
+
+
 def cmd_add_task(args) -> None:
     task = {
         "title": args.title,
@@ -699,6 +751,25 @@ def cmd_add_task(args) -> None:
         "created_at": datetime.now().strftime("%Y-%m-%d"),
     }
 
+    workspace = _workspace_dir(args.user_id, args.session_dir)
+    task_line = _task_to_line(task)
+
+    # If --project is given, try to append to that project note
+    if args.project:
+        note_rel = _find_project_note(workspace, args.project)
+        if note_rel:
+            note_path = os.path.join(workspace, note_rel)
+            with open(note_path, "a", encoding="utf-8") as f:
+                f.write(f"\n{task_line}")
+            _out({
+                "success": True,
+                "message": f"Task '{args.title}' added to {note_rel}.",
+                "task_id": args.title,
+                "project_note": note_rel,
+            })
+            return
+
+    # Fallback: append to tasks.md
     path = _tasks_path(args.user_id, args.session_dir)
     tasks = _read_tasks_md(path)
     tasks.append(task)
@@ -735,6 +806,14 @@ def cmd_add_task(args) -> None:
 def cmd_list_tasks(args) -> None:
     path = _tasks_path(args.user_id, args.session_dir)
     tasks = _read_tasks_md(path)
+    workspace = _workspace_dir(args.user_id, args.session_dir)
+
+    # Also scan project notes for tasks
+    note_tasks = _find_tasks_in_workspace(workspace)
+    note_count = len(note_tasks)
+    for task, source in note_tasks:
+        task["source"] = source
+        tasks.append(task)
 
     # Filter out reminders
     tasks = [t for t in tasks if not t.get("is_reminder")]
@@ -743,17 +822,30 @@ def cmd_list_tasks(args) -> None:
     if status_filter != "all":
         tasks = [t for t in tasks if t.get("status") == status_filter]
 
+    # Filter by project if specified
+    if args.project:
+        project_slug = args.project.lower().replace(" ", "-").replace("_", "-")
+        filtered = []
+        for t in tasks:
+            src = t.get("source", "")
+            if project_slug in src.lower().replace("\\", "/"):
+                filtered.append(t)
+        tasks = filtered
+
     limit = args.limit or 10
     # Format for display
     display = []
     for t in tasks[:limit]:
-        display.append({
+        item = {
             "title": t["title"],
             "status": t["status"],
             "due_date": t.get("due_date", ""),
             "priority": t.get("priority", ""),
-        })
-    _out({"success": True, "tasks": display, "total": len(tasks)})
+        }
+        if t.get("source"):
+            item["source"] = t["source"]
+        display.append(item)
+    _out({"success": True, "tasks": display, "total": len(tasks), "note_tasks": note_count})
 
 
 def cmd_complete_task(args) -> None:
@@ -862,14 +954,24 @@ def cmd_add_reminder(args) -> None:
 def cmd_list_reminders(args) -> None:
     path = _tasks_path(args.user_id, args.session_dir)
     tasks = _read_tasks_md(path)
+    workspace = _workspace_dir(args.user_id, args.session_dir)
+
+    note_tasks = _find_tasks_in_workspace(workspace)
+    for task, source in note_tasks:
+        task["source"] = source
+        tasks.append(task)
+
     reminders = [t for t in tasks if t.get("is_reminder") and t.get("status") == "pending"]
     display = []
     for r in reminders:
-        display.append({
+        item = {
             "title": r["title"],
             "scheduled": r.get("scheduled", ""),
             "recurrence": r.get("recurrence", ""),
-        })
+        }
+        if r.get("source"):
+            item["source"] = r["source"]
+        display.append(item)
     _out({"success": True, "reminders": display, "total": len(reminders)})
 
 
@@ -1017,6 +1119,7 @@ def main():
     p.add_argument("--due-date")
     p.add_argument("--priority", choices=["highest", "high", "medium", "low", "lowest"])
     p.add_argument("--description")
+    p.add_argument("--project", help="Project name — appends task to matching project note if found")
     # Note: --reminders is accepted but task reminders are now managed via
     # scheduler_state.json, not embedded in the task line itself.
     p.add_argument("--reminders", help="JSON array of reminder rules (stored in scheduler state)")
@@ -1026,6 +1129,7 @@ def main():
     _base(p)
     p.add_argument("--status", default="pending")
     p.add_argument("--limit", type=int)
+    p.add_argument("--project", help="Filter by project note name")
 
     # complete-task
     p = sub.add_parser("complete-task")

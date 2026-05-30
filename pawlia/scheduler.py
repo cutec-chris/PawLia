@@ -190,6 +190,7 @@ def _parse_tasks_md(session_dir: str, user_id: str) -> list[dict]:
             task = {
                 "_line": i,
                 "_raw": line,
+                "_source": "tasks.md",
                 "status": "completed" if check in ("x", "X") else ("cancelled" if check == "-" else "pending"),
                 "is_reminder": "\U0001f514" in rest,  # 🔔
             }
@@ -213,6 +214,58 @@ def _parse_tasks_md(session_dir: str, user_id: str) -> list[dict]:
                     title = title[:title.index(emoji)]
             task["title"] = title.strip()
             tasks.append(task)
+    return tasks
+
+
+def _find_workspace_tasks(session_dir: str, user_id: str) -> list[dict]:
+    """Scan all .md files in workspace (excluding tasks.md and calendar/) for task lines."""
+    ws = os.path.join(session_dir, user_id, "workspace")
+    if not os.path.isdir(ws):
+        return []
+    tasks: list[dict] = []
+    for root, _dirs, files in os.walk(ws):
+        if root.endswith("calendar") or "/calendar/" in root:
+            continue
+        for fname in files:
+            if not fname.endswith(".md"):
+                continue
+            if fname == "tasks.md" and root == ws:
+                continue
+            path = os.path.join(root, fname)
+            rel = os.path.relpath(path, ws)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    for line_no, line in enumerate(f):
+                        m = _TASK_RE.match(line.rstrip())
+                        if not m:
+                            continue
+                        check = m.group(1)
+                        rest = m.group(2)
+                        task: dict = {
+                            "_line": line_no,
+                            "_raw": line.rstrip(),
+                            "_source": rel,
+                            "status": "completed" if check in ("x", "X") else ("cancelled" if check == "-" else "pending"),
+                            "is_reminder": "\U0001f514" in rest,
+                        }
+                        sm = re.search(r"\u23f3\s+([\d\-T:]+)", rest)
+                        if sm:
+                            task["scheduled"] = sm.group(1)
+                        dm = re.search(r"\U0001f4c5\s+([\d\-]+)", rest)
+                        if dm:
+                            task["due_date"] = dm.group(1)
+                        rm = re.search(r"\U0001f501\s+(.+?)(?=\s[\u23f3\U0001f6eb\U0001f4c5\u2795\u2705\u274c\U0001f53a\u23eb\U0001f53c\U0001f53d\u23ec]|$)", rest)
+                        if rm:
+                            task["recurrence"] = rm.group(1).strip()
+                        title = rest
+                        for emoji in ("\U0001f53a", "\u23eb", "\U0001f53c", "\U0001f53d", "\u23ec",
+                                      "\U0001f501", "\u23f3", "\U0001f6eb", "\U0001f4c5", "\u2795", "\u2705", "\u274c"):
+                            if emoji in title:
+                                title = title[:title.index(emoji)]
+                        task["title"] = title.strip()
+                        tasks.append(task)
+            except Exception:
+                continue
     return tasks
 
 
@@ -631,7 +684,9 @@ class Scheduler:
     async def _check_reminders(self, user_id: str) -> None:
         """Fire due reminders from workspace/tasks.md (lines with 🔔 and ⏳)."""
         tasks = _parse_tasks_md(self.session_dir, user_id)
-        reminders = [t for t in tasks if t.get("is_reminder") and t.get("status") == "pending"]
+        note_tasks = _find_workspace_tasks(self.session_dir, user_id)
+        all_tasks = tasks + note_tasks
+        reminders = [t for t in all_tasks if t.get("is_reminder") and t.get("status") == "pending"]
         if not reminders:
             return
 
@@ -651,6 +706,11 @@ class Scheduler:
             if fire_at <= now:
                 title = rem.get("title", "Reminder")
                 await self._notify(user_id, f"\U0001f514 {title}")
+
+                # Only auto-mark-done for tasks in tasks.md, not project notes
+                source = rem.get("_source", "tasks.md")
+                if source != "tasks.md":
+                    continue
 
                 recurrence = rem.get("recurrence", "")
                 if recurrence:
