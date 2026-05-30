@@ -44,11 +44,17 @@ def _run_files_subcommand(
         limit = args.get("limit")
         if limit is not None:
             cmd.extend(["--limit", str(limit)])
+        query = args.get("query")
+        if query is not None:
+            cmd.extend(["--query", query])
 
     elif subcommand == "list":
-        path = args.get("path", "")
-        if path:
-            cmd.extend(["--path", path])
+        offset = args.get("offset")
+        if offset is not None:
+            cmd.extend(["--offset", str(offset)])
+        limit = args.get("limit")
+        if limit is not None:
+            cmd.extend(["--limit", str(limit)])
 
     elif subcommand == "grep":
         pattern = args.get("pattern", "")
@@ -107,6 +113,10 @@ class ReadFileTool(Tool):
                 "type": "integer",
                 "description": "Maximum number of lines to read. Defaults to 150.",
             },
+            "query": {
+                "type": "string",
+                "description": "Return only lines matching this query plus a few lines of context. Use this instead of reading the whole file when looking for specific content.",
+            },
         }
 
     def required_parameters(self) -> List[str]:
@@ -128,9 +138,13 @@ class ListFilesTool(Tool):
 
     def parameters(self) -> Dict[str, Any]:
         return {
-            "path": {
-                "type": "string",
-                "description": "Subdirectory to list. Defaults to workspace root.",
+            "offset": {
+                "type": "integer",
+                "description": "0-based file offset for pagination. Defaults to 0.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum files to return (default 200).",
             },
         }
 
