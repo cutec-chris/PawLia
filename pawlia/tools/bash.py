@@ -41,7 +41,7 @@ class BashTool(Tool):
     def _validate_cwd(cwd: Optional[str], context: Optional[Dict[str, Any]]) -> Optional[str]:
         """Ensure cwd stays within session_dir or project tree."""
         if not cwd:
-            return cwd
+            return None  # empty/None → no restriction; subprocess uses process cwd
         real_cwd = os.path.realpath(cwd)
         # __file__ is pawlia/tools/bash.py → go up 3 levels to project root
         pkg_dir = os.path.realpath(
@@ -126,7 +126,11 @@ class BashTool(Tool):
                 if shell is None:
                     return _fmt(subprocess.run(cmd, shell=True, **run_kwargs))
                 return _fmt(subprocess.run(shell, **run_kwargs))
-            except FileNotFoundError:
+            except FileNotFoundError as e:
+                # A missing executable: try the next shell alternative.
+                # A missing cwd that passed validation: report clearly.
+                if cwd and e.filename == cwd:
+                    return f"Error: Working directory does not exist: {cwd}"
                 continue
             except subprocess.TimeoutExpired:
                 return f"Error: Command timed out ({timeout}s)"
