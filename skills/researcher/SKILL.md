@@ -1,18 +1,13 @@
 ---
 name: researcher
 description: >
-  Create and manage research projects in the workspace.
-  Each project stores scraped documents as markdown files under
-  workspace/research/{project}/. No RAG backend is involved — the DreamWiki
-  is fed exclusively by conversations. Research insights flow into the wiki
-  organically when the user discusses their findings.
-  The query MUST be a command:
-  "create <name> <description>" to create a new project,
-  "list" to list all projects,
-  "add <project> <url> [depth]" to scrape and save a URL (depth for recursive, default 1),
-  "query <project> <question>" to search the project's documents,
-  "delete <project>" to delete a project,
-  "rename <old> <new>" to rename a project.
+  Collect web sources into named research projects and answer questions from
+  them. Scrapes URLs (recursive crawl, PDFs, YouTube transcripts) into a
+  project, then answers questions grounded in the gathered sources via
+  semantic/keyword search. Use for "research X", building a sourced dossier on
+  a topic, or querying previously gathered material — as opposed to a one-shot
+  web search (perplexica/searxng). Commands: create, list, add, query, delete,
+  rename (syntax in the skill instructions).
 license: MIT
 metadata:
   author: Christian Ulrich
