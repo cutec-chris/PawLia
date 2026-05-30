@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Researcher skill — scrape and search research projects in the workspace.
+"""Researcher skill — scrape and search research projects.
 
-Files land in workspace/research/{project}/ — no RAG backend, no DreamWiki.
-The DreamWiki is fed exclusively by conversations; research insights flow in
+Files land in session/{user_id}/research/{project}/ — beside the workspace,
+not inside it, so scraped sources never leak into the workspace listing,
+BM25 search, git push or the DreamWiki. No RAG backend, no DreamWiki: the
+DreamWiki is fed exclusively by conversations; research insights flow in
 organically when the user discusses their findings.
 
 Usage:
@@ -547,7 +549,7 @@ async def main():
         print("       (user_id can be set via PAWLIA_USER_ID env var)", file=sys.stderr)
         sys.exit(1)
 
-    user_dir = _SESSION_DIR / user_id / "workspace" / "research"
+    user_dir = _SESSION_DIR / user_id / "research"
     user_dir.mkdir(parents=True, exist_ok=True)
 
     if command == "create":

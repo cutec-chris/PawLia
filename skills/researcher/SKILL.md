@@ -11,7 +11,7 @@ description: >
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "2.0"
+  version: "2.1"
   trust: internal
   optional_config:
     - embedding_provider        # enables semantic search (ollama or openai-compat)
@@ -49,8 +49,11 @@ python <scripts_dir>/researcher.py <command> [args...]
 
 Documents are saved as markdown under:
 ```
-$PAWLIA_SESSION_DIR/{user_id}/workspace/research/{project}/
+$PAWLIA_SESSION_DIR/{user_id}/research/{project}/
 ```
+
+This lives **beside** the workspace, not inside it, so scraped sources never
+leak into the workspace listing, BM25 search, git push or the DreamWiki.
 
 No RAG backend or DreamWiki is involved. The embed index (`.index/`) is built
 lazily on the first `query` call and invalidated automatically after each `add`.
