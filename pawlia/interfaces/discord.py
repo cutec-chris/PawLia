@@ -441,7 +441,16 @@ async def start_discord(app: "App", cfg: Dict) -> None:
                 )
 
             avail = ", ".join(f"`{m}`" for m in result.available) or "_(keine konfiguriert)_"
-            if result.action == "show":
+            if result.action == "show" and result.chains:
+                from pawlia.interfaces.common import format_model_chains
+                chain_text = format_model_chains(result.chains)
+                await _reply(
+                    message,
+                    f"{chain_text}\n\n"
+                    f"**Verfügbar:** {avail}\n"
+                    f"_Session-Chatmodell setzen: `//model <modell>` — Agent setzen: `//model <pfad> <modell>` — Löschen: `//model <pfad> off`_"
+                )
+            elif result.action == "show":
                 await _reply(
                     message,
                     f"**Aktives Chat-Modell** [{result.ctx_label}]: `{result.model}`\n"
@@ -700,7 +709,13 @@ async def start_discord(app: "App", cfg: Dict) -> None:
                 agent_cache.invalidate(session_id)
 
             avail = ", ".join(f"`{m}`" for m in result.available) or "_(keine)_"
-            if result.action == "show":
+            if result.action == "show" and result.chains:
+                from pawlia.interfaces.common import format_model_chains
+                chain_text = format_model_chains(result.chains)
+                await interaction.response.send_message(
+                    f"{chain_text}\n\n**Verfügbar:** {avail}"
+                )
+            elif result.action == "show":
                 await interaction.response.send_message(
                     f"**Aktives Modell** [{result.ctx_label}]: `{result.model}`\n**Verfügbar:** {avail}"
                 )

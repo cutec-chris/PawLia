@@ -169,7 +169,10 @@ async def start_cli(app: "App") -> None:
         if user_input.strip().lower().startswith("/model"):
             args_str = user_input.strip()[len("/model"):].strip()
             result = handle_model_command(app, "cli_user", args_str)
-            if result.action == "show":
+            if result.action == "show" and result.chains:
+                from pawlia.interfaces.common import format_model_chains
+                print(format_model_chains(result.chains) + "\n")
+            elif result.action == "show":
                 print(f"Aktives Chat-Modell: {result.model}\n")
             elif result.action == "invalid_path":
                 print("Ungültiger Model-Pfad. Erlaubt: default, chat, skill_runner, vision, compiler, skills.<name>\n")

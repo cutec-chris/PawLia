@@ -533,7 +533,17 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 await _send_text(room.room_id, text)
 
         avail = ", ".join(f"`{m}`" for m in result.available) or "_(keine konfiguriert)_"
-        if result.action == "show":
+        if result.action == "show" and result.chains:
+            lines: List[str] = []
+            for key, info in result.chains.items():
+                label = key.replace("skills.", "Skills.")
+                label = label[0].upper() + label[1:] if label else key
+                chain = " → ".join(f"`{m}`" for m in info["chain"])
+                lines.append(f"**{label}** ({info['source']}):\n{chain}")
+            lines.append(f"\n**Verfügbar:** {avail}")
+            lines.append("_Session-Chatmodell setzen: `//model <modell>` — Agent setzen: `//model <pfad> <modell>` — Löschen: `//model <pfad> off`_")
+            await _reply("\n".join(lines))
+        elif result.action == "show":
             await _reply(
                 f"**Aktives Chat-Modell** [{result.ctx_label}]: `{result.model}`\n"
                 f"**Verfügbar:** {avail}\n"

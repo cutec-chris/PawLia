@@ -8,6 +8,7 @@ Config (in config.yaml under "interfaces.telegram"):
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from telegram import Update
@@ -236,7 +237,21 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             logger.info("Telegram: model changed for %s thread %s -> %s", user_id, thread_id, result.model)
 
         avail = ", ".join(f"<code>{m}</code>" for m in result.available) or "<i>(keine konfiguriert)</i>"
-        if result.action == "show":
+        if result.action == "show" and result.chains:
+            from pawlia.interfaces.common import format_model_chains
+            chain_text = format_model_chains(result.chains)
+            # Convert markdown bold/code to HTML for Telegram
+            chain_text = chain_text.replace("**", "<b>").replace("**", "</b>")
+            # Simple conversion: `code` → <code>code</code>
+            import re
+            chain_text = re.sub(r"`([^`]+)`", r"<code>\1</code>", chain_text)
+            await update.message.reply_text(
+                f"{chain_text}\n\n"
+                f"<b>Verfügbar:</b> {avail}\n"
+                f"<i>Session-Chatmodell setzen: /model &lt;modell&gt; — Agent setzen: /model &lt;pfad&gt; &lt;modell&gt; — Löschen: /model &lt;pfad&gt; off</i>",
+                parse_mode=ParseMode.HTML,
+            )
+        elif result.action == "show":
             await update.message.reply_text(
                 f"<b>Aktives Chat-Modell</b> [{result.ctx_label}]: <code>{result.model}</code>\n"
                 f"<b>Verfügbar:</b> {avail}\n"

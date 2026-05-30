@@ -47,7 +47,7 @@ class AgentCache:
 class ModelCommandResult:
     """Result of a /model command, ready for platform-specific formatting."""
 
-    __slots__ = ("action", "model", "ctx_label", "path", "available", "invalidate_agent")
+    __slots__ = ("action", "model", "ctx_label", "path", "available", "invalidate_agent", "chains")
 
     def __init__(
         self,
@@ -57,6 +57,7 @@ class ModelCommandResult:
         path: str = "default",
         available: Optional[List[str]] = None,
         invalidate_agent: bool = False,
+        chains: Optional[Dict[str, Any]] = None,
     ):
         self.action = action            # "show" | "set" | "cleared" | "invalid_path"
         self.model = model              # current or new model name (or "(default)")
@@ -64,6 +65,7 @@ class ModelCommandResult:
         self.path = path                # agent selector path, e.g. "default" or "skills.browser"
         self.available = available or []  # available model keys from config.models
         self.invalidate_agent = invalidate_agent
+        self.chains = chains or {}     # {agent_type: {chain: [...], source: "Global|Session-Override"}}
 
 
 class ReloadCommandResult:
@@ -109,18 +111,43 @@ def handle_model_command(
     llm_factory = getattr(app, "llm", None)
 
     if not args.strip():
+        if llm_factory is not None:
+            overrides = app.memory.effective_agent_overrides(session)
+            chains: Dict[str, Any] = {}
+
+            # Chat chain
+            chat_chain = llm_factory.get_fallback_chain("chat", overrides)
+            chains["chat"] = {
+                "chain": chat_chain,
+                "source": _chain_source(overrides, "chat"),
+            }
+
+            # Skill runner chain
+            sr_chain = llm_factory.get_fallback_chain("skill_runner", overrides)
+            chains["skill_runner"] = {
+                "chain": sr_chain,
+                "source": _chain_source(overrides, "skill_runner"),
+            }
+
+            # Skill-specific overrides
+            override_skills = overrides.get("skills", {})
+            if isinstance(override_skills, dict):
+                for skill_name in override_skills:
+                    sk_chain = llm_factory.get_fallback_chain(f"skill.{skill_name}", overrides)
+                    chains[f"skills.{skill_name}"] = {
+                        "chain": sk_chain,
+                        "source": "Session-Override",
+                    }
+
+            return ModelCommandResult("show", "", ctx_label, path="chat", available=available, chains=chains)
+
+        # Fallback if no LLM factory available
         current = app.memory.get_agent_override_value(session, "chat")
         if current:
             return ModelCommandResult("show", current, ctx_label, path="chat", available=available)
-        if llm_factory is not None:
-            effective = llm_factory.default_model_name(
-                "chat",
-                agent_overrides=app.memory.effective_agent_overrides(session),
-            )
-        else:
-            agents = app.config.get("agents") or {}
-            effective = str(agents.get("chat") or agents.get("default") or agents.get("defaults") or "(unresolved)")
-            effective = effective.split(",")[0].strip() if effective else "(unresolved)"
+        agents = app.config.get("agents") or {}
+        effective = str(agents.get("chat") or agents.get("default") or agents.get("defaults") or "(unresolved)")
+        effective = effective.split(",")[0].strip() if effective else "(unresolved)"
         return ModelCommandResult("show", f"{effective} (global)", ctx_label, path="chat", available=available)
 
     first, sep, rest = args.strip().partition(" ")
@@ -192,6 +219,30 @@ def handle_reload_command(app: "App") -> ReloadCommandResult:
     return ReloadCommandResult("\n".join(lines), warnings=warnings)
 
 
+def _format_chain(chain: List[str], active: Optional[str]) -> str:
+    """Format a model fallback chain, bolding the currently active model."""
+    parts = []
+    for m in chain:
+        if active and m == active:
+            parts.append(f"**`{m}`**")
+        else:
+            parts.append(f"`{m}`")
+    return " → ".join(parts)
+
+
+def _chain_source(overrides: Dict[str, Any], agent_type: str) -> str:
+    """Return whether the chain comes from a session override or global config."""
+    if agent_type.startswith("skill."):
+        skill_name = agent_type[len("skill."):]
+        skills = overrides.get("skills", {})
+        if isinstance(skills, dict) and skill_name in skills:
+            return "Session-Override"
+        return "Global"
+    if agent_type in overrides:
+        return "Session-Override"
+    return "Global"
+
+
 def build_status(
     app: "App",
     user_id: str,
@@ -206,11 +257,10 @@ def build_status(
     session = app.memory.load_session(user_id)
 
     effective_overrides = app.memory.effective_agent_overrides(session, thread_id)
-    model_override = bool(effective_overrides)
-    model_name = getattr(agent.llm, "model_name", None) or getattr(agent.llm, "model", "?")
-    temperature = getattr(agent.llm, "temperature", None)
     backend = getattr(agent.llm, "backend", "pawlia")
     provider_name = getattr(agent.llm, "provider_name", None)
+    temperature = getattr(agent.llm, "temperature", None)
+
     # Context for thread or main
     if thread_id:
         exchanges = app.memory.get_thread_context(session, thread_id)
@@ -219,30 +269,59 @@ def build_status(
 
     if hasattr(agent, "describe_backend"):
         meta = agent.describe_backend(thread_id, agent_type="chat")
-        model_name = meta["selection"]
         backend = meta["backend"]
         provider_name = meta["provider_name"]
         temperature = meta.get("temperature")
+
+    # Detect active fallback model (if the LLM is a FallbackLLMWrapper)
+    active_fallback = None
+    for attr in ("llm", "bound_llm"):
+        llm_obj = getattr(agent, attr, None)
+        if llm_obj and hasattr(llm_obj, "active_label"):
+            active_fallback = llm_obj.active_label
+            break
+
+    # Build model chains
+    llm_factory = app.llm
+
+    chat_chain = llm_factory.get_fallback_chain("chat", effective_overrides)
+    chat_source = _chain_source(effective_overrides, "chat")
+
+    skill_runner_chain = llm_factory.get_fallback_chain("skill_runner", effective_overrides)
+    skill_runner_source = _chain_source(effective_overrides, "skill_runner")
+
+    # Skill-specific chains (only if explicitly overridden)
+    skill_chains: Dict[str, Dict[str, Any]] = {}
+    if hasattr(agent, "list_skills"):
+        skills = agent.list_skills(thread_id)
+    else:
+        skills = sorted(agent.skills.keys()) if agent.skills else []
+
+    override_skills = effective_overrides.get("skills", {})
+    for skill_name in skills:
+        if isinstance(override_skills, dict) and skill_name in override_skills:
+            chain = llm_factory.get_fallback_chain(f"skill.{skill_name}", effective_overrides)
+            skill_chains[skill_name] = {
+                "chain": chain,
+                "source": "Session-Override",
+            }
 
     # Estimate context size (chars → rough token estimate at ~4 chars/token)
     context_chars = sum(len(e[0]) + len(e[1]) for e in exchanges)
     summary_chars = len(session.summary)
     estimated_tokens = (context_chars + summary_chars) // 4
 
-    # Skills
-    if hasattr(agent, "list_skills"):
-        skills = agent.list_skills(thread_id)
-    else:
-        skills = sorted(agent.skills.keys()) if agent.skills else []
-
     # Idle time
     idle_seconds = (datetime.now() - session.last_activity).total_seconds()
 
     return {
         "user_id": user_id,
-        "model": model_name,
-        "model_override": model_override,
-        "agent_overrides": _flatten_agent_overrides(effective_overrides),
+        "active_fallback": active_fallback,
+        "chat_chain": chat_chain,
+        "chat_source": chat_source,
+        "skill_runner_chain": skill_runner_chain,
+        "skill_runner_source": skill_runner_source,
+        "skill_chains": skill_chains,
         "backend": backend,
         "provider": provider_name,
         "temperature": temperature,
@@ -262,17 +341,28 @@ def build_status(
 def format_status(status: Dict[str, Any]) -> str:
     """Format status dict as markdown (single source of truth)."""
     lines: List[str] = []
-    lines.append(f"**Model:** `{status['model']}`" + (" _(override)_" if status["model_override"] else ""))
+
+    active = status.get("active_fallback")
+
+    # Chat chain
+    chat_chain = _format_chain(status["chat_chain"], active)
+    lines.append(f"**Chat** ({status['chat_source']}): {chat_chain}")
+
+    # Skill runner chain
+    sr_chain = _format_chain(status["skill_runner_chain"], active)
+    lines.append(f"**Skills** ({status['skill_runner_source']}): {sr_chain}")
+
+    # Skill-specific overrides
+    for skill_name, info in status["skill_chains"].items():
+        chain = _format_chain(info["chain"], active)
+        lines.append(f"**Skills.{skill_name}** ({info['source']}): {chain}")
+
+    lines.append("---")
     lines.append(f"**Backend:** `{status['backend']}`")
     if status.get("provider"):
         lines.append(f"**Provider:** `{status['provider']}`")
     if status["temperature"] is not None:
         lines.append(f"**Temp:** {status['temperature']}")
-    if status.get("agent_overrides"):
-        compact = ", ".join(
-            f"`{path}={value}`" for path, value in sorted(status["agent_overrides"].items())
-        )
-        lines.append(f"**Agent Overrides:** {compact}")
     ctx = "Thread" if status["thread_id"] else "Session"
     lines.append(f"**Context:** {status['exchanges']} exchanges, ~{status['estimated_tokens']} tokens ({ctx})")
     if status["has_summary"]:
@@ -291,6 +381,17 @@ def md_to_text(text: str) -> str:
     text = re.sub(r"_(.+?)_", r"\1", text)           # italic
     text = re.sub(r"`([^`]+)`", r"\1", text)         # inline code
     return text
+
+
+def format_model_chains(chains: Dict[str, Any]) -> str:
+    """Format model fallback chains as markdown lines."""
+    lines: List[str] = []
+    for key, info in chains.items():
+        label = key.replace("skills.", "Skills.")
+        label = label[0].upper() + label[1:] if label else key
+        chain = " → ".join(f"`{m}`" for m in info["chain"])
+        lines.append(f"**{label}** ({info['source']}):\n{chain}")
+    return "\n".join(lines)
 
 
 def preview_text(text: Optional[str], limit: int = 120) -> str:

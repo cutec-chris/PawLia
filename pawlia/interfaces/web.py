@@ -236,6 +236,10 @@ async def start_web(app: "App", cfg: Dict) -> None:
             result = handle_model_command(app, user_id, args_str, thread_id=thread_id)
             if result.invalidate_agent:
                 agent_cache.invalidate(user_id)
+            if result.action == "show" and result.chains:
+                from pawlia.interfaces.common import format_model_chains
+                chain_text = format_model_chains(result.chains)
+                return web.json_response({"response": chain_text})
             if result.action == "show":
                 return web.json_response({"response": f"**Active Chat Model ({result.ctx_label}):** `{result.model}`"})
             if result.action == "invalid_path":

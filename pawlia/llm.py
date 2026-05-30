@@ -305,13 +305,15 @@ class _FallbackLLMWrapper:
     _BLACKLIST_COOLDOWN_SECONDS = 30 * 60
 
     def __init__(self, llms: List[Any], labels: List[str], context_sizes: List[int],
-                 on_fallback: Optional[Callable[[str, str], None]] = None):
+                 on_fallback: Optional[Callable[[str, str], None]] = None,
+                 active_label: Optional[str] = None):
         if not llms:
             raise ValueError("Fallback wrapper requires at least one LLM")
         self._llms = llms
         self._labels = labels
         self._context_sizes = context_sizes
         self._on_fallback = on_fallback  # (from_model, to_model) -> None
+        self.active_label = active_label or (labels[0] if labels else "unknown")
         self._now = time.monotonic
         self._failures = [0 for _ in llms]
         self._blacklisted_until = [0.0 for _ in llms]
@@ -536,6 +538,7 @@ class _FallbackLLMWrapper:
             try:
                 result = llm.invoke(messages, **kwargs)
                 self._note_success(idx)
+                self.active_label = self._labels[idx]
                 return result
             except Exception as exc:
                 last_exc = exc
@@ -604,6 +607,7 @@ class _FallbackLLMWrapper:
             try:
                 result = await llm.ainvoke(messages, **kwargs)
                 self._note_success(idx)
+                self.active_label = self._labels[idx]
                 return result
             except Exception as exc:
                 last_exc = exc
@@ -648,6 +652,7 @@ class _FallbackLLMWrapper:
             self._labels,
             self._context_sizes,
             on_fallback=self._on_fallback,
+            active_label=self.active_label,
         )
 
     async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
@@ -763,6 +768,19 @@ class LLMFactory:
             context_sizes = [self.context_size_for_model(str(cfg.get("model", "unknown"))) for cfg in model_cfgs]
             self._cache[key] = _FallbackLLMWrapper(llms, labels, context_sizes)
         return self._cache[key]
+
+    def get_fallback_chain(
+        self,
+        agent_type: str = "chat",
+        agent_overrides: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """Return the resolved fallback model names for an agent type."""
+        candidates = self._resolve_agent_candidates(
+            agent_type,
+            backend="pawlia",
+            agent_overrides=agent_overrides,
+        )
+        return [str(cfg.get("model", "unknown")) for cfg in candidates]
 
     def resolve_model_name(self, name: str) -> str:
         """Resolve a config key (e.g. ``"fast"``) to its ``model`` value.
