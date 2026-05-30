@@ -5,6 +5,9 @@ config.yml
 session/*
 pytest.ini
 .pytest_last.txt
+.coverage
+htmlcov/
+.pytest_cache/
 .aider.*
 .claude/*
 .claude/*

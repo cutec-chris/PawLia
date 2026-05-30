@@ -11,7 +11,7 @@ import yaml
 
 from pawlia.llm import LLMFactory
 from pawlia.memory import MemoryManager
-from pawlia.scheduler import Scheduler, _next_occurrence
+from pawlia.scheduler import Scheduler
 
 
 def _write_event_md(cal_dir, filename, fm_dict, body=""):
@@ -37,37 +37,8 @@ def _read_tasks_md(workspace_dir):
         return f.read().strip().split("\n")
 
 
-class TestNextOccurrence:
-    def test_daily(self):
-        dt = datetime(2026, 3, 15, 10, 0)
-        result = _next_occurrence(dt, "every day")
-        assert result == datetime(2026, 3, 16, 10, 0)
-
-    def test_weekly(self):
-        dt = datetime(2026, 3, 15, 10, 0)
-        result = _next_occurrence(dt, "every week")
-        assert result == datetime(2026, 3, 22, 10, 0)
-
-    def test_monthly(self):
-        dt = datetime(2026, 3, 15, 10, 0)
-        result = _next_occurrence(dt, "every month")
-        assert result == datetime(2026, 4, 15, 10, 0)
-
-    def test_monthly_year_wrap(self):
-        dt = datetime(2026, 12, 15, 10, 0)
-        result = _next_occurrence(dt, "every month")
-        assert result == datetime(2027, 1, 15, 10, 0)
-
-    def test_monthly_day_overflow(self):
-        dt = datetime(2026, 1, 31, 10, 0)
-        result = _next_occurrence(dt, "every month")
-        assert result.month == 2
-        assert result.day == 28
-
-    def test_unknown_recurrence(self):
-        dt = datetime(2026, 3, 15, 10, 0)
-        result = _next_occurrence(dt, "unknown")
-        assert result == datetime(2026, 3, 16, 10, 0)
+# _next_occurrence date math lives in test_scheduler_datemath.py.
+# This file keeps the scheduler's *firing* behavior (system tests).
 
 
 class TestSchedulerReminders:

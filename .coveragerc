@@ -1,0 +1,19 @@
+[run]
+source = pawlia
+omit =
+    # Transport / interface adapters — exercised by their own focused tests,
+    # not by the system-test layer (which drives the agent core directly).
+    pawlia/interfaces/*
+    # Hardware-bound audio + speech I/O.
+    pawlia/audio/*
+    pawlia/tts.py
+    pawlia/transcription.py
+    # External-service backend (separate server, not in-process).
+    pawlia/backends/hermes.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    if __name__ == .__main__.:

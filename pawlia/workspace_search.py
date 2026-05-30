@@ -89,7 +89,7 @@ class SearchHit:
 
     @property
     def wikilink_ref(self) -> str:
-        """Return wikilink form for this file, e.g. [[foo]] or [[research/proj/hash]]."""
+        """Return wikilink form for this file, e.g. [[foo]] or [[wiki/topics/topic/foo]]."""
         return self.page_ref
 
 

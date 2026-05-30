@@ -1,22 +1,17 @@
 ---
 name: researcher
 description: >
-  Create and manage research projects in the workspace.
-  Each project stores scraped documents as markdown files under
-  workspace/research/{project}/. No RAG backend is involved — the DreamWiki
-  is fed exclusively by conversations. Research insights flow into the wiki
-  organically when the user discusses their findings.
-  The query MUST be a command:
-  "create <name> <description>" to create a new project,
-  "list" to list all projects,
-  "add <project> <url> [depth]" to scrape and save a URL (depth for recursive, default 1),
-  "query <project> <question>" to search the project's documents,
-  "delete <project>" to delete a project,
-  "rename <old> <new>" to rename a project.
+  Collect web sources into named research projects and answer questions from
+  them. Scrapes URLs (recursive crawl, PDFs, YouTube transcripts) into a
+  project, then answers questions grounded in the gathered sources via
+  semantic/keyword search. Use for "research X", building a sourced dossier on
+  a topic, or querying previously gathered material — as opposed to a one-shot
+  web search (perplexica/searxng). Commands: create, list, add, query, delete,
+  rename (syntax in the skill instructions).
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "2.0"
+  version: "2.1"
   trust: internal
   optional_config:
     - embedding_provider        # enables semantic search (ollama or openai-compat)
@@ -54,8 +49,11 @@ python <scripts_dir>/researcher.py <command> [args...]
 
 Documents are saved as markdown under:
 ```
-$PAWLIA_SESSION_DIR/{user_id}/workspace/research/{project}/
+$PAWLIA_SESSION_DIR/{user_id}/research/{project}/
 ```
+
+This lives **beside** the workspace, not inside it, so scraped sources never
+leak into the workspace listing, BM25 search, git push or the DreamWiki.
 
 No RAG backend or DreamWiki is involved. The embed index (`.index/`) is built
 lazily on the first `query` call and invalidated automatically after each `add`.
