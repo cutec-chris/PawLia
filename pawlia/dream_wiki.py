@@ -737,7 +737,7 @@ class DreamWikiBackend:
                 "top_k": 6,
                 "min_score": 0.35,
                 "include_root_files": False,
-                "exclude_dirs": ["memory", "skills", "research"],
+                "exclude_dirs": ["memory", "skills"],
             },
         ).search(question)
 

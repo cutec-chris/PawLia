@@ -172,9 +172,6 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
     intentionally NOT included. The model is expected to load the actual file
     via `files read` before answering, so claims trace back to the file rather
     than to a paraphrased preview that can drift.
-
-    research/*/README.md hits are deduped against their project's content files
-    so each project appears once with one ready-to-use read call.
     """
     lines = [
         "## Workspace Notes Available",
@@ -183,51 +180,12 @@ def _format_workspace_refs(hits: list, user_query: str = "") -> str:
         "",
     ]
 
-    research_readmes: dict = {}   # project_dir -> (ref, description)
-    research_content: dict = {}   # project_dir -> first content-file hit
-    other_hits: list = []
     seen_content: set = set()
-
     for hit in hits:
-        path = hit.path
-        ref = hit.wikilink_ref
-        parts = path.split("/")
-        if len(parts) >= 3 and parts[0] == "research":
-            project_dir = parts[1]
-            if parts[-1] == "README.md":
-                research_readmes[project_dir] = (ref, hit.snippet or "")
-            else:
-                if project_dir not in research_content and path not in seen_content:
-                    research_content[project_dir] = hit
-                    seen_content.add(path)
-        else:
-            if path not in seen_content:
-                seen_content.add(path)
-                other_hits.append(hit)
-
-    rendered_projects: set = set()
-
-    for project_dir, (readme_ref, description) in research_readmes.items():
-        content_hit = research_content.get(project_dir)
-        content_ref = content_hit.page_ref if content_hit else readme_ref
-        entry = f"- **{readme_ref}** — {description or project_dir}"
-        if content_hit and content_hit.heading:
-            entry += f" *(matched section: {content_hit.section_ref})*"
-        entry += f"\n  → `{_workspace_read_suggestion(content_hit, content_ref)}`"
-        lines.append(entry)
-        rendered_projects.add(project_dir)
-
-    for project_dir, hit in research_content.items():
-        if project_dir in rendered_projects:
+        if hit.path in seen_content:
             continue
-        ref = hit.section_ref
-        entry = f"- **{ref}** *(research/{project_dir})*"
-        entry += f"\n  → `{_workspace_read_suggestion(hit, hit.page_ref)}`"
-        lines.append(entry)
-
-    for hit in other_hits:
-        ref = hit.section_ref
-        entry = f"- **{ref}**"
+        seen_content.add(hit.path)
+        entry = f"- **{hit.section_ref}**"
         entry += f"\n  → `{_workspace_read_suggestion(hit, hit.page_ref)}`"
         lines.append(entry)
 
