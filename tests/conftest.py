@@ -121,7 +121,11 @@ def make_chat_agent(memory, session, real_skills):
 @pytest.fixture
 def make_skill_runner(tool_registry, session_dir):
     def _make(*, llm, skill=None, name="probe", instruction="Do the task.", **kwargs):
-        skill = skill or AgentSkill.from_instruction(name, instruction)
+        # A real, allowed working directory so BashTool can actually run
+        # (an empty cwd makes subprocess raise FileNotFoundError).
+        skill = skill or AgentSkill.from_instruction(
+            name, instruction, working_dir=str(session_dir)
+        )
         return SkillRunnerAgent(
             llm=llm,
             skill=skill,
