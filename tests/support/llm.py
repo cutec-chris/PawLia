@@ -157,7 +157,9 @@ class ScriptedLLM:
         self._s.calls.append(list(messages))
         reply = self._reply_for(messages)
         if reply.tool_calls:
-            chunk = AIMessageChunk(content="")
+            # A tool-call turn arrives as one chunk carrying both any text and
+            # the tool calls (avoids relying on chunk-addition to merge them).
+            chunk = AIMessageChunk(content=reply.text)
             chunk.tool_calls = reply.to_ai_message(self._s.ids).tool_calls
             yield chunk
             return
