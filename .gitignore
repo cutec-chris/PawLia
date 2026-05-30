@@ -18,4 +18,6 @@ log/*
 logs.sh
 .codex
 containers/thalia/**/*.log
-containers/thalia/**/*.wavtests/e2e_robustness_results.json
+containers/thalia/**/*.wav
+tests/e2e_robustness_results.json
+config.openai-eval.yaml
