@@ -87,6 +87,8 @@ def _ensure_gitignore(workspace: str) -> None:
         with open(gitignore, "a", encoding="utf-8") as f:
             for p in missing:
                 f.write(p + "\n")
+        for p in missing:
+            _git(workspace, "rm", "--cached", "--ignore-unmatch", "-q", p)
 
 
 def ensure_repo(workspace: str) -> bool:
