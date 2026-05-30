@@ -5,6 +5,12 @@ providers:
     apiKey: ollama
     timeout: 240
     keepAlive: -1
+  # Hermes is an alternative *brain*, not a tool: a provider with
+  # `backend: hermes` makes the RouterAgent hand the whole turn to an external
+  # Hermes server (which keeps its own tools/context) instead of PawLia's local
+  # ChatAgent stack. PawLia stays the interface + logging + memory layer.
+  # Enable this as a fallback when the local stack misbehaves — point a model at
+  # this provider (see the `hermes:` model below) and assign it to `chat`.
   # hermes_local:
   #   backend: hermes
   #   apiBase: http://127.0.0.1:8642/v1
