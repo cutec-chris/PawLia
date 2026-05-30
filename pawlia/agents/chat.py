@@ -86,6 +86,10 @@ _CONTEXT_COMPLETION_RESERVE_TOKENS = 2_000
 _CONTEXT_MIN_NON_SYSTEM_KEEP = 6
 _CONTEXT_TRIMMED_TEXT_LIMIT = 1_500
 _CONTEXT_TRIMMED_TOOL_LIMIT = 4_000
+# Preview length when condensing dropped messages in Phase 2 of the context-budget
+# pass. Kept in line with llm.py `_summarize_to_fit` (commit 1cf68fc) so the two
+# compression paths lose roughly the same amount of context.
+_SUMMARY_PREVIEW_CHARS = 500
 _MAX_CONTEXT_RECOVERY_RETRIES = 3
 _DEFERRED_TOOL_INTENT_RE = re.compile(
     r"(?:\b(?:let me|i(?:'ll| will| am going to)|first\s*,?\s*i(?:'ll| will)|now\s+i(?:'ll| will)|"
@@ -724,15 +728,15 @@ class ChatAgent(BaseAgent):
                 for msg in dropped:
                     if isinstance(msg, ToolMessage):
                         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        preview = content[:120].replace("\n", " ")
+                        preview = content[:_SUMMARY_PREVIEW_CHARS].replace("\n", " ")
                         summary_lines.append(f"[Tool: {preview}]")
                     elif isinstance(msg, HumanMessage):
                         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        preview = content[:120].replace("\n", " ")
+                        preview = content[:_SUMMARY_PREVIEW_CHARS].replace("\n", " ")
                         summary_lines.append(f"[User: {preview}]")
                     elif isinstance(msg, AIMessage):
                         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                        preview = content[:120].replace("\n", " ")
+                        preview = content[:_SUMMARY_PREVIEW_CHARS].replace("\n", " ")
                         tc = getattr(msg, "tool_calls", None)
                         if tc:
                             names = ", ".join(t.get("name", "?") for t in tc if isinstance(t, dict))

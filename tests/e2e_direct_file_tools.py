@@ -1,5 +1,11 @@
 """E2E test for direct file tools (read_file, list_files, grep_files).
 
+NOTE: As of the "files back to skill-only" change, production no longer wires
+these direct tools into the ChatAgent (app.py passes `direct_tools={}`); reads
+route through the `files` skill instead. This test still exercises the retained
+ChatAgent direct-tool *plumbing* by passing `direct_tools` explicitly — it is a
+regression test for that mechanism, not the production path.
+
 Uses the real ChatAgent with real direct tools against a temporary workspace,
 but mocks the LLM so the test is deterministic and fast.
 

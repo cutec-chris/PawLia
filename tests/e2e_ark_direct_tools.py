@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """E2E test: ARK workspace with direct file tools vs. skill fallback.
 
+NOTE: As of the "files back to skill-only" change, production no longer wires
+these direct tools into the ChatAgent (app.py passes `direct_tools={}`); reads
+route through the `files` skill instead. This test still exercises the retained
+ChatAgent direct-tool *plumbing* by passing `direct_tools` explicitly — it is a
+regression test for that mechanism, not the production path.
+
 Creates a mock ARK workspace and tests whether the agent uses direct tools
 (read_file, list_files, grep_files) for simple operations vs. the files skill
 for complex ones.

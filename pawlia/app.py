@@ -20,7 +20,6 @@ from pawlia.agents.chat import ChatAgent
 from pawlia.agents.router import RouterAgent
 from pawlia.agents.skill_runner import SkillRunnerAgent
 from pawlia.scheduler import Scheduler
-from pawlia.tools.files_tools import ReadFileTool, ListFilesTool, GrepFilesTool
 
 
 class App:
@@ -229,12 +228,11 @@ class App:
             # Model-size-aware tool-turn budget
             chat_model_name = self.llm.default_model_name("chat", agent_overrides=overrides)
             chat_max_turns = self.llm.max_tool_turns_for_model(chat_model_name)
-            # Build direct tools (executed inline without SkillRunner overhead)
-            direct_tools = {
-                "read_file": ReadFileTool(),
-                "list_files": ListFilesTool(),
-                "grep_files": GrepFilesTool(),
-            }
+            # No direct file tools: reads/list/grep route through the `files`
+            # skill (isolated runner context) so raw file content never lands
+            # in the slim main loop. Plumbing is kept (the kwarg below) for a
+            # possible bounded direct-read exception later.
+            direct_tools: dict = {}
 
             agent = ChatAgent(
                 llm=chat_llm,
