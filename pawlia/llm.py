@@ -426,11 +426,11 @@ class _FallbackLLMWrapper:
                 summary_lines.append(self._summarize_tool_message(msg))
             elif isinstance(msg, HumanMessage):
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                preview = content[:120].replace("\n", " ")
+                preview = content[:500].replace("\n", " ")
                 summary_lines.append(f"[User: {preview}]")
             elif isinstance(msg, AIMessage):
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                preview = content[:120].replace("\n", " ")
+                preview = content[:500].replace("\n", " ")
                 summary_lines.append(f"[Assistant: {preview}]")
 
         summary_text = "\n".join(summary_lines)
@@ -464,13 +464,13 @@ class _FallbackLLMWrapper:
 
         keep_levels = []
         k = total_pairs
-        while k >= 2:
+        while k >= 3:
             keep_levels.append(k)
-            k = max(1, k // 2)
+            k = max(2, k * 3 // 4)
+        if 2 not in keep_levels:
+            keep_levels.append(2)
         if 1 not in keep_levels:
             keep_levels.append(1)
-        if 0 not in keep_levels:
-            keep_levels.append(0)
 
         for keep_recent in keep_levels:
             summarized = self.summarize_context(messages, keep_recent=keep_recent)
