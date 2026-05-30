@@ -144,6 +144,20 @@ def _walk_files(workdir: str):
             yield abs_path, rel_path.replace(os.sep, "/")
 
 
+def _walk_entries(workdir: str):
+    """Yield (abs_path, rel_path) for every file and directory under workdir, recursively."""
+    for root, dirs, files in os.walk(workdir):
+        dirs.sort()
+        for d in dirs:
+            abs_path = os.path.join(root, d)
+            rel_path = os.path.relpath(abs_path, workdir)
+            yield abs_path, rel_path.replace(os.sep, "/")
+        for name in sorted(files):
+            abs_path = os.path.join(root, name)
+            rel_path = os.path.relpath(abs_path, workdir)
+            yield abs_path, rel_path.replace(os.sep, "/")
+
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _WIKILINK_INPUT_RE = re.compile(r"^\[\[([^\]|]+)(?:\|[^\]]+)?\]\]$")
@@ -324,14 +338,17 @@ def cmd_list(args) -> None:
     offset = max(0, int(getattr(args, "offset", 0) or 0))
     limit = max(1, int(getattr(args, "limit", 200) or 200))
     entries = []
-    all_files = list(_walk_files(workdir))
-    total = len(all_files)
-    for abs_path, rel_path in all_files[offset:offset + limit]:
-        entries.append({
+    all_entries = list(_walk_entries(workdir))
+    total = len(all_entries)
+    for abs_path, rel_path in all_entries[offset:offset + limit]:
+        is_dir = os.path.isdir(abs_path)
+        entry = {
             "name": rel_path,
-            "type": "file",
-            "size": os.path.getsize(abs_path),
-        })
+            "type": "dir" if is_dir else "file",
+        }
+        if not is_dir:
+            entry["size"] = os.path.getsize(abs_path)
+        entries.append(entry)
     has_more = offset + limit < total
     payload = {
         "success": True,
