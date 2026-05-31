@@ -526,6 +526,28 @@ class TestBuildSystemPrompt:
             assert "Conversation Mode: Phone Call" in prompt
             assert "Keep answers compact" in prompt
 
+    def test_extra_context_is_included(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_ctx")
+
+            prompt = mm.build_system_prompt(
+                session,
+                mode="call",
+                extra_context="Call network quality: poor right now — choppy/lossy.",
+            )
+
+            assert "Call network quality: poor" in prompt
+
+    def test_extra_context_absent_when_not_supplied(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            session = mm.load_session("u_noctx")
+
+            prompt = mm.build_system_prompt(session)
+
+            assert "Call network quality" not in prompt
+
     def test_default_mode_does_not_add_phone_instructions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)

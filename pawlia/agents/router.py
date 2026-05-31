@@ -160,6 +160,7 @@ class RouterAgent:
         mode: str = "chat",
         system_prompt: Optional[str] = None,
         thread_id: Optional[str] = None,
+        extra_context: Optional[str] = None,
     ) -> str:
         if system_prompt:
             return system_prompt
@@ -169,6 +170,7 @@ class RouterAgent:
                 self.session,
                 skills=skills,
                 mode=mode,
+                extra_context=extra_context,
             )
         return DEFAULT_SYSTEM_PROMPT
 

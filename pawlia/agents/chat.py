@@ -328,6 +328,7 @@ class ChatAgent(BaseAgent):
         mode: str = "chat",
         system_prompt: Optional[str] = None,
         thread_id: Optional[str] = None,
+        extra_context: Optional[str] = None,
     ) -> str:
         """Resolve the system prompt for a chat or call context."""
         if system_prompt:
@@ -337,6 +338,7 @@ class ChatAgent(BaseAgent):
                 self.session,
                 skills=self.skills,
                 mode=mode,
+                extra_context=extra_context,
             )
         return DEFAULT_SYSTEM_PROMPT
 

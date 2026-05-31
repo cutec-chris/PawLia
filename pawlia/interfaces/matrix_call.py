@@ -378,6 +378,21 @@ class CallSession:
     PREANSWER_STT_SILENCE_SECONDS = 0.4
     CONNECT_TIMEOUT_SECONDS = 45.0
     HANGUP_ON_MEDIA_END = True
+    # Network-quality warning thresholds (calibrated against observed RTP stats:
+    # clean calls sit at jitter ≤ ~940 and ~0 % per-interval loss, degraded
+    # mobile/bike calls spike to jitter 2000–90000 and multi-percent loss).
+    # Warning fires only after the bad condition persists for N intervals, and a
+    # recovery notice fires after it clears for N intervals (hysteresis), so a
+    # single jittery sample never spams the thread.
+    NET_WARN_LOSS_RATIO = 0.05
+    NET_WARN_JITTER = 2000.0
+    NET_DEGRADED_INTERVALS = 2
+    NET_RECOVER_INTERVALS = 2
+    NET_WARN_MESSAGE = (
+        "📶 Verbindung gerade schlecht — ich verstehe dich evtl. nur "
+        "bruchstückhaft."
+    )
+    NET_RECOVER_MESSAGE = "📶 Verbindung wieder stabil."
     # Wait this long after the user's latest speech before replying.  This
     # lets callers tell a longer story without the agent jumping into every
     # pause that was only used for breathing or thinking.
@@ -423,6 +438,12 @@ class CallSession:
         self._greeting_task: Optional[asyncio.Task] = None
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
+        # Network-quality monitoring state (see _update_net_state)
+        self._net_degraded = False
+        self._net_bad_streak = 0
+        self._net_good_streak = 0
+        self._net_prev_recv: Optional[int] = None
+        self._net_prev_lost: Optional[int] = None
         self._load_voip_audio_config()
         ctx = f"call {call_id[:8]}"
         voip_cfg = self._voip_cfg
@@ -823,7 +844,7 @@ class CallSession:
             return
 
         try:
-            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._network_prompt_hint())
             greeting_input = (
                 "[SYSTEM: A voice call was just accepted. "
                 "Greet the caller with a short, friendly greeting. "
@@ -904,7 +925,7 @@ class CallSession:
             return
 
         try:
-            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._network_prompt_hint())
             greeting_input = (
                 "[SYSTEM: A voice call was just accepted. "
                 "Greet the caller with a short, friendly greeting. "
@@ -1171,7 +1192,7 @@ class CallSession:
 
         try:
             first_sentence_received = False
-            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id)
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._network_prompt_hint())
 
             async def _on_sentence(sentence: str) -> None:
                 """Synthesize and enqueue one sentence for immediate TTS playback."""
@@ -1745,21 +1766,88 @@ class CallSession:
         except asyncio.CancelledError:
             pass
 
+    def _update_net_state(
+        self, recv: int, lost: int, jitter: float
+    ) -> Optional[str]:
+        """Advance the network-degradation state machine from one RTP sample.
+
+        ``recv``/``lost`` are the *cumulative* inbound packet counters; this
+        derives the per-interval loss ratio from the delta to the previous
+        sample.  Returns a status message to post (warning or recovery) when the
+        hysteresis threshold is crossed, otherwise ``None``.  Pure/synchronous
+        so the policy can be unit-tested without RTP plumbing.
+        """
+        prev_recv, prev_lost = self._net_prev_recv, self._net_prev_lost
+        self._net_prev_recv, self._net_prev_lost = recv, lost
+        if prev_recv is None or prev_lost is None:
+            return None  # first sample: only establish a baseline
+        d_recv = max(recv - prev_recv, 0)
+        d_lost = max(lost - prev_lost, 0)
+        loss_interval = d_lost / max(d_recv + d_lost, 1)
+
+        bad = loss_interval > self.NET_WARN_LOSS_RATIO or jitter > self.NET_WARN_JITTER
+        if bad:
+            self._net_bad_streak += 1
+            self._net_good_streak = 0
+        else:
+            self._net_good_streak += 1
+            self._net_bad_streak = 0
+
+        if not self._net_degraded and self._net_bad_streak >= self.NET_DEGRADED_INTERVALS:
+            self._net_degraded = True
+            return self.NET_WARN_MESSAGE
+        if self._net_degraded and self._net_good_streak >= self.NET_RECOVER_INTERVALS:
+            self._net_degraded = False
+            return self.NET_RECOVER_MESSAGE
+        return None
+
+    def _network_prompt_hint(self) -> str:
+        """Short live-context line about call audio quality for the system prompt.
+
+        Kept terse (sits next to the date/time block); only the degraded variant
+        carries an instruction, so it never clutters a healthy call.
+        """
+        if self._net_degraded:
+            return (
+                "Call network quality: poor right now — the audio link is "
+                "choppy/lossy, so the caller's words may arrive garbled or cut "
+                "off. If something sounds nonsensical, ask them to repeat "
+                "instead of guessing."
+            )
+        return "Call network quality: good."
+
     async def _log_receiver_stats(self) -> None:
-        """Periodically log RTP receiver stats to diagnose audio delivery."""
+        """Log RTP receiver stats and warn the thread when the network degrades.
+
+        Runs for the whole call (not just the first ~75 s) so degradation that
+        starts mid-call is still caught.  Verbose STATS logging stays at INFO
+        for the first ~75 s for diagnosis, then drops to DEBUG to avoid log spam
+        on long calls.
+        """
         await asyncio.sleep(5)  # wait for connection to establish
-        for _ in range(15):  # log for ~75s max
-            if self._done.is_set() or not self._pc:
-                break
+        interval = 0
+        while not self._done.is_set() and self._pc:
+            interval += 1
+            stats_level = logging.INFO if interval <= 15 else logging.DEBUG
             try:
                 stats = await self._pc.getStats()
                 for report in stats.values():
                     t = getattr(report, "type", "")
                     if t in ("inbound-rtp", "transport", "candidate-pair"):
-                        logger.info("call %s: STATS [%s] %s",
-                                    self.call_id[:8], t,
-                                    {k: v for k, v in report.__dict__.items()
-                                     if not k.startswith("_")})
+                        logger.log(stats_level, "call %s: STATS [%s] %s",
+                                   self.call_id[:8], t,
+                                   {k: v for k, v in report.__dict__.items()
+                                    if not k.startswith("_")})
+                    if t == "inbound-rtp" and getattr(report, "kind", "audio") == "audio":
+                        msg = self._update_net_state(
+                            int(getattr(report, "packetsReceived", 0) or 0),
+                            int(getattr(report, "packetsLost", 0) or 0),
+                            float(getattr(report, "jitter", 0.0) or 0.0),
+                        )
+                        if msg:
+                            logger.info("call %s: network %s", self.call_id[:8],
+                                        "degraded" if self._net_degraded else "recovered")
+                            await self._send_status(msg)
             except Exception as e:
                 logger.debug("call %s: stats error: %s", self.call_id[:8], e)
             await asyncio.sleep(5)

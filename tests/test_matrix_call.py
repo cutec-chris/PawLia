@@ -86,7 +86,9 @@ async def test_process_speech_uses_call_system_prompt():
         await session._process_speech(pcm, 48000)
         await session._pending_response_task
 
-    agent.build_system_prompt.assert_called_once_with(mode="call", thread_id="thread-1")
+    agent.build_system_prompt.assert_called_once_with(
+        mode="call", thread_id="thread-1", extra_context=session._network_prompt_hint()
+    )
     agent.run_streamed.assert_awaited_once_with(
         "Hallo da",
         system_prompt="CALL PROMPT",
@@ -148,10 +150,104 @@ def test_standalone_stt_hallucination_filter_keeps_real_sentences():
         send_cb=AsyncMock(),
     )
 
-    assert session._speech_detector.looks_like_stt_hallucination("Vielen Dank.") is True
-    assert session._speech_detector.looks_like_stt_hallucination("Untertitelung des ZDF, 2020") is True
-    assert session._speech_detector.looks_like_stt_hallucination("Ja, danke, das meinte ich.") is False
-    assert session._speech_detector.looks_like_stt_hallucination("Ja, du, tschüss.") is False
+    flt = session._speech_detector.looks_like_stt_hallucination
+    assert flt("Vielen Dank.") is True
+    assert flt("Untertitelung des ZDF, 2020") is True
+    # subtitle/credits boilerplate with surrounding junk (observed in the wild)
+    assert flt("Untertitelung des ZDF für funk, 2017") is True
+    assert flt("Untertitel im Auftrag des ZDF, 2021") is True
+    assert flt("Untertitel der Amara.org-Community") is True
+    # real sentences must keep passing through
+    assert flt("Ja, danke, das meinte ich.") is False
+    assert flt("Ja, du, tschüss.") is False
+    assert flt("Ja, mach. Ja, mach.") is False
+    assert flt("Was verstehst du denn, was ich sage?") is False
+    assert flt("Guck mal nach den Aufgaben im Funkgerät bitte einmal.") is False
+
+
+def _make_call_session(call_id="call-net"):
+    return CallSession(
+        call_id=call_id,
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-net",
+        client=SimpleNamespace(),
+        app=SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None))),
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+
+
+def test_net_state_warns_once_then_recovers():
+    session = _make_call_session("call-net-degrade")
+    # cumulative (recv, lost, jitter)
+    baseline = session._update_net_state(100, 0, 200.0)
+    assert baseline is None  # first sample only establishes a baseline
+    # one bad interval is not enough (needs NET_DEGRADED_INTERVALS in a row)
+    assert session._update_net_state(200, 20, 200.0) is None
+    # second consecutive bad interval → single warning
+    assert session._update_net_state(300, 40, 200.0) == CallSession.NET_WARN_MESSAGE
+    assert session._net_degraded is True
+    # still bad → no repeat spam
+    assert session._update_net_state(400, 60, 200.0) is None
+    # recovery needs NET_RECOVER_INTERVALS clean intervals
+    assert session._update_net_state(500, 60, 200.0) is None
+    assert session._update_net_state(600, 60, 200.0) == CallSession.NET_RECOVER_MESSAGE
+    assert session._net_degraded is False
+
+
+def test_net_state_warns_on_jitter_only():
+    session = _make_call_session("call-net-jitter")
+    session._update_net_state(100, 0, 200.0)  # baseline
+    # no packet loss, but jitter spikes above NET_WARN_JITTER for 2 intervals
+    assert session._update_net_state(200, 0, 9000.0) is None
+    assert session._update_net_state(300, 0, 9000.0) == CallSession.NET_WARN_MESSAGE
+
+
+def test_net_state_stays_silent_on_clean_call():
+    session = _make_call_session("call-net-clean")
+    recv = 100
+    msgs = []
+    for _ in range(10):
+        recv += 100
+        msgs.append(session._update_net_state(recv, 0, 300.0))  # clean: low jitter, no loss
+    assert all(m is None for m in msgs)
+    assert session._net_degraded is False
+
+
+def test_network_prompt_hint_reflects_degraded_state():
+    session = _make_call_session("call-net-hint")
+    # healthy by default → terse, no instruction
+    assert session._network_prompt_hint() == "Call network quality: good."
+    # once degraded → carries a "poor" instruction for the LLM
+    session._net_degraded = True
+    hint = session._network_prompt_hint()
+    assert "poor" in hint.lower()
+    assert "repeat" in hint.lower()
+
+
+def test_should_transcribe_tightens_only_at_high_noise_floor():
+    detector = SpeechDetector(context="test")
+    detector._webrtc_vad = None  # isolate the basic_match gate
+    # borderline chunk: passes normal thresholds, fails high-noise thresholds
+    fixed_stats = {
+        "active_ratio": 0.14,        # >= 0.12 normal, < 0.12*1.3=0.156 strict
+        "longest_run": 10.0,
+        "speech_like_ratio": 0.10,
+        "speech_like_run": 5.0,
+        "voiced_ratio": 1.0,
+        "voiced_run": 99.0,
+    }
+    detector.analyze_chunk = lambda *a, **k: fixed_stats
+    pcm = np.zeros(960, dtype=np.float32)
+
+    # quiet / normal noise floor → unchanged behaviour, chunk accepted
+    detector._noise_floor = 0.01
+    assert detector.should_transcribe(pcm, 48000, 50) is True
+    # persistently loud (> HIGH_NOISE_FLOOR) → stricter gate rejects the chunk
+    detector._noise_floor = 0.05
+    assert detector.should_transcribe(pcm, 48000, 50) is False
 
 
 def test_mark_activity_updates_last_activity_timestamp():

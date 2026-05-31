@@ -36,6 +36,16 @@ _STANDALONE_STT_HALLUCINATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Subtitle/credits boilerplate Whisper invents on wind/road noise — caught even
+# when embedded in surrounding garbage (e.g. "Untertitelung des ZDF für funk,
+# 2017", "Untertitel im Auftrag des ZDF", "Untertitel der Amara.org-Community").
+# Requires "untertitel" *plus* a corroborating marker so plain words like
+# "Funkgerät" never trigger on their own.
+_STT_HALLUCINATION_SUBSTR_RE = re.compile(
+    r"(?=.*untertitel)(?=.*(?:zdf|amara|funk|auftrag))|amara\.org",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _build_webrtc_vad(mode: int):
     """Create a WebRTC VAD instance when the optional dependency is available."""
@@ -84,6 +94,12 @@ class SpeechDetector:
     WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES: int = 4
     BARGEIN_MIN_WORDS: int = 4
     BARGEIN_MIN_CHARS: int = 12
+    # When the noise floor stays well above clean levels (~0.01), the
+    # environment is genuinely loud (wind/road noise while cycling). Only then
+    # does should_transcribe tighten its gate by HIGH_NOISE_STRICTNESS, so quiet
+    # and moderately noisy (local) calls keep the unchanged behaviour.
+    HIGH_NOISE_FLOOR: float = 0.03
+    HIGH_NOISE_STRICTNESS: float = 1.3
 
     def __init__(
         self,
@@ -108,6 +124,8 @@ class SpeechDetector:
         ("min_speech_like_ratio", "MIN_SPEECH_LIKE_RATIO", 0.0, 1.0),
         ("pre_speech_seconds", "PRE_SPEECH_SECONDS", 0.0, None),
         ("webrtcvad_min_voiced_ratio", "WEBRTC_VAD_MIN_VOICED_RATIO", 0.0, 1.0),
+        ("high_noise_floor", "HIGH_NOISE_FLOOR", 0.0, None),
+        ("high_noise_strictness", "HIGH_NOISE_STRICTNESS", 1.0, 3.0),
     ]
 
     _INT_CONFIGS = [
@@ -359,9 +377,20 @@ class SpeechDetector:
         """Return True only when a chunk contains sustained speech-like activity."""
         stats = self.analyze_chunk(pcm, sample_rate, fps, agc_gain, agc_active)
 
+        min_voiced_ratio = self.WEBRTC_VAD_MIN_VOICED_RATIO
+        min_voiced_run = self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
         if self._noise_floor < 0.001:
             min_active_ratio = self.MIN_ACTIVE_SPEECH_RATIO * 0.5
             min_speech_like = self.MIN_SPEECH_LIKE_RATIO * 0.5
+        elif self._noise_floor > self.HIGH_NOISE_FLOOR:
+            # Persistently loud environment (wind/road noise): raise the bar so
+            # AGC-amplified noise is less likely to pass as speech. Reached only
+            # well above clean levels, so quiet/local calls are unaffected.
+            s = self.HIGH_NOISE_STRICTNESS
+            min_active_ratio = self.MIN_ACTIVE_SPEECH_RATIO * s
+            min_speech_like = self.MIN_SPEECH_LIKE_RATIO * s
+            min_voiced_ratio = self.WEBRTC_VAD_MIN_VOICED_RATIO * s
+            min_voiced_run = self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES + 1
         else:
             min_active_ratio = self.MIN_ACTIVE_SPEECH_RATIO
             min_speech_like = self.MIN_SPEECH_LIKE_RATIO
@@ -377,8 +406,8 @@ class SpeechDetector:
         if self._webrtc_vad is None:
             return True
         return (
-            stats["voiced_ratio"] >= self.WEBRTC_VAD_MIN_VOICED_RATIO
-            and stats["voiced_run"] >= self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
+            stats["voiced_ratio"] >= min_voiced_ratio
+            and stats["voiced_run"] >= min_voiced_run
         )
 
     # ------------------------------------------------------------------
@@ -430,8 +459,18 @@ class SpeechDetector:
 
     @staticmethod
     def looks_like_stt_hallucination(text: str) -> bool:
-        """Filter common Whisper fallback phrases from non-speech chunks."""
+        """Filter common Whisper fallback phrases from non-speech chunks.
+
+        Two signatures, both absent from genuine speech, so this stays safe in
+        quiet/local conditions:
+          1. exact stock sign-off phrases ("Vielen Dank.", "Untertitelung …");
+          2. subtitle/credits boilerplate embedded in surrounding garbage
+             ("Untertitelung des ZDF für funk, 2017") — requires "untertitel"
+             *plus* a corroborating marker, so plain words never trigger.
+        """
         normalized = " ".join((text or "").strip().split())
         if not normalized:
             return False
-        return bool(_STANDALONE_STT_HALLUCINATION_RE.fullmatch(normalized))
+        if _STANDALONE_STT_HALLUCINATION_RE.fullmatch(normalized):
+            return True
+        return bool(_STT_HALLUCINATION_SUBSTR_RE.search(normalized))

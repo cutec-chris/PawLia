@@ -915,6 +915,7 @@ class MemoryManager:
         session: Session,
         skills: Optional[Dict[str, Any]] = None,
         mode: str = "chat",
+        extra_context: Optional[str] = None,
     ) -> str:
         """Build the system prompt from workspace identity files + memory.
 
@@ -922,6 +923,10 @@ class MemoryManager:
         each skill with its description.
 
         ``mode`` can add context-specific instructions, e.g. for live calls.
+
+        ``extra_context`` is a short, caller-supplied line of live context
+        (e.g. current call network quality) appended next to the date/time so
+        the model is aware of it without it being prominent.
         """
         workspace = self._workspace_dir(session.user_id)
         self._ensure_identity_files(workspace)
@@ -969,6 +974,9 @@ class MemoryManager:
                 "has not configured a timezone in session config; ask the user "
                 "or set it via the `config` skill if precise local time matters)."
             )
+
+        if extra_context and extra_context.strip():
+            parts.append(extra_context.strip())
 
         mode_block = self._build_mode_instructions(mode)
         if mode_block:
