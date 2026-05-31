@@ -393,6 +393,13 @@ class CallSession:
         "bruchstückhaft."
     )
     NET_RECOVER_MESSAGE = "📶 Verbindung wieder stabil."
+    # Audio jitter-buffer depth (incoming RTP).  aiortc defaults to 16 packets
+    # (~320 ms @ 20 ms/frame), which is too shallow for mobile/bike calls where
+    # jitter spikes to hundreds of ms — late packets fall out of the buffer and
+    # are counted as loss.  Widening to 32 (~640 ms) absorbs moderate jitter at
+    # the cost of a little extra latency.  Must be a power of two (aiortc
+    # asserts this).  Set to 16 to restore aiortc's default.
+    JITTER_BUFFER_CAPACITY = 32
     # Wait this long after the user's latest speech before replying.  This
     # lets callers tell a longer story without the agent jumping into every
     # pause that was only used for breathing or thinking.
@@ -556,6 +563,10 @@ class CallSession:
             voip_cfg, "vad_max_chunk_seconds", self.VAD_MAX_CHUNK_SECONDS,
             context=ctx, minimum=0.0,
         )
+        self.JITTER_BUFFER_CAPACITY = get_int_config(
+            voip_cfg, "jitter_buffer_capacity", self.JITTER_BUFFER_CAPACITY,
+            context=ctx, minimum=2,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -586,6 +597,50 @@ class CallSession:
             servers.append(RTCIceServer(urls=stun))
 
         return servers
+
+    def _widen_jitter_buffers(self) -> None:
+        """Replace aiortc's shallow 16-packet audio jitter buffer with a deeper one.
+
+        aiortc hard-codes a 16-packet (~320 ms) jitter buffer for audio receivers,
+        which is too shallow for mobile/bike calls where jitter routinely spikes
+        past that window — late packets get dropped and counted as loss.  We swap
+        in a buffer of ``JITTER_BUFFER_CAPACITY`` packets, preserving aiortc's
+        prefetch.  This reaches into the receiver's private (name-mangled)
+        attribute, so it is best-effort: if aiortc changes its internals we log
+        and leave the default in place rather than crashing the call.
+        """
+        capacity = self.JITTER_BUFFER_CAPACITY
+        if capacity <= 16 or not self._pc:
+            return
+        if capacity & (capacity - 1) != 0:
+            logger.warning("call %s: jitter_buffer_capacity %d is not a power of "
+                           "two — leaving aiortc default", self.call_id[:8], capacity)
+            return
+        try:
+            from aiortc.jitterbuffer import JitterBuffer  # type: ignore
+        except Exception as e:  # pragma: no cover - aiortc layout changed
+            logger.warning("call %s: cannot import JitterBuffer (%s) — "
+                           "leaving default depth", self.call_id[:8], e)
+            return
+        attr = "_RTCRtpReceiver__jitter_buffer"
+        widened = 0
+        for receiver in self._pc.getReceivers():
+            track = getattr(receiver, "track", None)
+            if track is not None and getattr(track, "kind", None) != "audio":
+                continue
+            old = getattr(receiver, attr, None)
+            if old is None:
+                continue
+            prefetch = getattr(old, "_prefetch", 4)
+            try:
+                setattr(receiver, attr, JitterBuffer(capacity=capacity, prefetch=prefetch))
+                widened += 1
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("call %s: could not widen jitter buffer: %s",
+                               self.call_id[:8], e)
+        if widened:
+            logger.info("call %s: audio jitter buffer widened to %d packets (~%d ms)",
+                        self.call_id[:8], capacity, capacity * 20)
 
     async def start(self, sdp_offer: str) -> Optional[str]:
         """Accept the call. Returns SDP answer string, or None on error."""
@@ -698,6 +753,9 @@ class CallSession:
         await self._pc.setLocalDescription(answer)
         logger.debug("call %s: SDP answer:\n%s", self.call_id[:8],
                      self._pc.localDescription.sdp)
+
+        # Widen the incoming audio jitter buffer before media starts flowing.
+        self._widen_jitter_buffers()
 
         # Load hold audio (background sound while waiting for agent response)
         hold_pcm = self._load_hold_audio()

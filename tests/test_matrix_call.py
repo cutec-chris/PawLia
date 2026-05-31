@@ -216,6 +216,76 @@ def test_net_state_stays_silent_on_clean_call():
     assert session._net_degraded is False
 
 
+class _FakeJitterBuffer:
+    def __init__(self, capacity, prefetch=0, is_video=False):
+        self.capacity = capacity
+        self._prefetch = prefetch
+        self.is_video = is_video
+
+
+def _install_fake_jitterbuffer(monkeypatch):
+    """Provide a stand-in aiortc.jitterbuffer so the swap runs without aiortc."""
+    import types as _types
+    aiortc_mod = sys.modules.get("aiortc") or _types.ModuleType("aiortc")
+    jb_mod = _types.ModuleType("aiortc.jitterbuffer")
+    jb_mod.JitterBuffer = _FakeJitterBuffer
+    monkeypatch.setitem(sys.modules, "aiortc", aiortc_mod)
+    monkeypatch.setitem(sys.modules, "aiortc.jitterbuffer", jb_mod)
+
+
+def test_widen_jitter_buffers_replaces_audio_buffer(monkeypatch):
+    _install_fake_jitterbuffer(monkeypatch)
+    session = _make_call_session("call-jb")
+    session.JITTER_BUFFER_CAPACITY = 32
+    audio_recv = SimpleNamespace(
+        track=SimpleNamespace(kind="audio"),
+        _RTCRtpReceiver__jitter_buffer=_FakeJitterBuffer(16, prefetch=4),
+    )
+    video_recv = SimpleNamespace(
+        track=SimpleNamespace(kind="video"),
+        _RTCRtpReceiver__jitter_buffer=_FakeJitterBuffer(128, is_video=True),
+    )
+    session._pc = SimpleNamespace(getReceivers=lambda: [audio_recv, video_recv])
+
+    session._widen_jitter_buffers()
+
+    new_buf = getattr(audio_recv, "_RTCRtpReceiver__jitter_buffer")
+    assert new_buf.capacity == 32
+    assert new_buf._prefetch == 4  # aiortc prefetch preserved
+    # video receiver must be left untouched
+    assert getattr(video_recv, "_RTCRtpReceiver__jitter_buffer").capacity == 128
+
+
+def test_widen_jitter_buffers_noop_when_not_widening(monkeypatch):
+    _install_fake_jitterbuffer(monkeypatch)
+    session = _make_call_session("call-jb-default")
+    session.JITTER_BUFFER_CAPACITY = 16  # == aiortc default → leave it alone
+    audio_recv = SimpleNamespace(
+        track=SimpleNamespace(kind="audio"),
+        _RTCRtpReceiver__jitter_buffer=_FakeJitterBuffer(16, prefetch=4),
+    )
+    session._pc = SimpleNamespace(getReceivers=lambda: [audio_recv])
+
+    session._widen_jitter_buffers()
+
+    assert getattr(audio_recv, "_RTCRtpReceiver__jitter_buffer").capacity == 16
+
+
+def test_widen_jitter_buffers_rejects_non_power_of_two(monkeypatch):
+    _install_fake_jitterbuffer(monkeypatch)
+    session = _make_call_session("call-jb-odd")
+    session.JITTER_BUFFER_CAPACITY = 48  # not a power of two → aiortc would assert
+    audio_recv = SimpleNamespace(
+        track=SimpleNamespace(kind="audio"),
+        _RTCRtpReceiver__jitter_buffer=_FakeJitterBuffer(16, prefetch=4),
+    )
+    session._pc = SimpleNamespace(getReceivers=lambda: [audio_recv])
+
+    session._widen_jitter_buffers()
+
+    assert getattr(audio_recv, "_RTCRtpReceiver__jitter_buffer").capacity == 16
+
+
 def test_network_prompt_hint_reflects_degraded_state():
     session = _make_call_session("call-net-hint")
     # healthy by default → terse, no instruction
