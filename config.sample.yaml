@@ -121,6 +121,9 @@ interfaces:
 #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
 #   min_speech_band_ratio: 0.35       # energy share in the speech band
 #   max_spectral_flatness: 0.72       # reject very noise-like chunks
+#   min_speech_modulation: 0.7        # in loud environments only: required envelope
+#                                       # modulation (CoV) — rejects steady wind/road
+#                                       # noise that energy/spectral gates miss
 #   min_speech_like_ratio: 0.08       # active + speech-like frame ratio required
 #   min_consecutive_speechlike_frames: 4
 #   min_resume_speech_frames: 3       # consecutive speech-like frames to break a running pause

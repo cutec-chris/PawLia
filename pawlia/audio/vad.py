@@ -100,6 +100,13 @@ class SpeechDetector:
     # and moderately noisy (local) calls keep the unchanged behaviour.
     HIGH_NOISE_FLOOR: float = 0.03
     HIGH_NOISE_STRICTNESS: float = 1.3
+    # In a persistently loud environment, also require the chunk's envelope to be
+    # modulated like speech (syllabic loud/quiet alternation). Steady wind/road
+    # noise has a near-constant envelope (CoV ~0.3-0.6) while real speech sits at
+    # ~1.0+, so this rejects the most common steady-wind chunks at the VAD gate
+    # instead of letting them reach STT and hallucinate. Only applied when
+    # noise_floor > HIGH_NOISE_FLOOR, so quiet/local calls are unaffected.
+    MIN_SPEECH_MODULATION: float = 0.7
 
     def __init__(
         self,
@@ -126,6 +133,7 @@ class SpeechDetector:
         ("webrtcvad_min_voiced_ratio", "WEBRTC_VAD_MIN_VOICED_RATIO", 0.0, 1.0),
         ("high_noise_floor", "HIGH_NOISE_FLOOR", 0.0, None),
         ("high_noise_strictness", "HIGH_NOISE_STRICTNESS", 1.0, 3.0),
+        ("min_speech_modulation", "MIN_SPEECH_MODULATION", 0.0, None),
     ]
 
     _INT_CONFIGS = [
@@ -298,6 +306,7 @@ class SpeechDetector:
                 "median_band_ratio": 0.0,
                 "median_flatness": 1.0,
                 "p90_rms": 0.0,
+                "modulation": 1.0,
             }
 
         framed = pcm[:usable].reshape(-1, frame_size)
@@ -350,6 +359,16 @@ class SpeechDetector:
             current_speech_like_run = current_speech_like_run + 1 if is_speech_like else 0
             speech_like_run = max(speech_like_run, current_speech_like_run)
 
+        # Envelope modulation: coefficient of variation of the active-frame RMS.
+        # Speech is syllabic (loud/quiet alternation → high CoV ~1.0+); steady
+        # wind/road noise is near-constant (low CoV ~0.3-0.6). Computed over
+        # active frames only so leading/trailing silence doesn't inflate it.
+        active_rms = frame_rms[active_mask]
+        modulation = (
+            float(np.std(active_rms) / (np.mean(active_rms) + 1e-9))
+            if active_rms.size >= 5 else 1.0
+        )
+
         return {
             "frame_count": float(len(frame_rms)),
             "active_frames": float(np.count_nonzero(active_mask)),
@@ -364,6 +383,7 @@ class SpeechDetector:
             "median_band_ratio": float(np.median(band_ratio)),
             "median_flatness": float(np.median(flatness)),
             "p90_rms": float(np.percentile(frame_rms, 90)),
+            "modulation": modulation,
         }
 
     def should_transcribe(
@@ -379,10 +399,12 @@ class SpeechDetector:
 
         min_voiced_ratio = self.WEBRTC_VAD_MIN_VOICED_RATIO
         min_voiced_run = self.WEBRTC_VAD_MIN_CONSECUTIVE_FRAMES
+        high_noise = False
         if self._noise_floor < 0.001:
             min_active_ratio = self.MIN_ACTIVE_SPEECH_RATIO * 0.5
             min_speech_like = self.MIN_SPEECH_LIKE_RATIO * 0.5
         elif self._noise_floor > self.HIGH_NOISE_FLOOR:
+            high_noise = True
             # Persistently loud environment (wind/road noise): raise the bar so
             # AGC-amplified noise is less likely to pass as speech. Reached only
             # well above clean levels, so quiet/local calls are unaffected.
@@ -402,6 +424,12 @@ class SpeechDetector:
             and stats["speech_like_run"] >= self.MIN_CONSECUTIVE_SPEECHLIKE_FRAMES
         )
         if not basic_match:
+            return False
+        # In a loud environment, also demand speech-like envelope modulation so a
+        # steady wind/road-noise chunk (near-constant loudness) is rejected here
+        # rather than reaching STT. ``stats.get`` keeps callers that mock
+        # analyze_chunk without this key working unchanged.
+        if high_noise and stats.get("modulation", 1.0) < self.MIN_SPEECH_MODULATION:
             return False
         if self._webrtc_vad is None:
             return True

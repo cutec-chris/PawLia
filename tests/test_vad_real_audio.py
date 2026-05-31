@@ -218,6 +218,22 @@ def test_wind_chunk_is_defended_end_to_end(row):
     )
 
 
+@pytest.mark.parametrize("row", WIND, ids=_ids(WIND))
+def test_steady_wind_is_rejected_by_vad(row):
+    """Steady wind chunks (near-constant envelope) must be rejected at the VAD
+    gate by the modulation check, so they never reach STT to hallucinate.
+
+    This is stronger than the end-to-end guard above and pins the modulation
+    gate specifically. Gusty/bursty wind can still slip through (higher
+    modulation) — that remains the hallucination filter's job."""
+    fname = row[1]
+    pcm, sr = _load(fname)
+    assert _detector().should_transcribe(pcm, sr, 50) is False, (
+        f"steady wind {fname} passed the VAD — the envelope-modulation gate "
+        f"is no longer catching it"
+    )
+
+
 @pytest.mark.parametrize("row", SPEECH, ids=_ids(SPEECH))
 def test_real_transcript_is_not_filtered_as_hallucination(row):
     """The hallucination filter must never eat a genuine utterance."""

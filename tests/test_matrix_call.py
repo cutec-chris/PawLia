@@ -443,6 +443,11 @@ def test_should_transcribe_chunk_accepts_sustained_speech():
         levels = [0.0] * 10 + [0.12] * 20 + [0.08] * 10 + [0.0] * 40
         pcm = _make_tonal_pcm_from_frame_levels(levels)
 
+        # Normal noise floor: this near-constant synthetic tone is accepted. (The
+        # high-noise branch additionally requires speech-like envelope modulation,
+        # which a flat tone lacks — that path is covered by the real-audio wind
+        # fixtures in test_vad_real_audio.py.)
+        session._speech_detector._noise_floor = 0.01
         assert session._speech_detector.should_transcribe(pcm, 48000, fps=50) is True
 
 
