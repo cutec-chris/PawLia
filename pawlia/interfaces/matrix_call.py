@@ -1462,7 +1462,11 @@ class CallSession:
 
     VAD_SETTLE_FRAMES: int = 40
     VAD_SETTLE_EMA_ALPHA: float = 0.08
-    VAD_MAX_CHUNK_SECONDS: float = 0.0
+    # Safety net for the late-closing case: in sustained wind the silence counter
+    # may never reach threshold, so force-flush an open chunk after this long.
+    # The relative-energy pause (see _audio_pipeline) closes typical cases far
+    # sooner; this only bounds the worst case (was 0 = disabled → 30-118s waits).
+    VAD_MAX_CHUNK_SECONDS: float = 15.0
 
     async def _audio_pipeline(self, track) -> None:
         """Continuously read audio frames, detect speech, transcribe, respond."""
@@ -1475,6 +1479,7 @@ class CallSession:
         silence_count = 0
         resume_speech_count = 0
         speech_buffer_start_frame = 0
+        speech_ref = 0.0  # running speech level for relative-energy pause detection
         max_chunk_frames = int(self.VAD_MAX_CHUNK_SECONDS * fps) if self.VAD_MAX_CHUNK_SECONDS > 0 else 0
 
         logger.info("call %s: audio pipeline started", self.call_id[:8])
@@ -1560,6 +1565,26 @@ class CallSession:
                         pcm, SAMPLE_RATE, adjusted_rms,
                     )
 
+                    # Relative-energy pause: once we know the speaker's level,
+                    # demote a frame that has dropped well below it to "not
+                    # speech" even if it still reads spectrally speech-like. In
+                    # sustained wind a real pause falls back to the wind floor,
+                    # so this lets the silence counter advance and the chunk
+                    # close instead of staying open for tens of seconds.
+                    pause_ratio = self._speech_detector.SPEECH_PAUSE_RATIO
+                    if (
+                        speech_like_frame
+                        and pause_ratio > 0.0
+                        and speech_ref > 0.0
+                        and adjusted_rms < speech_ref * pause_ratio
+                    ):
+                        speech_like_frame = False
+                    if speech_like_frame:
+                        speech_ref = (
+                            0.2 * adjusted_rms + 0.8 * speech_ref
+                            if speech_ref > 0.0 else adjusted_rms
+                        )
+
                 silence_threshold = int(max(1.2, self._speech_detector.SILENCE_SECONDS) * fps)
 
                 # In noisy environments require more consecutive frames to cancel a pause,
@@ -1599,6 +1624,7 @@ class CallSession:
                     silence_count = 0
                     resume_speech_count = 0
                     speech_buffer_start_frame = 0
+                    speech_ref = 0.0
                     self._mark_user_speech_ended()
 
                 # While TTS is playing, buffer possible interruptions
@@ -1643,6 +1669,7 @@ class CallSession:
                             silence_count = 0
                             resume_speech_count = 0
                             speech_buffer_start_frame = 0
+                            speech_ref = 0.0
                             self._mark_user_speech_ended()
                     continue
 
@@ -1686,6 +1713,7 @@ class CallSession:
                         silence_count = 0
                         resume_speech_count = 0
                         speech_buffer_start_frame = 0
+                        speech_ref = 0.0
                         self._mark_user_speech_ended()
         except Exception as e:
             logger.error("call %s: audio pipeline error: %s", self.call_id[:8], e)

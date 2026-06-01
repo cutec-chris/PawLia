@@ -107,6 +107,13 @@ class SpeechDetector:
     # instead of letting them reach STT and hallucinate. Only applied when
     # noise_floor > HIGH_NOISE_FLOOR, so quiet/local calls are unaffected.
     MIN_SPEECH_MODULATION: float = 0.7
+    # Relative-energy pause: during an open utterance a frame whose level has
+    # dropped below this fraction of the running speech level is treated as a
+    # pause even if it still reads spectrally speech-like. In sustained wind a
+    # real pause falls back to the wind floor (well under the speaker's own
+    # loudness), so this lets the chunk close instead of staying open for tens
+    # of seconds. 0 disables it.
+    SPEECH_PAUSE_RATIO: float = 0.35
 
     def __init__(
         self,
@@ -134,6 +141,7 @@ class SpeechDetector:
         ("high_noise_floor", "HIGH_NOISE_FLOOR", 0.0, None),
         ("high_noise_strictness", "HIGH_NOISE_STRICTNESS", 1.0, 3.0),
         ("min_speech_modulation", "MIN_SPEECH_MODULATION", 0.0, None),
+        ("speech_pause_ratio", "SPEECH_PAUSE_RATIO", 0.0, 1.0),
     ]
 
     _INT_CONFIGS = [
