@@ -95,13 +95,21 @@ WIND_GUSTY = [
 
 ALL = SPEECH + WIND + WIND_GUSTY
 
-# Speech fixtures the current detector localises poorly (the speech-end weakness
-# we still want to fix): excluded from the strict boundary guard via xfail so the
-# suite stays green but flags an xpass once endpointing improves.
-WEAK_BOUNDARY = {
-    "speech_outdoor_geholfen_140438.flac",  # coverage ~72%
-    "speech_outdoor_hallopauli_140239.flac",  # detector locks onto pre-speech noise
-}
+# Late-closing cases: real speech followed by prolonged wind. The user spoke
+# briefly, then the endpointer kept the chunk open for tens of seconds (the
+# field log shows chunks of 32-118s) because wind never lets the silence counter
+# reach its threshold. (category, filename, gt_speech_end_seconds) — trimmed to
+# speech + ~15s of trailing wind.
+LATE_CLOSING = [
+    ("late_closing", "lateclose_hallopauli_134750.flac", 2.0),   # "Hallo Pauli", then 95s wind in the wild
+    ("late_closing", "lateclose_schiesse_135103.flac", 6.4),     # one sentence, then wind to 38s
+]
+
+# Speech fixtures the boundary detector localises poorly (xfail so the suite
+# stays green but flags an xpass once fixed). Currently empty: the earlier
+# apparent weakness was a flaw in the per-chunk noise-floor handling of the test
+# helper (now fixed with a static ambient estimate), not real clipping.
+WEAK_BOUNDARY = set()
 
 # Current measured detector capability against ground truth.
 # These are the *baseline* tolerances to tighten as endpointing improves:
@@ -158,29 +166,64 @@ def _detector():
 
 
 def detect_speech_span(pcm, sr, fps=50, min_run=5):
-    """Locate the speech region with the live frame classifier.
+    """Locate the speech region using the VAD's frame classifier.
 
-    Mirrors the streaming pipeline's per-frame decision: update the noise floor
-    each frame, flag speech-like frames, then report the first/last frame that
-    sits inside a run of at least ``min_run`` consecutive speech-like frames
-    (so isolated blips don't define the boundaries). Returns (start_s, end_s) or
-    (None, None) if no speech was found.
+    Returns (start_s, end_s) from the first/last frame inside a run of at least
+    ``min_run`` consecutive speech-like frames, or (None, None) if none. Uses a
+    static ambient noise-floor estimate (see below) because, unlike the live
+    call, a single chunk offers no warm-up history to adapt the floor against.
     """
     fs = sr // fps
+    frames = [pcm[i:i + fs] for i in range(0, len(pcm) - fs + 1, fs)]
+    frame_rms = np.array([float(np.sqrt(np.mean(f ** 2))) for f in frames])
+
+    # Seed a STATIC noise floor from the clip's quiet frames. In production the
+    # floor is warmed over the whole call; a per-chunk dynamic EMA either
+    # inflates on the speaker's own loud frames (masking quiet trailing
+    # syllables → end too early) or stays stuck high on an all-speech clip. A
+    # low percentile of the frame energy approximates the ambient level and
+    # stays deterministic.
     d = _detector()
-    flags = []
-    for i in range(0, len(pcm) - fs + 1, fs):
-        frame = pcm[i:i + fs]
-        rms = float(np.sqrt(np.mean(frame ** 2)))
-        d.update_noise_floor(rms, during_speech=False)
-        flags.append(d.is_speech_like_frame(frame, sr, rms))
-    flags = np.array(flags, dtype=bool)
+    d._noise_floor = max(d.SILENCE_THRESHOLD, float(np.percentile(frame_rms, 20)))
+
+    flags = np.array([
+        d.is_speech_like_frame(f, sr, rms) for f, rms in zip(frames, frame_rms)
+    ], dtype=bool)
     qualifying = [
         i for i in range(min_run - 1, len(flags)) if flags[i - min_run + 1:i + 1].all()
     ]
     if not qualifying:
         return None, None
     return (qualifying[0] - min_run + 1) / fps, (qualifying[-1] + 1) / fps
+
+
+def detect_close_time(pcm, sr, fps=50):
+    """Time (s) at which the endpointer would finalise the chunk, or None if it
+    never closes within the clip.
+
+    Mirrors the live loop's silence logic: once speech has started, a frame that
+    is not speech-like increments the silence counter (reset by any speech-like
+    frame); the chunk closes after ``SILENCE_SECONDS`` of silence. In sustained
+    wind, wind frames keep reading as speech-like, so the counter never reaches
+    threshold and the chunk stays open — the late-closing bug.
+    """
+    fs = sr // fps
+    frames = [pcm[i:i + fs] for i in range(0, len(pcm) - fs + 1, fs)]
+    frame_rms = np.array([float(np.sqrt(np.mean(f ** 2))) for f in frames])
+    d = _detector()
+    d._noise_floor = max(d.SILENCE_THRESHOLD, float(np.percentile(frame_rms, 20)))
+    silence_threshold = int(max(1.2, d.SILENCE_SECONDS) * fps)
+    in_speech = False
+    silence = 0
+    for i, (frame, rms) in enumerate(zip(frames, frame_rms)):
+        if d.is_speech_like_frame(frame, sr, rms):
+            in_speech = True
+            silence = 0
+        elif in_speech:
+            silence += 1
+            if silence >= silence_threshold:
+                return (i + 1) / fps
+    return None
 
 
 def _ids(rows):
@@ -288,4 +331,31 @@ def test_real_transcript_is_not_filtered_as_hallucination(row):
     transcript = row[4]
     assert SpeechDetector.looks_like_stt_hallucination(transcript) is False, (
         f"hallucination filter wrongly flagged real speech: {transcript!r}"
+    )
+
+
+MAX_CLOSE_LATENCY_S = 4.0
+
+
+@pytest.mark.xfail(
+    reason="late-closing in sustained wind: endpointer never reaches its silence "
+           "threshold, so the chunk stays open for tens of seconds (not yet fixed)",
+    strict=False,
+)
+@pytest.mark.parametrize("row", LATE_CLOSING, ids=_ids(LATE_CLOSING))
+def test_endpointer_closes_soon_after_speech(row):
+    """After the speaker stops, the endpointer must finalise the chunk promptly
+    even if wind continues — otherwise the caller waits tens of seconds for a
+    reply. Currently xfail: sustained wind keeps the chunk open indefinitely.
+    """
+    _, fname, gt_speech_end = row
+    pcm, sr = _load(fname)
+    close = detect_close_time(pcm, sr)
+    assert close is not None, (
+        f"{fname}: endpointer never closed — sustained wind kept the chunk open"
+    )
+    latency = close - gt_speech_end
+    assert latency <= MAX_CLOSE_LATENCY_S, (
+        f"{fname}: chunk closed {latency:.1f}s after speech ended "
+        f"(speech ~{gt_speech_end:.1f}s, close {close:.1f}s)"
     )
