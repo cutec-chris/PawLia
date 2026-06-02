@@ -269,16 +269,14 @@ def _find_workspace_tasks(session_dir: str, user_id: str) -> list[dict]:
     return tasks
 
 
-def _mark_task_done(session_dir: str, user_id: str, line_idx: int) -> None:
-    """Mark a task line as completed in tasks.md."""
-    path = os.path.join(session_dir, user_id, "workspace", "tasks.md")
+def _mark_task_done_in_file(path: str, line_idx: int) -> None:
+    """Mark a task line as completed in an arbitrary file."""
     if not os.path.exists(path):
         return
     with open(path, encoding="utf-8") as f:
         lines = f.readlines()
     if line_idx < len(lines):
         lines[line_idx] = lines[line_idx].replace("- [ ]", "- [x]", 1)
-        # Add done date if not present
         done_date = datetime.now().strftime("%Y-%m-%d")
         if "\u2705" not in lines[line_idx]:
             lines[line_idx] = lines[line_idx].rstrip() + f" \u2705 {done_date}\n"
@@ -286,9 +284,14 @@ def _mark_task_done(session_dir: str, user_id: str, line_idx: int) -> None:
         f.writelines(lines)
 
 
-def _reschedule_reminder(session_dir: str, user_id: str, line_idx: int, recurrence: str) -> None:
-    """Reschedule a recurring reminder to the next occurrence."""
+def _mark_task_done(session_dir: str, user_id: str, line_idx: int) -> None:
+    """Mark a task line as completed in tasks.md."""
     path = os.path.join(session_dir, user_id, "workspace", "tasks.md")
+    _mark_task_done_in_file(path, line_idx)
+
+
+def _reschedule_reminder_in_file(path: str, line_idx: int, recurrence: str) -> None:
+    """Reschedule a recurring reminder to the next occurrence in an arbitrary file."""
     if not os.path.exists(path):
         return
     with open(path, encoding="utf-8") as f:
@@ -297,7 +300,6 @@ def _reschedule_reminder(session_dir: str, user_id: str, line_idx: int, recurren
         return
 
     line = lines[line_idx]
-    # Find and replace the scheduled date
     sm = re.search(r"(\u23f3\s+)([\d\-T:]+)", line)
     if not sm:
         return
@@ -310,6 +312,12 @@ def _reschedule_reminder(session_dir: str, user_id: str, line_idx: int, recurren
 
     with open(path, "w", encoding="utf-8") as f:
         f.writelines(lines)
+
+
+def _reschedule_reminder(session_dir: str, user_id: str, line_idx: int, recurrence: str) -> None:
+    """Reschedule a recurring reminder to the next occurrence in tasks.md."""
+    path = os.path.join(session_dir, user_id, "workspace", "tasks.md")
+    _reschedule_reminder_in_file(path, line_idx, recurrence)
 
 
 class Scheduler:
@@ -707,16 +715,23 @@ class Scheduler:
                 title = rem.get("title", "Reminder")
                 await self._notify(user_id, f"\U0001f514 {title}")
 
-                # Only auto-mark-done for tasks in tasks.md, not project notes
                 source = rem.get("_source", "tasks.md")
-                if source != "tasks.md":
-                    continue
-
-                recurrence = rem.get("recurrence", "")
-                if recurrence:
-                    _reschedule_reminder(self.session_dir, user_id, rem["_line"], recurrence)
+                if source == "tasks.md":
+                    # tasks.md: use legacy helpers that resolve path internally
+                    recurrence = rem.get("recurrence", "")
+                    if recurrence:
+                        _reschedule_reminder(self.session_dir, user_id, rem["_line"], recurrence)
+                    else:
+                        _mark_task_done(self.session_dir, user_id, rem["_line"])
                 else:
-                    _mark_task_done(self.session_dir, user_id, rem["_line"])
+                    # Project notes: resolve full path from relative source
+                    ws = os.path.join(self.session_dir, user_id, "workspace")
+                    path = os.path.join(ws, source)
+                    recurrence = rem.get("recurrence", "")
+                    if recurrence:
+                        _reschedule_reminder_in_file(path, rem["_line"], recurrence)
+                    else:
+                        _mark_task_done_in_file(path, rem["_line"])
 
     async def _check_events(self, user_id: str) -> None:
         """Notify about upcoming events from workspace/calendar/*.md."""
