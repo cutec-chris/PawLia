@@ -75,6 +75,32 @@ SPEECH = [
     # short to localise meaningfully, so no boundary span.
     ("speech_outdoor", "speech_outdoor_dasistgut_040055.flac", None, None,
      "Das ist gut."),
+    # 2026-06-02 Zahlenspiel call (41fbf35f). Indoor, relatively quiet.
+    # gt spans from Groq whisper-large-v3-turbo word timestamps.
+    # Long sentence with natural pauses — the old SPEECH_PAUSE_RATIO=0.35 cut
+    # these mid-sentence; 0.25 must keep them whole.
+    ("speech_zahlenspiel", "zahlenspiel_spielregel_154645.flac", 1.14, 11.78,
+     "Wenn du mich ausreden lässt, mache ich das. Wir machen jetzt ein Spiel und "
+     "vornehme ich mal eine Ziffer und du addierst eins dazu. Und das muss eine "
+     "kontinuierliche Kette werden."),
+    ("speech_zahlenspiel", "zahlenspiel_addierst_154902.flac", 2.44, 9.96,
+     "Nein, du sagst überhaupt nicht, wenn wir wieder anfangen. Du addierst "
+     "immer eins dazu und sagst dann deine Zahl."),
+    ("speech_zahlenspiel", "zahlenspiel_14sagen_155251.flac", 0.44, 10.78,
+     "Ja, dann musst du 14 sagen, nicht 13. Außerdem machst du keine Vorgaben. "
+     "Wenn ich 13 sage, musst du es sagen."),
+    # Short but complete indoor utterances.
+    ("speech_zahlenspiel", "zahlenspiel_keinfest_154516.flac", 0.36, 2.02,
+     "Nein, kein Fest, ein Stil."),
+    ("speech_zahlenspiel", "zahlenspiel_spiel_154549.flac", 0.38, 2.36,
+     "Ja, wir machen jetzt ein Spiel."),
+    # Single-word number responses in the counting game.
+    # "Sieben" starts late (2.4s) in a noisy chunk — boundary detector picks up
+    # leading noise, so no reliable boundary span.
+    ("speech_zahlenspiel", "zahlenspiel_sieben_154916.flac", None, None,
+     "Sieben."),
+    ("speech_zahlenspiel", "zahlenspiel_acht_154951.flac", 2.24, 3.34,
+     "Ich hab grad Acht gesagt."),
 ]
 
 # wind-only chunks; STT hallucinated these texts in production.
@@ -91,6 +117,19 @@ WIND = [
 WIND_GUSTY = [
     ("wind_gusty", "wind_gusty_035825.flac", None, None, "Vielen Dank."),
     ("wind_gusty", "wind_gusty_140303.flac", None, None, "Vielen Dank."),
+    # 2026-06-02 Zahlenspiel call — VAD cut these so aggressively that only
+    # silence/noise remained; Whisper hallucinated "Vielen Dank" on all of them.
+    # These are bursty noise (modulation 0.84-1.32), not steady wind, so the
+    # modulation gate won't catch them — they rely on the hallucination filter
+    # as the second defense layer (tested by test_wind_chunk_is_defended_end_to_end).
+    ("wind_zahlenspiel", "zahlenspiel_wind_154439.flac", None, None, "Vielen Dank."),
+    ("wind_zahlenspiel", "zahlenspiel_wind_154451.flac", None, None, "Vielen Dank."),
+    ("wind_zahlenspiel", "zahlenspiel_wind_154453.flac", None, None, "Vielen Dank."),
+    ("wind_zahlenspiel", "zahlenspiel_wind_154523.flac", None, None, "Vielen Dank."),
+    ("wind_zahlenspiel", "zahlenspiel_wind_154607.flac", None, None, "Vielen Dank."),
+    ("wind_zahlenspiel", "zahlenspiel_wind_154705.flac", None, None, "Vielen Dank."),
+    ("wind_zahlenspiel", "zahlenspiel_wind_154707.flac", None, None, "Vielen Dank."),
+    ("wind_zahlenspiel", "zahlenspiel_wind_154744.flac", None, None, "Vielen Dank."),
 ]
 
 ALL = SPEECH + WIND + WIND_GUSTY

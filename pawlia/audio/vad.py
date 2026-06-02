@@ -113,7 +113,7 @@ class SpeechDetector:
     # real pause falls back to the wind floor (well under the speaker's own
     # loudness), so this lets the chunk close instead of staying open for tens
     # of seconds. 0 disables it.
-    SPEECH_PAUSE_RATIO: float = 0.35
+    SPEECH_PAUSE_RATIO: float = 0.25
 
     def __init__(
         self,
