@@ -347,6 +347,13 @@ class WorkflowExecutor:
         result = result.replace("{scripts_dir}", scripts_dir)
         result = result.replace("<scripts_dir>", scripts_dir)
 
+        # Resolve additional context paths (e.g. skills_root)
+        for key in ("skills_root",):
+            value = self.context.get(key, "")
+            if value:
+                result = result.replace(f"{{{key}}}", value)
+                result = result.replace(f"<{key}>", value)
+
         # Skill config values are system-provided, not model-provided. This
         # lets workflow commands use {url}, {timeout}, etc. without exposing
         # those as LLM parameters when they exist in skill-config.<skill>.

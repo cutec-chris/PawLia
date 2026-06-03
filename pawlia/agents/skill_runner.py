@@ -92,6 +92,7 @@ class SkillRunnerAgent(BaseAgent):
         self.tool_registry = tool_registry
         self.context = context or {}
         self.context["cwd"] = skill.base_dir
+        self.context["skills_root"] = os.path.dirname(skill.base_dir)
         self.command_fallback = command_fallback
         self.max_tool_turns = max_tool_turns if (isinstance(max_tool_turns, int) and max_tool_turns > 0) else self.MAX_TOOL_TURNS
 

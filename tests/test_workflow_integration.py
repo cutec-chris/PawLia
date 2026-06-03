@@ -39,11 +39,14 @@ def _load_compiled(skill_name: str) -> CompiledWorkflow:
 
 
 def _make_executor(skill_name: str) -> WorkflowExecutor:
-    """Create a WorkflowExecutor with minimal context for path resolution."""
+    """Create a WorkflowExecutor with context matching the real skill runner."""
     skill_dir = str(SKILLS_DIR / skill_name)
     return WorkflowExecutor(
         tool_registry=None,
-        context={"cwd": skill_dir},
+        context={
+            "cwd": skill_dir,
+            "skills_root": str(SKILLS_DIR),
+        },
         llm=None,
     )
 
