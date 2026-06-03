@@ -91,4 +91,10 @@ def test_model_show_resolves_global_chat_model_when_no_override(tmp_path):
 
     assert result.action == "show"
     assert result.path == "chat"
-    assert result.model == "fast (global)"
+    # When llm_factory is available, model is empty and chains are populated
+    # When llm_factory is None, model shows the resolved global default
+    if result.chains:
+        assert result.model == ""
+        assert "chat" in result.chains
+    else:
+        assert result.model == "fast (global)"

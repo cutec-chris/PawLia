@@ -915,16 +915,22 @@ def cmd_add_reminder(args) -> None:
         _out({"success": False, "error": f"Invalid fire_at format: {e}"})
         return
 
-    recurrence = (args.recurrence or "").strip().lower()
+    recurrence = (args.recurrence or "").strip()
     recurrence_str = ""
-    if recurrence and recurrence != "none":
-        recurrence_str = f"every {recurrence.rstrip('ly')}"  # "daily" -> "every day" etc.
-        if recurrence == "daily":
-            recurrence_str = "every day"
-        elif recurrence == "weekly":
-            recurrence_str = "every week"
-        elif recurrence == "monthly":
-            recurrence_str = "every month"
+    if recurrence and recurrence.lower() != "none":
+        # Check if it's an RRULE string
+        if recurrence.upper().startswith("FREQ="):
+            recurrence_str = recurrence
+        else:
+            recurrence_lower = recurrence.lower()
+            if recurrence_lower == "daily":
+                recurrence_str = "every day"
+            elif recurrence_lower == "weekly":
+                recurrence_str = "every week"
+            elif recurrence_lower == "monthly":
+                recurrence_str = "every month"
+            else:
+                recurrence_str = f"every {recurrence_lower.rstrip('ly')}"
 
     label = args.label or "Reminder"
     title = f"\U0001f514 {label}: {args.message}"  # 🔔
@@ -1147,7 +1153,7 @@ def main():
     p.add_argument("--fire-at", required=True, help="ISO8601 or relative ('10m', '2h', '1d')")
     p.add_argument("--message", required=True)
     p.add_argument("--label")
-    p.add_argument("--recurrence", choices=["none", "daily", "weekly", "monthly"])
+    p.add_argument("--recurrence", help="none, daily, weekly, monthly, or RRULE string (e.g. FREQ=WEEKLY;BYDAY=MO,WE)")
 
     # list-reminders
     p = sub.add_parser("list-reminders")

@@ -323,6 +323,12 @@ agents:
 - `summary_threshold_tokens(name)` — derives the token threshold for auto-summarization; override via `summarize_at_tokens` (absolute) or `summarize_at_fraction` (of context_size).
 - `audio_input: true` on a model marks it as natively audio-capable; PawLia bypasses Whisper transcription for those models in the VoIP and voice-message paths.
 
+## Logs
+
+Container logs are stored under `log/*/container.log`. Each subfolder is named with the pattern `<user>_<ip>-<container>-<timestamp>`.
+
+Example: `log/chris_192.168.177.105-thalia_pawlia_1-20260603-064728/container.log`
+
 ## Development Guidelines
 
 **Working directory:** Always run commands from the project root (the directory containing `pawlia/` and `requirements.txt`).

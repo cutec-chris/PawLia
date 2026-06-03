@@ -12,27 +12,27 @@ workflows:
     max_retries: 2
   building_blocks:
   - id: add-job
-    command: python {scripts_dir}/../organizer/scripts/organizer.py add-job --name
+    command: python {skill_dir}/../organizer/scripts/organizer.py add-job --name
       "{name}" --schedule "{schedule}" --instruction "{instruction}"
     description: Register a new scheduled automation job with a name, schedule, and
       instruction
     status_desc: Registriere Automatisierung '{name}' ({schedule})
   - id: list-jobs
-    command: python {scripts_dir}/../organizer/scripts/organizer.py list-jobs
+    command: python {skill_dir}/../organizer/scripts/organizer.py list-jobs
     description: List all registered automation jobs
     status_desc: Zeige alle Automatisierungen an
   - id: delete-job
-    command: python {scripts_dir}/../organizer/scripts/organizer.py delete-job --job-id
+    command: python {skill_dir}/../organizer/scripts/organizer.py delete-job --job-id
       "{job_id}"
     description: Delete an existing automation job by its ID
     status_desc: Lösche Automatisierung {job_id}
   - id: toggle-job
-    command: python {scripts_dir}/../organizer/scripts/organizer.py toggle-job --job-id
+    command: python {skill_dir}/../organizer/scripts/organizer.py toggle-job --job-id
       "{job_id}"
     description: Enable or disable an existing automation job
     status_desc: Schalte Automatisierung {job_id} um
   - id: run-job
-    command: python {scripts_dir}/../organizer/scripts/organizer.py run-job --job-id
+    command: python {skill_dir}/../organizer/scripts/organizer.py run-job --job-id
       "{job_id}"
     description: Manually trigger an automation job immediately for testing
     status_desc: Führe Automatisierung {job_id} manuell aus

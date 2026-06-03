@@ -14,7 +14,7 @@ workflows:
   building_blocks:
   - id: add-reminder
     command: python {scripts_dir}/organizer.py add-reminder --fire-at "{fire_at}"
-      --message "{message}" --label "{label}" --recurrence {recurrence}
+      --message "{message}" --label "{label}" --recurrence "{recurrence}"
     description: Add a reminder with a fire time, optional label and recurrence.
     status_desc: 'Erinnerung erstellt: {message}'
     verify:
