@@ -5,17 +5,22 @@ scripts accept the documented arguments. Catches issues like:
 - Wrong {scripts_dir}/{skill_dir} resolution
 - Invalid argument choices (e.g. --recurrence rejecting RRULE strings)
 - Missing script files
+
+Uses the real WorkflowExecutor._substitute to resolve paths, not a manual
+reimplementation of the substitution logic.
 """
 
 import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
 import yaml
+
+from pawlia.skills.executor import WorkflowExecutor
+from pawlia.skills.workflow_schema import BuildingBlock, CompiledWorkflow, Workflow
 
 REPO = Path(__file__).resolve().parents[1]
 SKILLS_DIR = REPO / "skills"
@@ -25,17 +30,27 @@ SKILLS_DIR = REPO / "skills"
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _load_workflow(skill_name: str) -> dict:
-    """Load and parse a skill's workflow.yaml."""
+def _load_compiled(skill_name: str) -> CompiledWorkflow:
+    """Load and parse a skill's workflow.yaml into a CompiledWorkflow model."""
     path = SKILLS_DIR / skill_name / "workflow.yaml"
     assert path.exists(), f"workflow.yaml not found for skill '{skill_name}'"
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return CompiledWorkflow.model_validate(yaml.safe_load(f))
 
 
-def _resolve_command(command: str, skill_dir: str, scripts_dir: str) -> str:
-    """Resolve {skill_dir} and {scripts_dir} placeholders in a command."""
-    return command.replace("{skill_dir}", skill_dir).replace("{scripts_dir}", scripts_dir)
+def _make_executor(skill_name: str) -> WorkflowExecutor:
+    """Create a WorkflowExecutor with minimal context for path resolution."""
+    skill_dir = str(SKILLS_DIR / skill_name)
+    return WorkflowExecutor(
+        tool_registry=None,
+        context={"cwd": skill_dir},
+        llm=None,
+    )
+
+
+def _find_blocks(compiled: CompiledWorkflow) -> list[BuildingBlock]:
+    """Return all building blocks across all workflows."""
+    return [b for w in compiled.workflows for b in w.building_blocks]
 
 
 def _run_command(command: str, env: dict = None, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -54,100 +69,58 @@ def _run_command(command: str, env: dict = None, timeout: int = 30) -> subproces
 
 
 # ---------------------------------------------------------------------------
-# Test: All workflow.yaml files parse correctly
+# Test: All workflow.yaml files parse correctly via CompiledWorkflow schema
 # ---------------------------------------------------------------------------
 
 class TestWorkflowParsing:
-    """Verify that all workflow.yaml files are valid YAML and have required fields."""
+    """Verify that all workflow.yaml files are valid against the schema."""
 
     @pytest.fixture(params=["automation", "organizer"])
-    def workflow(self, request):
-        return _load_workflow(request.param)
+    def compiled(self, request):
+        return _load_compiled(request.param)
 
-    def test_workflow_has_skill_field(self, workflow):
-        assert "skill" in workflow
+    def test_parses_as_valid_compiled_workflow(self, compiled):
+        assert isinstance(compiled, CompiledWorkflow)
+        assert compiled.skill
+        assert compiled.version
 
-    def test_workflow_has_workflows_list(self, workflow):
-        assert "workflows" in workflow
-        assert isinstance(workflow["workflows"], list)
-        assert len(workflow["workflows"]) > 0
+    def test_has_workflows(self, compiled):
+        assert len(compiled.workflows) > 0
+        for wf in compiled.workflows:
+            assert isinstance(wf, Workflow)
 
-    def test_workflow_has_building_blocks(self, workflow):
-        for wf in workflow["workflows"]:
-            assert "building_blocks" in wf
-            assert isinstance(wf["building_blocks"], list)
-            assert len(wf["building_blocks"]) > 0
-
-    def test_building_blocks_have_required_fields(self, workflow):
-        for wf in workflow["workflows"]:
-            for block in wf["building_blocks"]:
-                assert "id" in block, f"Building block missing 'id'"
-                assert "command" in block, f"Building block '{block.get('id')}' missing 'command'"
-                assert "description" in block, f"Building block '{block.get('id')}' missing 'description'"
+    def test_has_building_blocks(self, compiled):
+        for wf in compiled.workflows:
+            assert len(wf.building_blocks) > 0
+            for block in wf.building_blocks:
+                assert isinstance(block, BuildingBlock)
+                assert block.id
+                assert block.command
+                assert block.description
 
 
 # ---------------------------------------------------------------------------
-# Test: Automation workflow commands resolve to existing paths
+# Test: Workflow commands resolve to existing script paths using real executor
 # ---------------------------------------------------------------------------
 
-class TestAutomationPaths:
-    """Verify that automation workflow commands resolve to valid paths."""
+class TestWorkflowPaths:
+    """Use the real WorkflowExecutor._substitute to validate paths."""
 
-    def _get_automation_blocks(self) -> list:
-        wf = _load_workflow("automation")
-        return wf["workflows"][0]["building_blocks"]
-
-    def test_add_job_command_resolves_to_existing_script(self):
-        blocks = self._get_automation_blocks()
-        add_job = next(b for b in blocks if b["id"] == "add-job")
-
-        # {scripts_dir} resolves to <skill_path>/scripts
-        scripts_dir = str(SKILLS_DIR / "automation" / "scripts")
-        resolved = _resolve_command(add_job["command"], scripts_dir, scripts_dir)
-
-        # Extract the python script path from the command
-        # Command format: python <path> add-job ...
-        parts = resolved.split()
-        script_path = Path(parts[1])
-
-        assert script_path.exists(), f"Script not found: {script_path}"
-        assert script_path.name == "organizer.py"
-
-    def test_all_automation_commands_resolve_to_existing_script(self):
-        blocks = self._get_automation_blocks()
-        scripts_dir = str(SKILLS_DIR / "automation" / "scripts")
-
-        for block in blocks:
-            resolved = _resolve_command(block["command"], scripts_dir, scripts_dir)
+    def _check_blocks_resolve(self, skill_name: str):
+        compiled = _load_compiled(skill_name)
+        executor = _make_executor(skill_name)
+        for block in _find_blocks(compiled):
+            resolved = executor._substitute(block.command, {})
             parts = resolved.split()
             script_path = Path(parts[1])
-
             assert script_path.exists(), \
-                f"Block '{block['id']}': script not found: {script_path}"
+                f"Skill '{skill_name}' block '{block.id}': script not found: {script_path}"
 
+    def test_automation_commands_resolve(self):
+        self._check_blocks_resolve("automation")
 
-# ---------------------------------------------------------------------------
-# Test: Organizer workflow commands resolve to existing paths
-# ---------------------------------------------------------------------------
-
-class TestOrganizerPaths:
-    """Verify that organizer workflow commands resolve to valid paths."""
-
-    def _get_organizer_blocks(self) -> list:
-        wf = _load_workflow("organizer")
-        return wf["workflows"][0]["building_blocks"]
-
-    def test_all_organizer_commands_resolve_to_existing_script(self):
-        blocks = self._get_organizer_blocks()
-        scripts_dir = str(SKILLS_DIR / "organizer" / "scripts")
-
-        for block in blocks:
-            resolved = _resolve_command(block["command"], scripts_dir, scripts_dir)
-            parts = resolved.split()
-            script_path = Path(parts[1])
-
-            assert script_path.exists(), \
-                f"Block '{block['id']}': script not found: {script_path}"
+    def test_organizer_commands_resolve(self):
+        self._check_blocks_resolve("organizer")
 
 
 # ---------------------------------------------------------------------------
@@ -298,82 +271,66 @@ class TestOrganizerScriptArguments:
 
 
 # ---------------------------------------------------------------------------
-# Test: Full workflow execution simulation
+# Test: Full workflow execution using the real executor's _substitute
 # ---------------------------------------------------------------------------
 
 class TestWorkflowExecution:
     """Simulate executing workflow building blocks end-to-end."""
 
     def test_automation_add_job_workflow(self, tmp_path):
-        """Simulate the automation add-job building block."""
-        wf = _load_workflow("automation")
-        blocks = wf["workflows"][0]["building_blocks"]
-        add_job = next(b for b in blocks if b["id"] == "add-job")
+        """Simulate the automation add-job building block via executor."""
+        compiled = _load_compiled("automation")
+        block = next(b for w in compiled.workflows for b in w.building_blocks if b.id == "add-job")
 
-        # {scripts_dir} resolves to <skill_path>/scripts
-        scripts_dir = str(SKILLS_DIR / "automation" / "scripts")
-        command = _resolve_command(add_job["command"], scripts_dir, scripts_dir)
-
-        # Replace placeholders with test values
-        command = command.replace("{name}", "Test Automation")
-        command = command.replace("{schedule}", "16:00")
-        command = command.replace("{instruction}", "Show open tasks")
+        executor = _make_executor("automation")
+        params = {"name": "Test Automation", "schedule": "16:00", "instruction": "Show open tasks"}
+        command = executor._substitute(block.command, params)
 
         env = {
             "PAWLIA_USER_ID": "test_user",
             "PAWLIA_SESSION_DIR": str(tmp_path),
         }
-
         result = _run_command(command, env=env)
         assert result.returncode == 0, f"Command failed: {result.stderr}"
         data = json.loads(result.stdout)
         assert data["success"] is True
 
     def test_organizer_add_reminder_workflow(self, tmp_path):
-        """Simulate the organizer add-reminder building block."""
-        wf = _load_workflow("organizer")
-        blocks = wf["workflows"][0]["building_blocks"]
-        add_reminder = next(b for b in blocks if b["id"] == "add-reminder")
+        """Simulate the organizer add-reminder building block via executor."""
+        compiled = _load_compiled("organizer")
+        block = next(b for w in compiled.workflows for b in w.building_blocks if b.id == "add-reminder")
 
-        scripts_dir = str(SKILLS_DIR / "organizer" / "scripts")
-        command = _resolve_command(add_reminder["command"], scripts_dir, scripts_dir)
-
-        # Replace placeholders with test values
-        command = command.replace("{fire_at}", "10m")
-        command = command.replace("{message}", "Test reminder")
-        command = command.replace("{label}", "Test")
-        command = command.replace("{recurrence}", "none")
+        executor = _make_executor("organizer")
+        params = {"fire_at": "10m", "message": "Test reminder", "label": "Test", "recurrence": "none"}
+        command = executor._substitute(block.command, params)
 
         env = {
             "PAWLIA_USER_ID": "test_user",
             "PAWLIA_SESSION_DIR": str(tmp_path),
         }
-
         result = _run_command(command, env=env)
         assert result.returncode == 0, f"Command failed: {result.stderr}"
         data = json.loads(result.stdout)
         assert data["success"] is True
 
     def test_organizer_add_reminder_with_rrule_workflow(self, tmp_path):
-        """Simulate add-reminder with RRULE recurrence."""
-        wf = _load_workflow("organizer")
-        blocks = wf["workflows"][0]["building_blocks"]
-        add_reminder = next(b for b in blocks if b["id"] == "add-reminder")
+        """Simulate add-reminder with RRULE recurrence via executor."""
+        compiled = _load_compiled("organizer")
+        block = next(b for w in compiled.workflows for b in w.building_blocks if b.id == "add-reminder")
 
-        scripts_dir = str(SKILLS_DIR / "organizer" / "scripts")
-        command = _resolve_command(add_reminder["command"], scripts_dir, scripts_dir)
-
-        # Replace placeholders with test values including RRULE
-        command = command.replace("{fire_at}", "10m")
-        command = command.replace("{message}", "RRULE reminder")
-        command = command.replace("{label}", "Test")
-        command = command.replace("{recurrence}", "FREQ=WEEKLY;BYDAY=MO,WE")
+        executor = _make_executor("organizer")
+        params = {
+            "fire_at": "10m",
+            "message": "RRULE reminder",
+            "label": "Test",
+            "recurrence": "FREQ=WEEKLY;BYDAY=MO,WE",
+        }
+        command = executor._substitute(block.command, params)
 
         env = {
             "PAWLIA_USER_ID": "test_user",
             "PAWLIA_SESSION_DIR": str(tmp_path),
         }
-
         result = _run_command(command, env=env)
         assert result.returncode == 0, f"Command failed: {result.stderr}"
         data = json.loads(result.stdout)
