@@ -17,6 +17,7 @@ Subcommands:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -435,6 +436,11 @@ _TASK_RE = re.compile(
 )
 
 
+def _make_task_id(filepath: str, line_no: int) -> str:
+    """Generate a stable, short task ID from filepath + line number via MD5."""
+    return hashlib.md5(f"{filepath}:{line_no}".encode()).hexdigest()[:8]
+
+
 def _task_to_line(task: dict) -> str:
     """Convert a task dict to an Obsidian Tasks emoji line."""
     status = task.get("status", "pending")
@@ -570,9 +576,10 @@ def _read_tasks_md(path: str) -> list[dict]:
         return []
     tasks = []
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        for line_no, line in enumerate(f):
             task = _line_to_task(line)
             if task:
+                task["id"] = _make_task_id("tasks.md", line_no)
                 tasks.append(task)
     return tasks
 
@@ -605,9 +612,10 @@ def _find_tasks_in_workspace(workspace_dir: str) -> list[tuple[dict, str]]:
             rel = os.path.relpath(path, workspace_dir)
             try:
                 with open(path, encoding="utf-8") as f:
-                    for line in f:
+                    for line_no, line in enumerate(f):
                         task = _line_to_task(line)
                         if task:
+                            task["id"] = _make_task_id(rel, line_no)
                             results.append((task, rel))
             except Exception:
                 continue
@@ -779,6 +787,10 @@ def cmd_add_task(args) -> None:
     tasks.append(task)
     _write_tasks_md(path, tasks)
 
+    # Re-read to get the stable task ID
+    tasks = _read_tasks_md(path)
+    task_id = tasks[-1]["id"] if tasks else args.title
+
     # Store task reminders in scheduler_state.json (outside workspace)
     if args.reminders:
         try:
@@ -804,7 +816,7 @@ def cmd_add_task(args) -> None:
             with open(state_path, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2, ensure_ascii=False)
 
-    _out({"success": True, "message": f"Task '{args.title}' added.", "task_id": args.title})
+    _out({"success": True, "message": f"Task '{args.title}' added.", "task_id": task_id})
 
 
 def cmd_list_tasks(args) -> None:
@@ -841,6 +853,7 @@ def cmd_list_tasks(args) -> None:
     display = []
     for t in tasks[:limit]:
         item = {
+            "id": t.get("id", ""),
             "title": t["title"],
             "status": t["status"],
             "due_date": t.get("due_date", ""),
@@ -857,11 +870,19 @@ def cmd_complete_task(args) -> None:
     tasks = _read_tasks_md(path)
     found = False
     for t in tasks:
-        if t.get("title", "").lower() == args.task_id.lower() or args.task_id.lower() in t.get("title", "").lower():
+        tid = t.get("id", "")
+        if tid and tid == args.task_id:
             t["status"] = "completed"
             t["completed_at"] = datetime.now().strftime("%Y-%m-%d")
             found = True
             break
+    if not found:
+        for t in tasks:
+            if t.get("title", "").lower() == args.task_id.lower() or args.task_id.lower() in t.get("title", "").lower():
+                t["status"] = "completed"
+                t["completed_at"] = datetime.now().strftime("%Y-%m-%d")
+                found = True
+                break
     if not found:
         _out({"success": False, "error": f"Task not found: {args.task_id}"})
         return
@@ -873,10 +894,16 @@ def cmd_delete_task(args) -> None:
     path = _tasks_path(args.user_id, args.session_dir)
     tasks = _read_tasks_md(path)
     before = len(tasks)
+    # Try exact ID match first
     tasks = [t for t in tasks if not (
-        t.get("title", "").lower() == args.task_id.lower()
-        or args.task_id.lower() in t.get("title", "").lower()
+        t.get("id", "") and t["id"] == args.task_id
     )]
+    if len(tasks) == before:
+        # Fall back to title substring match
+        tasks = [t for t in tasks if not (
+            t.get("title", "").lower() == args.task_id.lower()
+            or args.task_id.lower() in t.get("title", "").lower()
+        )]
     if len(tasks) == before:
         _out({"success": False, "error": f"Task not found: {args.task_id}"})
         return
@@ -1144,12 +1171,12 @@ def main():
     # complete-task
     p = sub.add_parser("complete-task")
     _base(p)
-    p.add_argument("--task-id", required=True, help="Task title (or substring)")
+    p.add_argument("--task-id", required=True, help="Task ID (from list-tasks) or title/substring")
 
     # delete-task
     p = sub.add_parser("delete-task")
     _base(p)
-    p.add_argument("--task-id", required=True, help="Task title (or substring)")
+    p.add_argument("--task-id", required=True, help="Task ID (from list-tasks) or title/substring")
 
     # add-reminder
     p = sub.add_parser("add-reminder")

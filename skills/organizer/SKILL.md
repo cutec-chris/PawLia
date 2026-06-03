@@ -149,12 +149,12 @@ python <scripts_dir>/organizer.py list-tasks [--status pending|completed|all] [-
 
 Complete a task:
 ```
-python <scripts_dir>/organizer.py complete-task --task-id "<title or substring>"
+python <scripts_dir>/organizer.py complete-task --task-id "<id or title substring>"
 ```
 
 Delete a task:
 ```
-python <scripts_dir>/organizer.py delete-task --task-id "<title or substring>"
+python <scripts_dir>/organizer.py delete-task --task-id "<id or title substring>"
 ```
 
 ### Scheduled Jobs (Automation)

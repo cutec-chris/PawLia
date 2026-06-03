@@ -72,13 +72,13 @@ workflows:
       exit_code: 0
   - id: complete-task
     command: python {scripts_dir}/organizer.py complete-task --task-id "{task_id}"
-    description: Mark a task as completed by title or substring.
+    description: Mark a task as completed by ID or title substring.
     status_desc: 'Schließe Aufgabe ab: {task_id}'
     verify:
       exit_code: 0
   - id: delete-task
     command: python {scripts_dir}/organizer.py delete-task --task-id "{task_id}"
-    description: Delete a task by title or substring.
+    description: Delete a task by ID or title substring.
     status_desc: 'Lösche Aufgabe: {task_id}'
     verify:
       exit_code: 0
