@@ -101,8 +101,9 @@ class TestAutomationPaths:
         blocks = self._get_automation_blocks()
         add_job = next(b for b in blocks if b["id"] == "add-job")
 
-        skill_dir = str(SKILLS_DIR / "automation")
-        resolved = _resolve_command(add_job["command"], skill_dir, skill_dir)
+        # {scripts_dir} resolves to <skill_path>/scripts
+        scripts_dir = str(SKILLS_DIR / "automation" / "scripts")
+        resolved = _resolve_command(add_job["command"], scripts_dir, scripts_dir)
 
         # Extract the python script path from the command
         # Command format: python <path> add-job ...
@@ -114,10 +115,10 @@ class TestAutomationPaths:
 
     def test_all_automation_commands_resolve_to_existing_script(self):
         blocks = self._get_automation_blocks()
-        skill_dir = str(SKILLS_DIR / "automation")
+        scripts_dir = str(SKILLS_DIR / "automation" / "scripts")
 
         for block in blocks:
-            resolved = _resolve_command(block["command"], skill_dir, skill_dir)
+            resolved = _resolve_command(block["command"], scripts_dir, scripts_dir)
             parts = resolved.split()
             script_path = Path(parts[1])
 
@@ -309,8 +310,9 @@ class TestWorkflowExecution:
         blocks = wf["workflows"][0]["building_blocks"]
         add_job = next(b for b in blocks if b["id"] == "add-job")
 
-        skill_dir = str(SKILLS_DIR / "automation")
-        command = _resolve_command(add_job["command"], skill_dir, skill_dir)
+        # {scripts_dir} resolves to <skill_path>/scripts
+        scripts_dir = str(SKILLS_DIR / "automation" / "scripts")
+        command = _resolve_command(add_job["command"], scripts_dir, scripts_dir)
 
         # Replace placeholders with test values
         command = command.replace("{name}", "Test Automation")
