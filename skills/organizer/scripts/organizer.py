@@ -166,14 +166,18 @@ def _build_rrule(
     recurrence_until: str = "",
     recurrence_count: int | None = None,
 ) -> str:
-    recurrence = (recurrence or "").strip().lower()
-    if not recurrence or recurrence == "none":
+    recurrence = (recurrence or "").strip()
+    if not recurrence or recurrence.lower() == "none":
         return ""
-    if recurrence not in {"daily", "weekly", "monthly", "yearly"}:
+    # If already an RRULE string, return as-is
+    if recurrence.upper().startswith("FREQ="):
+        return recurrence
+    recurrence_lower = recurrence.lower()
+    if recurrence_lower not in {"daily", "weekly", "monthly", "yearly"}:
         raise ValueError("recurrence must be one of: none, daily, weekly, monthly, yearly")
 
-    parts = [f"FREQ={recurrence.upper()}"]
-    if recurrence == "weekly":
+    parts = [f"FREQ={recurrence_lower.upper()}"]
+    if recurrence_lower == "weekly":
         days = _normalize_recurrence_days(recurrence_days) or [_rrule_weekday_for_start(start)]
         parts.append("BYDAY=" + ",".join(days))
     if recurrence_until:
@@ -1103,7 +1107,7 @@ def main():
     p.add_argument("--location")
     p.add_argument("--checklist", help="JSON array of checklist items")
     p.add_argument("--reminders", help="JSON array of event reminders")
-    p.add_argument("--recurrence", choices=["none", "daily", "weekly", "monthly", "yearly"], default="none")
+    p.add_argument("--recurrence", default="none", help="none, daily, weekly, monthly, yearly, or RRULE string (e.g. FREQ=WEEKLY;BYDAY=MO,WE)")
     p.add_argument("--recurrence-days", help="Weekly days, e.g. 'TU,TH' or 'dienstag donnerstag'")
     p.add_argument("--recurrence-until", help="Last recurrence date as YYYY-MM-DD")
     p.add_argument("--recurrence-count", type=int, help="Maximum number of occurrences")

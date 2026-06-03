@@ -210,6 +210,46 @@ class TestOrganizerScriptArguments:
         data = json.loads(result.stdout)
         assert data["success"] is True
 
+    def test_add_event_accepts_none_recurrence(self, tmp_path):
+        env = {"PAWLIA_SESSION_DIR": str(tmp_path)}
+        result = self._run_organizer(
+            "add-event",
+            "--title", "Test Event",
+            "--start", "2027-01-01T12:00",
+            "--recurrence", "none",
+            env_vars=env,
+        )
+        assert result.returncode == 0, f"Failed: {result.stderr}"
+        data = json.loads(result.stdout)
+        assert data["success"] is True
+
+    def test_add_event_accepts_weekly_recurrence(self, tmp_path):
+        env = {"PAWLIA_SESSION_DIR": str(tmp_path)}
+        result = self._run_organizer(
+            "add-event",
+            "--title", "Weekly Event",
+            "--start", "2027-01-01T12:00",
+            "--recurrence", "weekly",
+            env_vars=env,
+        )
+        assert result.returncode == 0, f"Failed: {result.stderr}"
+        data = json.loads(result.stdout)
+        assert data["success"] is True
+
+    def test_add_event_accepts_rrule_recurrence(self, tmp_path):
+        """Test that add-event also accepts RRULE strings."""
+        env = {"PAWLIA_SESSION_DIR": str(tmp_path)}
+        result = self._run_organizer(
+            "add-event",
+            "--title", "RRULE Event",
+            "--start", "2027-01-01T12:00",
+            "--recurrence", "FREQ=WEEKLY;BYDAY=MO,WE",
+            env_vars=env,
+        )
+        assert result.returncode == 0, f"Failed: {result.stderr}"
+        data = json.loads(result.stdout)
+        assert data["success"] is True
+
     def test_add_job_accepts_valid_schedule(self, tmp_path):
         env = {"PAWLIA_SESSION_DIR": str(tmp_path)}
         result = self._run_organizer(
