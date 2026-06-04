@@ -11,6 +11,14 @@ import requests
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+# Identify ourselves on the search-API call (not a browser-emulating fetch).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
+try:
+    from pawlia.utils import PAWLIA_USER_AGENT as _UA
+except Exception:
+    _UA = "PawLia/0.0.0+unknown"  # degraded path: pawlia not importable
+
 
 def search(query: str, limit: int, url: str, timeout: int = 30) -> list:
     base_url = url.rstrip("/search").rstrip("/")
@@ -21,7 +29,8 @@ def search(query: str, limit: int, url: str, timeout: int = 30) -> list:
         "safesearch": 0,
         "categories": "general",
     }
-    resp = requests.get(f"{base_url}/search", params=params, timeout=timeout)
+    resp = requests.get(f"{base_url}/search", params=params, timeout=timeout,
+                        headers={"User-Agent": _UA})
     resp.raise_for_status()
     data = resp.json()
     results = []

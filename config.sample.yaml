@@ -214,6 +214,11 @@ interfaces:
 # Workspace settings — the workspace directory (session/<user>/workspace/) is
 # an Obsidian vault.  Enable git to auto-commit changes and keep the repo small
 # with daily/weekly squash.
+# User-Agent for browser-emulating web fetches (browser skill, researcher page
+# scraping). Override to rotate the emulated browser. Does NOT affect LLM /
+# embedding / provider / search-API requests — those send a fixed "PawLia/1.0".
+# web_user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
 workspace:
   git:
     enabled: false                 # auto-commit workspace changes via git

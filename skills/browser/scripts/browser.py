@@ -29,11 +29,23 @@ _VERIFY = False
 
 SESSION_FILE = os.path.join(os.path.expanduser("~"), ".pawlia_browser.json")
 
-STEALTH_HEADERS = {
-    "User-Agent": (
+# Browser-emulating UA, configurable via the top-level ``web_user_agent`` config
+# key (resolved by pawlia.utils.web_user_agent). Falls back to a current-Chrome
+# string if pawlia isn't importable.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, _PROJECT_ROOT)
+try:
+    from pawlia.utils import web_user_agent as _web_user_agent
+    _WEB_USER_AGENT = _web_user_agent()
+except Exception:
+    _WEB_USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    ),
+    )
+
+STEALTH_HEADERS = {
+    "User-Agent": _WEB_USER_AGENT,
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,"
         "image/avif,image/webp,image/apng,*/*;q=0.8,"

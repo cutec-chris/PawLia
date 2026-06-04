@@ -577,8 +577,10 @@ class CallSession:
         servers = []
         try:
             import aiohttp
+            from pawlia.utils import PAWLIA_USER_AGENT
             url = f"{self._client.homeserver}/_matrix/client/v3/voip/turnServer"
-            headers = {"Authorization": f"Bearer {self._client.access_token}"}
+            headers = {"Authorization": f"Bearer {self._client.access_token}",
+                       "User-Agent": PAWLIA_USER_AGENT}
             async with aiohttp.ClientSession() as s:
                 async with s.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as r:
                     if r.status == 200:

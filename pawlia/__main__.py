@@ -58,7 +58,9 @@ def _configure_logging(debug: bool) -> None:
 
 
 def main() -> None:
+    from pawlia import __version__
     parser = argparse.ArgumentParser(description="PawLia - AI Assistant")
+    parser.add_argument("--version", action="version", version=f"PawLia {__version__}")
     parser.add_argument("--config", default=None, help="Path to config.yaml")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument(

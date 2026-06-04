@@ -252,3 +252,108 @@ def test_rag_llm_call_omits_json_hints_when_disabled(monkeypatch):
 
     assert "format" not in captured["body"]
     assert "response_format" not in captured["body"]
+
+
+def test_rag_llm_call_array_mode_omits_response_format_for_openai_compat(monkeypatch):
+    """OpenAI-compatible json_object mode forbids a top-level array, so for
+    json_mode='array' we must NOT send response_format (it would steer the
+    model into an object and collapse the actions list)."""
+    import asyncio
+    import json as _json
+    import urllib.request
+
+    from pawlia.utils import rag_llm_call
+
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = _json.loads(req.data.decode()) if req.data else {}
+
+        class _Resp:
+            def read(self):
+                return b'{"choices":[{"message":{"content":"[]"}}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    cfg = {"rag_provider": "openai", "rag_model": "x",
+           "rag_base_url": "http://api.example/v1"}
+    asyncio.run(rag_llm_call(cfg, "sys", "user", json_mode="array"))
+
+    assert "response_format" not in captured["body"]
+
+
+def test_rag_llm_call_array_mode_still_sets_format_json_for_ollama(monkeypatch):
+    """Ollama's format:json does not constrain the top-level type, so any
+    truthy json_mode (including 'array') should still set it."""
+    import asyncio
+    import json as _json
+    import urllib.request
+
+    from pawlia.utils import rag_llm_call
+
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        captured["body"] = _json.loads(req.data.decode()) if req.data else {}
+
+        class _Resp:
+            def read(self):
+                return b'{"message":{"content":"[]"}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    cfg = {"rag_provider": "ollama", "embedding_host": "http://localhost:11434"}
+    asyncio.run(rag_llm_call(cfg, "sys", "user", json_mode="array"))
+
+    assert captured["body"].get("format") == "json"
+
+
+def test_rag_llm_call_sends_pawlia_user_agent(monkeypatch):
+    """Every provider request must carry an explicit User-Agent — some
+    providers (Groq behind Cloudflare) 403 the default Python-urllib UA."""
+    import asyncio
+    import json as _json
+    import urllib.request
+
+    from pawlia.utils import PAWLIA_USER_AGENT, rag_llm_call
+
+    seen = {}
+
+    def _fake_urlopen(req, timeout=None):
+        seen["ua"] = req.get_header("User-agent")
+
+        class _Resp:
+            def read(self):
+                return b'{"choices":[{"message":{"content":"{}"}}]}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    cfg = {"rag_provider": "openai", "rag_model": "x",
+           "rag_base_url": "http://api.example/v1"}
+    asyncio.run(rag_llm_call(cfg, "sys", "user"))
+
+    assert seen["ua"] == PAWLIA_USER_AGENT

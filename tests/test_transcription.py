@@ -369,4 +369,7 @@ async def test_api_omits_authorization_header_without_api_key(monkeypatch):
     )
 
     assert text == "Hallo ohne key"
-    assert captured["headers"] == {}
+    # No api_key -> no Authorization header, but we always identify ourselves.
+    import pawlia
+    assert "Authorization" not in captured["headers"]
+    assert captured["headers"].get("User-Agent") == f"PawLia/{pawlia.__version__}"

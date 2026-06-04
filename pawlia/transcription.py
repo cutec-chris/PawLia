@@ -482,9 +482,11 @@ async def transcribe_via_model(
         model,
     )
 
+    from pawlia.utils import PAWLIA_USER_AGENT
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=payload, timeout=120)
+            resp = await client.post(url, json=payload, timeout=120,
+                                     headers={"User-Agent": PAWLIA_USER_AGENT})
             resp.raise_for_status()
             data = resp.json()
             text = data.get("message", {}).get("content", "").strip()
@@ -629,7 +631,10 @@ async def _transcribe_api(audio_bytes: bytes, provider: str, cfg: Dict, mime: st
         data["language"] = language
 
     url = f"{base_url}/audio/transcriptions"
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    from pawlia.utils import PAWLIA_USER_AGENT
+    headers = {"User-Agent": PAWLIA_USER_AGENT}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     async with httpx.AsyncClient() as client:
         try:

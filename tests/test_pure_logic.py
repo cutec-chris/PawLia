@@ -296,3 +296,51 @@ def test_max_tool_turns_warning_truncates_tail_to_last_six():
     assert "50 tool calls" in msg
     # Tail shows the last 6 names only.
     assert "tool44, tool45, tool46, tool47, tool48, tool49" in msg
+
+
+# ---------------------------------------------------------------------------
+# web_user_agent — configurable browser-emulating UA
+# ---------------------------------------------------------------------------
+def _reset_web_ua():
+    import pawlia.utils as u
+    u._web_ua_cache = None
+
+
+def test_web_user_agent_env_override_wins(monkeypatch):
+    import pawlia.utils as u
+    _reset_web_ua()
+    monkeypatch.setenv("PAWLIA_WEB_USER_AGENT", "CustomBot/9")
+    assert u.web_user_agent() == "CustomBot/9"
+
+
+def test_web_user_agent_reads_config_top_level_key(monkeypatch, tmp_path):
+    import pawlia.utils as u
+    _reset_web_ua()
+    monkeypatch.delenv("PAWLIA_WEB_USER_AGENT", raising=False)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('web_user_agent: "FromConfig/2"\n', encoding="utf-8")
+    monkeypatch.setenv("PAWLIA_CONFIG_PATH", str(cfg))
+    assert u.web_user_agent() == "FromConfig/2"
+
+
+def test_web_user_agent_falls_back_to_default(monkeypatch, tmp_path):
+    import pawlia.utils as u
+    _reset_web_ua()
+    monkeypatch.delenv("PAWLIA_WEB_USER_AGENT", raising=False)
+    monkeypatch.setenv("PAWLIA_CONFIG_PATH", str(tmp_path / "nope.yaml"))
+    # cwd has no config → default Chrome UA
+    monkeypatch.chdir(tmp_path)
+    assert u.web_user_agent() == u.DEFAULT_WEB_USER_AGENT
+
+
+def test_pawlia_user_agent_is_derived_from_version():
+    """The fixed UA must carry the real SemVer from pawlia.__version__ —
+    no hardcoded version string."""
+    import re
+    import pawlia
+    import pawlia.utils as u
+    assert u.PAWLIA_USER_AGENT == f"PawLia/{pawlia.__version__}"
+    assert u.PAWLIA_USER_AGENT.startswith("PawLia/")
+    # version part is a SemVer MAJOR.MINOR.PATCH (optionally with pre/build)
+    version_part = u.PAWLIA_USER_AGENT.split("/", 1)[1]
+    assert re.match(r"^\d+\.\d+\.\d+", version_part), version_part

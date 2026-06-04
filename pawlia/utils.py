@@ -16,6 +16,71 @@ logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 
+# ---------------------------------------------------------------------------
+# User-Agent handling
+# ---------------------------------------------------------------------------
+# Fixed UA for requests where PawLia identifies itself *as itself*: LLM /
+# embedding / provider calls, search-API calls, transcription, internal
+# services. Not configurable — some providers (e.g. Groq behind Cloudflare)
+# 403 the default "Python-urllib" UA with error 1010, so we always send our own.
+# Derived from the single source of truth pawlia.__version__ — never hardcode
+# the version here. See agents.md › "Versioning & Releases (git-flow)".
+from pawlia import __version__ as _VERSION
+PAWLIA_USER_AGENT = f"PawLia/{_VERSION}"
+
+# Default UA for browser-*emulating* web fetches (browser skill, researcher
+# page scraping). Configurable via the top-level ``web_user_agent`` config key
+# so a deploy can rotate the emulated browser. LLM/API calls never use this.
+DEFAULT_WEB_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
+
+_web_ua_cache: Optional[str] = None
+
+
+def _read_config_web_user_agent() -> str:
+    """Read the top-level ``web_user_agent`` from the config file, or ''."""
+    candidates: List[str] = []
+    cfg_path = os.environ.get("PAWLIA_CONFIG_PATH")
+    if cfg_path:
+        candidates.append(cfg_path)
+    candidates += ["config.yaml", "config.yml"]
+    for path in candidates:
+        try:
+            if path and os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                ua = cfg.get("web_user_agent")
+                if isinstance(ua, str) and ua.strip():
+                    return ua.strip()
+        except Exception:
+            continue
+    return ""
+
+
+def web_user_agent() -> str:
+    """User-Agent for browser-emulating web fetches.
+
+    Resolution order (first hit wins):
+      1. ``$PAWLIA_WEB_USER_AGENT``
+      2. top-level ``web_user_agent`` in the config file
+         (``$PAWLIA_CONFIG_PATH``, else ``./config.yaml`` / ``./config.yml``)
+      3. :data:`DEFAULT_WEB_USER_AGENT`
+
+    Cached after first resolution. Tests can reset by setting
+    ``pawlia.utils._web_ua_cache = None``.
+    """
+    global _web_ua_cache
+    if _web_ua_cache is not None:
+        return _web_ua_cache
+    ua = os.environ.get("PAWLIA_WEB_USER_AGENT", "").strip()
+    if not ua:
+        ua = _read_config_web_user_agent()
+    _web_ua_cache = ua or DEFAULT_WEB_USER_AGENT
+    return _web_ua_cache
+
+
 def _raise_invalid_dir(path: str) -> None:
     if os.path.islink(path):
         target = os.readlink(path)
@@ -201,13 +266,20 @@ def find_similar_slug(
 
 
 async def rag_llm_call(cfg: dict, system_prompt: str, user_prompt: str,
-                      json_mode: bool = False) -> str:
+                      json_mode: bool | str = False) -> str:
     """Make a single LLM call for RAG backends and return the stripped content.
 
-    When json_mode is True, the request asks the provider for JSON output
-    (Ollama ``format: "json"``, OpenAI-compatible ``response_format: json_object``).
-    This is a hint, not a guarantee — the parser still tolerates prose-wrapped
-    JSON so older or non-conforming models keep working.
+    json_mode asks the provider for JSON output. Accepts:
+      - False (default): no JSON hint.
+      - True / "object": expect a JSON object.
+      - "array": expect a top-level JSON array.
+
+    Ollama gets ``format: "json"`` for any truthy value (it does not constrain
+    the top-level type). OpenAI-compatible providers only get
+    ``response_format: {type: "json_object"}`` for object mode — that mode
+    *forbids* a top-level array, so for "array" we send no response_format and
+    rely on the prompt + tolerant parser. This is a hint, not a guarantee — the
+    parser still tolerates prose-wrapped JSON so non-conforming models keep working.
     """
     import urllib.request
 
@@ -242,11 +314,16 @@ async def rag_llm_call(cfg: dict, system_prompt: str, user_prompt: str,
             ],
             "temperature": 0.1,
         }
-        if json_mode:
+        # json_object mode forbids a top-level array, so only enable it when an
+        # object is expected. For "array" we rely on the prompt + parser.
+        if json_mode is True or json_mode == "object":
             payload["response_format"] = {"type": "json_object"}
 
     body = json.dumps(payload).encode()
-    headers: dict[str, str] = {"Content-Type": "application/json"}
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "User-Agent": PAWLIA_USER_AGENT,
+    }
     if provider != "ollama":
         api_key = cfg.get("rag_api_key", cfg.get("embedding_api_key", ""))
         if api_key:

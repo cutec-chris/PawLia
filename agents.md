@@ -333,7 +333,7 @@ Example: `log/chris_192.168.177.105-thalia_pawlia_1-20260603-064728/container.lo
 
 **Working directory:** Always run commands from the project root (the directory containing `pawlia/` and `requirements.txt`).
 
-**Virtualenv + PYTHONPATH:** `pawlia` is not installed as a package (no `pyproject.toml`), so `PYTHONPATH=.` is required for any command that imports it.
+**Virtualenv + PYTHONPATH:** `pawlia` is not installed as a package (no `pyproject.toml`), so `PYTHONPATH=.` is required for any command that imports it. The project version lives in `pawlia/__init__.py` (`__version__`), not in packaging metadata — see "Versioning & Releases" below.
 
 ```bash
 # Run tests
@@ -353,3 +353,51 @@ printf 'Hello\nexit\n' | PYTHONPATH=. .venv/bin/python -m pawlia 2>/dev/null
 - Prefer compiled workflows for reliability when a skill provides one; free-form
   tool calling remains the fallback path inside the SkillRunner
 - Command mode returns raw script output — no LLM interpretation phase
+
+## Versioning & Releases (git-flow)
+
+**These rules are binding for all contributors and AI models.**
+
+**Single source of truth.** The project version is `pawlia.__version__` in
+`pawlia/__init__.py` — a SemVer string `MAJOR.MINOR.PATCH`. The User-Agent
+(`pawlia.utils.PAWLIA_USER_AGENT`) is **derived** from it as `f"PawLia/{__version__}"`.
+**Never hardcode the version anywhere else** (no literal `"PawLia/1.2.3"`, no second
+copy). `python -m pawlia --version` prints it. (The browser-emulating UA from
+`web_user_agent()` is intentionally a Chrome string and is unrelated.)
+
+**SemVer bump rules:**
+- **PATCH** (`0.1.0 → 0.1.1`): backward-compatible bug fixes only (typical hotfix).
+- **MINOR** (`0.1.0 → 0.2.0`): new, backward-compatible features.
+- **MAJOR** (`1.2.3 → 2.0.0`): breaking changes. While `0.y.z`, the API is considered
+  unstable — breaking changes bump MINOR, and `0.x → 1.0.0` declares first stable API.
+
+**Branch model (classic git-flow, plain git — no git-flow CLI needed):**
+
+| Branch | Purpose | Branches from | Merges into |
+|--------|---------|---------------|-------------|
+| `main` | stable, tagged releases only | — | — |
+| `develop` | integration branch (base for daily work) | `main` | — |
+| `feature/<name>` | features / fixes | `develop` | `develop` |
+| `release/<x.y.z>` | release stabilization + version bump | `develop` | `main` **and** `develop` |
+| `hotfix/<x.y.z>` | urgent production fixes | `main` | `main` **and** `develop` |
+
+**Version bumps happen ONLY on `release/*` or `hotfix/*` branches. Tags (`vX.Y.Z`,
+annotated) are created ONLY on `main`.** Commits follow Conventional Commits
+(`feat(...)`, `fix(...)`, `chore(release): x.y.z`). Record changes in `CHANGELOG.md`
+under `[Unreleased]`, then rename to the version + date on the release branch.
+
+**Cut a release:**
+```bash
+git switch develop && git switch -c release/0.2.0
+# bump __version__ in pawlia/__init__.py; finalize CHANGELOG.md
+git commit -am "chore(release): 0.2.0"
+git switch main && git merge --no-ff release/0.2.0
+git tag -a v0.2.0 -m "PawLia 0.2.0"
+git switch develop && git merge --no-ff release/0.2.0
+git branch -d release/0.2.0
+git push origin main develop --tags
+```
+**Hotfix:** same shape, branch from `main`, PATCH bump, merge back into both `main`
+and `develop`.
+
+**Never commit, tag, or push without an explicit instruction from the user.**

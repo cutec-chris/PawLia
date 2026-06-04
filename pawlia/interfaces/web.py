@@ -628,11 +628,13 @@ async def start_web(app: "App", cfg: Dict) -> None:
             return _unauth()
 
         import aiohttp as _aiohttp
+        from pawlia.utils import PAWLIA_USER_AGENT
+        _ua_headers = {"User-Agent": PAWLIA_USER_AGENT}
 
         ollama_base = "http://localhost:11434"
         # 1) Check connectivity
         try:
-            async with _aiohttp.ClientSession() as sess:
+            async with _aiohttp.ClientSession(headers=_ua_headers) as sess:
                 async with sess.get(f"{ollama_base}/api/tags", timeout=_aiohttp.ClientTimeout(total=5)) as r:
                     if r.status != 200:
                         return web.json_response({"error": "Ollama nicht erreichbar", "phase": "connect"}, status=502)
@@ -642,7 +644,7 @@ async def start_web(app: "App", cfg: Dict) -> None:
         # 2) Pull model (this can take a while)
         model_name = "qwen3.5:latest"
         try:
-            async with _aiohttp.ClientSession() as sess:
+            async with _aiohttp.ClientSession(headers=_ua_headers) as sess:
                 async with sess.post(
                     f"{ollama_base}/api/pull",
                     json={"name": model_name},

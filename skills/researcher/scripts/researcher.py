@@ -50,7 +50,10 @@ _SESSION_DIR = (
 
 sys.path.insert(0, str(_PROJECT_ROOT))
 
-USER_AGENT = "pawlia-researcher/1.0"
+# Browser-emulating UA for web page fetches. Configurable via the top-level
+# ``web_user_agent`` config key; falls back to a current-Chrome string.
+from pawlia.utils import web_user_agent as _web_user_agent  # noqa: E402
+USER_AGENT = _web_user_agent()
 
 # Boilerplate filters for _scrape_and_save.
 # Pages matching these are not worth keeping: the LLM downstream just sees
@@ -136,11 +139,13 @@ async def _embed(texts: list[str]) -> list[list[float]]:
     if not provider or not model:
         raise RuntimeError("no embedding config")
 
+    from pawlia.utils import PAWLIA_USER_AGENT
     if provider == "ollama":
         url = f"{host.rstrip('/')}/api/embed"
         payload = json.dumps({"model": model, "input": texts}).encode()
         req = _urllib.Request(url, data=payload,
-                              headers={"Content-Type": "application/json"},
+                              headers={"Content-Type": "application/json",
+                                       "User-Agent": PAWLIA_USER_AGENT},
                               method="POST")
         def _do():
             with _urllib.urlopen(req, timeout=timeout) as resp:
@@ -150,7 +155,8 @@ async def _embed(texts: list[str]) -> list[list[float]]:
         api_key = cfg.get("embedding_api_key", "")
         url = f"{base.rstrip('/')}/embeddings"
         payload = json.dumps({"model": model, "input": texts}).encode()
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json",
+                   "User-Agent": PAWLIA_USER_AGENT}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         req = _urllib.Request(url, data=payload, headers=headers, method="POST")

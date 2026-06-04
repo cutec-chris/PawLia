@@ -61,10 +61,12 @@ async def _get_model_context_length(cfg: dict) -> int:
     else:
         try:
             body = json.dumps({"model": model}).encode()
+            from pawlia.utils import PAWLIA_USER_AGENT
             req = urllib.request.Request(
                 f"{host.rstrip('/')}/api/show",
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json",
+                         "User-Agent": PAWLIA_USER_AGENT},
                 method="POST",
             )
             from pawlia.utils import run_sync_in_thread
@@ -411,7 +413,7 @@ class DreamWikiBackend:
         )
 
         content = await _llm_call(self._cfg, system_prompt, user_prompt,
-                                  json_mode=True)
+                                  json_mode="array")
         actions = _parse_json_array(content)
 
         if actions is _SENTINEL:
@@ -569,7 +571,7 @@ class DreamWikiBackend:
         )
 
         content = await _llm_call(self._cfg, system_prompt, user_prompt,
-                                  json_mode=True)
+                                  json_mode="object")
 
         # Try parsing as a single JSON object first
         data = {}

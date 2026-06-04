@@ -367,11 +367,13 @@ class SimpleVectorBackend(RagBackend):
         if self._llm_busy and self._llm_busy():
             raise RuntimeError("LLM busy — deferring memory embedding")
 
+        from pawlia.utils import PAWLIA_USER_AGENT
         if provider == "ollama":
             url = f"{host.rstrip('/')}/api/embed"
             payload = _json.dumps({"model": model, "input": texts}).encode()
             req = _urllib.Request(url, data=payload,
-                                  headers={"Content-Type": "application/json"},
+                                  headers={"Content-Type": "application/json",
+                                           "User-Agent": PAWLIA_USER_AGENT},
                                   method="POST")
             def _do():
                 with _urllib.urlopen(req, timeout=timeout) as resp:
@@ -390,7 +392,8 @@ class SimpleVectorBackend(RagBackend):
             api_key = cfg.get("embedding_api_key", "")
             url = f"{base_url.rstrip('/')}/embeddings"
             payload = _json.dumps({"model": model, "input": texts}).encode()
-            headers = {"Content-Type": "application/json"}
+            headers = {"Content-Type": "application/json",
+                       "User-Agent": PAWLIA_USER_AGENT}
             if api_key:
                 headers["Authorization"] = f"Bearer {api_key}"
             req = _urllib.Request(url, data=payload, headers=headers, method="POST")

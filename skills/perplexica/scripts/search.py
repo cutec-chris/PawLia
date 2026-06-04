@@ -13,6 +13,14 @@ import requests
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+# Identify ourselves on the search-API calls (not a browser-emulating fetch).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
+try:
+    from pawlia.utils import PAWLIA_USER_AGENT as _UA
+except Exception:
+    _UA = "PawLia/0.0.0+unknown"  # degraded path: pawlia not importable
+
 
 VALID_FOCUS_MODES = {"webSearch", "academicSearch", "writingAssistant", "wolframAlphaSearch", "youtubeSearch", "redditSearch"}
 
@@ -77,7 +85,8 @@ def _save_cache(url: str, chat_model: dict, embedding_model: dict):
 
 def get_providers(url: str, timeout: int = 10) -> list[dict]:
     """Fetch available providers and models from Vane/Perplexica."""
-    resp = requests.get(f"{url.rstrip('/')}/api/providers", timeout=timeout)
+    resp = requests.get(f"{url.rstrip('/')}/api/providers", timeout=timeout,
+                        headers={"User-Agent": _UA})
     resp.raise_for_status()
     data = resp.json()
     return data.get("providers", [])
@@ -213,7 +222,8 @@ def _search_single(query: str, base_url: str, sources: list[str], focus_mode: st
     if embedding_model:
         payload["embeddingModel"] = embedding_model
 
-    resp = requests.post(f"{base_url}/api/search", json=payload, timeout=timeout)
+    resp = requests.post(f"{base_url}/api/search", json=payload, timeout=timeout,
+                         headers={"User-Agent": _UA})
     resp.raise_for_status()
     data = resp.json()
 

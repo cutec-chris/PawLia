@@ -58,7 +58,9 @@ class HermesBackend:
             "store": self.store,
         }
 
-        headers = {"Content-Type": "application/json"}
+        from pawlia.utils import PAWLIA_USER_AGENT
+        headers = {"Content-Type": "application/json",
+                   "User-Agent": PAWLIA_USER_AGENT}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
