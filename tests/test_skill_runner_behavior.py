@@ -169,11 +169,49 @@ async def test_workflow_execute_runs_a_block_and_returns_its_output(tool_registr
     assert "workflow_out" in result
 
 
-def test_workflow_block_tools_disallow_extra_arguments():
+def test_workflow_block_tools_accept_extra_arguments():
+    """The schema stays strict on *required* params but lets the LLM pass
+    extra keys without 400ing the whole request. Hallucinated args
+    (path/depth on a tool that takes none) get silently ignored by the
+    command-template substitution; missing required args still 400."""
     executor = WorkflowExecutor(tool_registry=ToolRegistry(), context={}, llm=ScriptedLLM())
     workflow = Workflow(id="workflow_a", trigger="A", building_blocks=[
         BuildingBlock(id="step_a", command="echo {term}", description="A")])
 
     tools = executor._blocks_to_tools(workflow)
 
-    assert tools[0]["function"]["parameters"]["additionalProperties"] is False
+    params = tools[0]["function"]["parameters"]
+    assert "additionalProperties" not in params
+    assert params["required"] == ["term"]
+    assert "term" in params["properties"]
+
+
+def test_workflow_block_tools_keep_required_for_missing_args():
+    """Even with the lenient extras policy, required params are still
+    enforced so the provider rejects a tool call that's missing them."""
+    executor = WorkflowExecutor(tool_registry=ToolRegistry(), context={}, llm=ScriptedLLM())
+    workflow = Workflow(id="workflow_a", trigger="A", building_blocks=[
+        BuildingBlock(id="step_a", command="echo {term}", description="A")])
+
+    tools = executor._blocks_to_tools(workflow)
+
+    assert tools[0]["function"]["parameters"]["required"] == ["term"]
+
+
+def test_workflow_execute_ignores_hallucinated_extra_arguments(tool_registry):
+    """_substitute must be a no-op for keys that aren't placeholders in
+    the command template — that's what makes the lenient
+    additionalProperties schema safe: silently ignore, don't fail."""
+    llm = ScriptedLLM().on("go", Reply(tool_calls=[{"name": "step_a", "args": {}}]))
+    executor = WorkflowExecutor(tool_registry=tool_registry, context={}, llm=llm)
+
+    # Hallucinated args (path/depth) are not placeholders, so they
+    # must not appear in the substituted command.
+    substituted = executor._substitute("echo {term}",
+                                       {"term": "ok", "path": "x", "depth": 1})
+    assert substituted == "echo ok"
+
+    # And on a template without that placeholder, all extras are dropped.
+    substituted = executor._substitute("echo workflow_out",
+                                       {"path": "x", "depth": 1})
+    assert substituted == "echo workflow_out"
