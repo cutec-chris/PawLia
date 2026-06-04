@@ -118,6 +118,53 @@ def make_chat_agent(memory, session, real_skills):
     return _make
 
 
+# ---- HTTP double -----------------------------------------------------------
+@pytest.fixture
+def fake_urlopen(monkeypatch):
+    """Patch ``urllib.request.urlopen`` and capture the outgoing request.
+
+    Returns a builder ``install(response) -> captured``. ``response`` may be a
+    dict/list (JSON-encoded for you), a ``str`` or raw ``bytes``. ``captured``
+    is a dict populated on every call with ``body`` (parsed JSON request body
+    or ``None``), ``url`` and ``ua`` (the User-Agent header). Collapses the
+    per-test ``_fake_urlopen``/``_Resp`` boilerplate the provider tests share.
+    """
+    import json as _json
+    import urllib.request
+
+    captured: dict = {}
+
+    def install(response):
+        if isinstance(response, (dict, list)):
+            payload = _json.dumps(response).encode()
+        elif isinstance(response, str):
+            payload = response.encode()
+        else:
+            payload = response
+
+        def _fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["ua"] = req.get_header("User-agent")
+            captured["body"] = _json.loads(req.data.decode()) if req.data else None
+
+            class _Resp:
+                def read(self):
+                    return payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+            return _Resp()
+
+        monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+        return captured
+
+    return install
+
+
 @pytest.fixture
 def make_skill_runner(tool_registry, session_dir):
     def _make(*, llm, skill=None, name="probe", instruction="Do the task.", **kwargs):
