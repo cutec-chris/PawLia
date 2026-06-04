@@ -96,7 +96,6 @@ class WorkflowExecutor:
                     "parameters": {
                         "type": "object",
                         "properties": {},
-                        "additionalProperties": False,
                     },
                 },
             }
@@ -294,7 +293,16 @@ class WorkflowExecutor:
     # ------------------------------------------------------------------
 
     def _blocks_to_tools(self, workflow: Workflow) -> List[Dict[str, Any]]:
-        """Convert building blocks to OpenAI tool specs."""
+        """Convert building blocks to OpenAI tool specs.
+
+        Schema is strict on the *required* side (provider rejects missing
+        required params) but lenient on the *extras* side. The LLM often
+        adds hallucinated arguments (e.g. ``path``/``depth`` for a tool
+        that takes none) and a strict ``additionalProperties: false``
+        turns that into a 400 that knocks the whole request over to a
+        fallback model. The executor silently ignores keys not present
+        in the command template, so accepting the extra args is safe.
+        """
         tools = []
         config_params = self._skill_config_params()
         for block in workflow.building_blocks:
@@ -318,7 +326,6 @@ class WorkflowExecutor:
                         "type": "object",
                         "properties": properties,
                         "required": param_names,
-                        "additionalProperties": False,
                     },
                 },
             })

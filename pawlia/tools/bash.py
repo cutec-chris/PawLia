@@ -10,6 +10,74 @@ from typing import Any, Dict, Optional
 from pawlia.tools.base import Tool
 
 
+# Tools commonly missing in the PawLia container (alpine + busybox) plus
+# GNU-grep flags that BusyBox grep doesn't support. Surfaced as a hint to
+# the LLM so it can recover in one step instead of trying every variant.
+_MISSING_TOOL_HINTS = {
+    "curl": (
+        "curl is not installed in this sandbox. "
+        "Use 'wget <url> -O <file>' or python -c "
+        "'import urllib.request; urllib.request.urlretrieve(\"<url>\", \"<file>\")'."
+    ),
+    "wget": (
+        "wget is not installed in this sandbox. "
+        "Use python -c 'import urllib.request; urllib.request.urlretrieve(...)'."
+    ),
+    "bash": (
+        "bash is not installed; only /bin/sh (busybox ash) is available. "
+        "Avoid bashisms like '[[ ]]', arrays, '{a,b}' brace expansion, "
+        "'source', process substitution. Use POSIX sh syntax."
+    ),
+    "ssh-keygen": (
+        "ssh-keygen is not installed. Use python to generate keys, e.g. "
+        "python -c 'from cryptography.hazmat.primitives.asymmetric import rsa; ...'."
+    ),
+    "tar": (
+        "tar is missing or limited in busybox. Use python's tarfile module instead."
+    ),
+}
+
+_GNU_GREP_HINT = (
+    "grep in this sandbox is BusyBox and does not support GNU-only flags "
+    "(--include, --exclude, --exclude-dir, -P/--perl-regexp). "
+    "Use 'find <dir> -name <glob> -exec grep -E <pattern> {{}} +' to filter "
+    "paths, or python -c 'import re; ...' for PCRE / multiline / lookbehind."
+)
+
+
+def _command_uses_gnu_grep(cmd: str) -> bool:
+    """True if the command passes GNU-grep-only flags to grep."""
+    for flag in ("--include", "--exclude", "--exclude-dir",
+                 "--perl-regexp"):
+        if re.search(rf"(?:^|[\s|;&<>])grep[^\n|;&]*\s{re.escape(flag)}\b", cmd):
+            return True
+    # -P is short, only match when preceded by whitespace or at start.
+    if re.search(r"(?:^|[\s|;&<>])grep[^\n|;&]*\s-P\b", cmd):
+        return True
+    return False
+
+
+def _missing_tool_hint(error_msg: str) -> Optional[str]:
+    """If the error indicates a missing executable, return a hint; else None.
+
+    Catches patterns like 'sh: curl: not found', 'bash: foo: command not
+    found', and the German busybox variant '...: Kommando nicht gefunden'.
+    The inner tool name (group 2) is preferred over the shell prefix
+    (group 1) so 'sh: curl: not found' resolves to the curl hint, not sh.
+    """
+    if not error_msg:
+        return None
+    m = re.search(
+        r"(?:^|[\s;|])([A-Za-z_][\w.-]*): (?:([A-Za-z_][\w.-]*): )?"
+        r"(?:not found|command not found|Kommando nicht gefunden)\b",
+        error_msg,
+    )
+    if m:
+        tool = m.group(2) or m.group(1)
+        return _MISSING_TOOL_HINTS.get(tool)
+    return None
+
+
 class BashTool(Tool):
     name = "bash"
     description = "Execute a shell command or script. Use to run skill scripts from the scripts/ directory."
@@ -61,6 +129,12 @@ class BashTool(Tool):
         if not cmd:
             return "Error: No command provided."
 
+        # Pre-check: GNU-grep flags that BusyBox grep does not support. The
+        # command would fail with a cryptic "unrecognized option" message,
+        # so we surface the limitation upfront.
+        if _command_uses_gnu_grep(cmd):
+            return _GNU_GREP_HINT
+
         cwd = context.get("cwd") if context else None
         cwd = self._validate_cwd(cwd, context)
 
@@ -96,7 +170,11 @@ class BashTool(Tool):
             out = r.stdout.strip()
             err = r.stderr.strip()
             if r.returncode != 0:
-                return f"Error (exit {r.returncode}): {err or out}"
+                msg = err or out
+                hint = _missing_tool_hint(msg)
+                if hint:
+                    return f"Error (exit {r.returncode}): {msg}\nHint: {hint}"
+                return f"Error (exit {r.returncode}): {msg}"
             return out or "(no output)"
 
         def _to_powershell(command: str) -> str:

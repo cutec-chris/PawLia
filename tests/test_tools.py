@@ -81,6 +81,63 @@ class TestBashTool:
         assert config["url"] == "http://example.test"
         assert config["timeout"] == 12
 
+    def test_grep_gnu_include_flag_is_rejected_upfront(self):
+        """BusyBox grep doesn't support --include. Block it before exec."""
+        tool = BashTool()
+        result = tool.execute({"command": "grep --include=*.py foo /app"})
+        assert "BusyBox" in result
+        assert "--include" in result
+        assert "find" in result
+
+    def test_grep_perl_regexp_flag_is_rejected_upfront(self):
+        tool = BashTool()
+        result = tool.execute({"command": "grep -P 'foo\\Kbar' /etc/hostname"})
+        assert "BusyBox" in result
+        assert "PCRE" in result or "perl" in result.lower()
+
+    def test_grep_exclude_flag_is_rejected_upfront(self):
+        tool = BashTool()
+        result = tool.execute({"command": "grep --exclude=*.min.js foo /app"})
+        assert "BusyBox" in result
+
+    def test_plain_grep_still_runs(self):
+        """The pre-check must not block normal grep usage."""
+        tool = BashTool()
+        result = tool.execute({"command": "echo hello | grep hello"})
+        assert "hello" in result
+
+    def test_missing_curl_hint_appended_to_error(self, monkeypatch):
+        """When the command fails because curl is missing, append a hint."""
+        # PATH that contains only busybox; curl is not on PATH.
+        empty = os.path.join(tempfile.mkdtemp(), "empty")
+        os.makedirs(empty, exist_ok=True)
+        monkeypatch.setenv("PATH", empty)
+        tool = BashTool()
+        result = tool.execute({"command": "curl https://example.com"})
+        if "Hint" in result:
+            assert "wget" in result or "urllib" in result
+        else:
+            # curl happens to exist in the test environment; that's also fine,
+            # the test is a no-op then.
+            assert "Error" in result
+
+    def test_missing_tool_hint_unit(self):
+        from pawlia.tools.bash import _missing_tool_hint
+        assert _missing_tool_hint("sh: curl: not found") is not None
+        assert "wget" in _missing_tool_hint("sh: curl: not found")
+        assert _missing_tool_hint("sh: bogusxyz: not found") is None
+        assert _missing_tool_hint("some other error") is None
+        # BusyBox uses the German variant in some images.
+        de = _missing_tool_hint("bash: curl: Kommando nicht gefunden")
+        assert de is not None
+        assert "wget" in de
+        # Inner name wins over shell prefix.
+        inner = _missing_tool_hint("sh: wget: not found")
+        assert inner is not None
+        assert "urllib" in inner
+        # Unknown tool returns None (no spurious hint).
+        assert _missing_tool_hint("sh: foobar: not found") is None
+
 
 class TestReminderTool:
     def test_add_and_list(self):

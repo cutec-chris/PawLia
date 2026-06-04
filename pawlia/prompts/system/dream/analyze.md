@@ -41,7 +41,12 @@ Each page has:
 
 ## Output format
 
-Respond with ONLY a raw JSON array — no markdown, no code fences, no explanation, just the array:
+**CRITICAL FORMATTING RULE:** Your entire response must be a single valid JSON array.
+The first character of your response MUST be `[` and the last MUST be `]`.
+Do not write any text before the array (no "Here is the JSON:", no greeting, no
+explanation). Do not write any text after the array. Do not wrap the array in
+markdown code fences. The response will be rejected if it cannot be parsed as a
+JSON array. Example of the exact shape to return:
 
 [
   {

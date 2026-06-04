@@ -59,12 +59,13 @@ python <scripts_dir>/../organizer/scripts/organizer.py add-job \
   --instruction "<instruction>"
 ```
 
-**Schedule formats:**
-- `"16:00"` — daily at 16:00
-- `"interval:5m"` — every 5 minutes
-- `"interval:1h"` — every hour
-- `"weekly:0:09:00"` — weekly Monday at 09:00 (0=Mon..6=Sun)
-- `"monthly:1:10:00"` — monthly on the 1st at 10:00
+**Schedule-Formate:**
+- `"16:00"` — täglich um 16:00
+- `"interval:5m"` — alle 5 Minuten (m=Minuten, h=Stunden, d=Tage)
+- `"interval:1h"` — jede Stunde
+- `"weekly:0:09:00"` — wöchentlich Montag 09:00 (0=Mo..6=So)
+- `"monthly:1:10:00"` — monatlich am 1. um 10:00
+- `"30 8 * * 1,3"` — Cron-Syntax: Minute 30, Stunde 8, Mo+Mi (5 Felder mit Leerzeichen)
 
 **Instruction examples:**
 - Simple: `"Lies die Datei workspace/tasks.md und zeige die offenen Aufgaben"`

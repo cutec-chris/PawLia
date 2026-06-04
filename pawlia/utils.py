@@ -200,8 +200,15 @@ def find_similar_slug(
     return best_slug if best_ratio >= threshold else None
 
 
-async def rag_llm_call(cfg: dict, system_prompt: str, user_prompt: str) -> str:
-    """Make a single LLM call for RAG backends and return the stripped content."""
+async def rag_llm_call(cfg: dict, system_prompt: str, user_prompt: str,
+                      json_mode: bool = False) -> str:
+    """Make a single LLM call for RAG backends and return the stripped content.
+
+    When json_mode is True, the request asks the provider for JSON output
+    (Ollama ``format: "json"``, OpenAI-compatible ``response_format: json_object``).
+    This is a hint, not a guarantee — the parser still tolerates prose-wrapped
+    JSON so older or non-conforming models keep working.
+    """
     import urllib.request
 
     provider = cfg.get("rag_provider", cfg.get("embedding_provider", "ollama"))
@@ -222,6 +229,8 @@ async def rag_llm_call(cfg: dict, system_prompt: str, user_prompt: str) -> str:
                 "temperature": 0.1,
             },
         }
+        if json_mode:
+            payload["format"] = "json"
     else:
         base = cfg.get("rag_base_url", cfg.get("embedding_base_url", host))
         url = f"{base.rstrip('/')}/chat/completions"
@@ -233,6 +242,8 @@ async def rag_llm_call(cfg: dict, system_prompt: str, user_prompt: str) -> str:
             ],
             "temperature": 0.1,
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
 
     body = json.dumps(payload).encode()
     headers: dict[str, str] = {"Content-Type": "application/json"}

@@ -100,6 +100,18 @@ from pawlia.utils import rag_llm_call as _llm_call
 
 _SENTINEL = object()
 
+# Phrase-prefixes the LLM often adds in front of its JSON. Trim them so the
+# remaining content is more likely to be a bare JSON array.
+_JSON_PREAMBLE_RE = re.compile(
+    r"^(?:"
+    r"Hier (?:ist|sind) (?:der|die|das) JSON[^:]*:"
+    r"|Here(?:'s| is) (?:the )?JSON[^:]*:"
+    r"|Sure[,!]?\s*(?:here(?:'s| is)[^:]*)?:"
+    r"|(?:JSON|Answer|Response|Output|Antwort|Ergebnis)\s*:\s*"
+    r")\s*",
+    re.IGNORECASE,
+)
+
 
 def _parse_json_array(content: str):
     """Try to parse a JSON array from LLM output, tolerating wrapping.
@@ -107,9 +119,16 @@ def _parse_json_array(content: str):
     Returns the parsed list, or _SENTINEL if no JSON array could be found.
     An empty list [] is a valid (successful) parse result.
     """
+    if not content or not content.strip():
+        return _SENTINEL
+
     # Strip code fences: ```json ... ``` or ``` ... ```
-    stripped = re.sub(r"```(?:json)?\s*(.*?)\s*```", r"\1", content, flags=re.DOTALL).strip()
-    for candidate in (stripped, content):
+    stripped = re.sub(r"```(?:json)?\s*(.*?)\s*```", r"\1",
+                      content, flags=re.DOTALL)
+    # Drop common preambles the model tacks on ("Here is the JSON:", etc.)
+    stripped = _JSON_PREAMBLE_RE.sub("", stripped).strip()
+
+    for candidate in (stripped, content.strip()):
         try:
             data = json.loads(candidate)
             if isinstance(data, list):
@@ -122,6 +141,16 @@ def _parse_json_array(content: str):
                 data = json.loads(m.group())
                 if isinstance(data, list):
                     return data
+            except json.JSONDecodeError:
+                pass
+        # Last resort: the model returned a single object where we wanted
+        # an array — wrap it so callers still get a list.
+        m = re.search(r"\{.*\}", candidate, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group())
+                if isinstance(data, dict):
+                    return [data]
             except json.JSONDecodeError:
                 pass
     return _SENTINEL
@@ -381,7 +410,8 @@ class DreamWikiBackend:
             f"## Gesprächsprotokoll\n{text}"
         )
 
-        content = await _llm_call(self._cfg, system_prompt, user_prompt)
+        content = await _llm_call(self._cfg, system_prompt, user_prompt,
+                                  json_mode=True)
         actions = _parse_json_array(content)
 
         if actions is _SENTINEL:
@@ -538,7 +568,8 @@ class DreamWikiBackend:
             + "\n".join(page_summaries)
         )
 
-        content = await _llm_call(self._cfg, system_prompt, user_prompt)
+        content = await _llm_call(self._cfg, system_prompt, user_prompt,
+                                  json_mode=True)
 
         # Try parsing as a single JSON object first
         data = {}

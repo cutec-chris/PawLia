@@ -28,6 +28,13 @@ from datetime import date, datetime, timedelta
 
 import yaml
 
+# Add the project root to the Python path so we can import pawlia modules
+# __file__ = skills/organizer/scripts/organizer.py -> up 4 levels to project root
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, project_root)
+
+from pawlia.automation import validate_schedule as _validate_schedule
+
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -597,7 +604,13 @@ def _find_tasks_in_workspace(workspace_dir: str) -> list[tuple[dict, str]]:
 
     Returns list of (task_dict, source_file) tuples.
     """
-    results: list[tuple[dict, str]] = []
+    return [(t, rel) for t, rel, _ln in _iter_workspace_note_tasks(workspace_dir)]
+
+
+def _iter_workspace_note_tasks(workspace_dir: str):
+    """Yield (task_dict, source_file_relpath, line_no) for every task line in workspace notes."""
+    if not os.path.isdir(workspace_dir):
+        return
     for root, _dirs, files in os.walk(workspace_dir):
         # Skip calendar/ directory
         if root.endswith("calendar") or "/calendar/" in root:
@@ -616,10 +629,94 @@ def _find_tasks_in_workspace(workspace_dir: str) -> list[tuple[dict, str]]:
                         task = _line_to_task(line)
                         if task:
                             task["id"] = _make_task_id(rel, line_no)
-                            results.append((task, rel))
+                            yield task, rel, line_no
             except Exception:
                 continue
-    return results
+
+
+def _scan_file_for_id(file_path: str, rel: str, task_id: str) -> int | None:
+    """Return the current line number whose ID matches, or None.
+
+    Re-derives the ID for every task line so the result reflects the *current*
+    file state (line numbers can shift if other tasks were edited above).
+    """
+    try:
+        with open(file_path, encoding="utf-8") as f:
+            for line_no, line in enumerate(f):
+                if _make_task_id(rel, line_no) != task_id:
+                    continue
+                if _line_to_task(line) is not None:
+                    return line_no
+    except Exception:
+        return None
+    return None
+
+
+def _find_task_location_by_id(user_id: str, session_dir: str, task_id: str):
+    """Find a task by its stable ID across tasks.md and all workspace note files.
+
+    Returns (file_path, rel, line_no) or (None, None, None) if not found.
+    The line number reflects the *current* file state, not the state at
+    list-tasks time.
+    """
+    if not task_id:
+        return None, None, None
+
+    tasks_md = _tasks_path(user_id, session_dir)
+    if os.path.exists(tasks_md):
+        line_no = _scan_file_for_id(tasks_md, "tasks.md", task_id)
+        if line_no is not None:
+            return tasks_md, "tasks.md", line_no
+
+    workspace = _workspace_dir(user_id, session_dir)
+    if os.path.isdir(workspace):
+        for root, _dirs, files in os.walk(workspace):
+            if root.endswith("calendar") or "/calendar/" in root:
+                continue
+            for fname in files:
+                if not fname.endswith(".md"):
+                    continue
+                if fname == "tasks.md" and root == workspace:
+                    continue
+                path = os.path.join(root, fname)
+                rel = os.path.relpath(path, workspace)
+                line_no = _scan_file_for_id(path, rel, task_id)
+                if line_no is not None:
+                    return path, rel, line_no
+
+    return None, None, None
+
+
+def _toggle_complete_in_file(file_path: str, line_no: int) -> None:
+    """Toggle the [ ] checkbox on the given line of the file to [x] (idempotent)."""
+    with open(file_path, encoding="utf-8") as f:
+        lines = f.readlines()
+    if line_no < 0 or line_no >= len(lines):
+        raise ValueError(f"Line {line_no} not found in {file_path}")
+    stripped = lines[line_no].rstrip("\n")
+    m = _TASK_RE.match(stripped)
+    if not m:
+        raise ValueError(f"Line {line_no} of {file_path} is not a task line")
+    if m.group(1).lower() == "x":
+        return
+    rest = m.group(2)
+    if "\u2705" not in rest:
+        today = datetime.now().strftime("%Y-%m-%d")
+        rest = f"{rest} \u2705 {today}"
+    lines[line_no] = f"- [x] {rest}\n"
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+
+def _delete_line_in_file(file_path: str, line_no: int) -> None:
+    """Remove the given line from the file."""
+    with open(file_path, encoding="utf-8") as f:
+        lines = f.readlines()
+    if line_no < 0 or line_no >= len(lines):
+        raise ValueError(f"Line {line_no} not found in {file_path}")
+    lines.pop(line_no)
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -866,44 +963,51 @@ def cmd_list_tasks(args) -> None:
 
 
 def cmd_complete_task(args) -> None:
+    file_path, _rel, line_no = _find_task_location_by_id(
+        args.user_id, args.session_dir, args.task_id
+    )
+    if file_path is not None:
+        _toggle_complete_in_file(file_path, line_no)
+        _out({"success": True, "message": "Task marked as completed."})
+        return
+
+    # Fall back to title substring match in tasks.md (legacy).
     path = _tasks_path(args.user_id, args.session_dir)
     tasks = _read_tasks_md(path)
-    found = False
     for t in tasks:
-        tid = t.get("id", "")
-        if tid and tid == args.task_id:
+        if (t.get("title", "").lower() == args.task_id.lower()
+                or args.task_id.lower() in t.get("title", "").lower()):
             t["status"] = "completed"
             t["completed_at"] = datetime.now().strftime("%Y-%m-%d")
-            found = True
-            break
-    if not found:
-        for t in tasks:
-            if t.get("title", "").lower() == args.task_id.lower() or args.task_id.lower() in t.get("title", "").lower():
-                t["status"] = "completed"
-                t["completed_at"] = datetime.now().strftime("%Y-%m-%d")
-                found = True
-                break
-    if not found:
-        _out({"success": False, "error": f"Task not found: {args.task_id}"})
-        return
-    _write_tasks_md(path, tasks)
-    _out({"success": True, "message": "Task marked as completed."})
+            _write_tasks_md(path, tasks)
+            _out({"success": True, "message": "Task marked as completed."})
+            return
+
+    _out({"success": False, "error": f"Task not found: {args.task_id}"})
 
 
 def cmd_delete_task(args) -> None:
+    file_path, _rel, line_no = _find_task_location_by_id(
+        args.user_id, args.session_dir, args.task_id
+    )
+    if file_path is not None:
+        _delete_line_in_file(file_path, line_no)
+        if file_path == _tasks_path(args.user_id, args.session_dir):
+            remaining = sum(1 for _ in _read_tasks_md(file_path))
+        else:
+            with open(file_path, encoding="utf-8") as f:
+                remaining = sum(1 for line in f if _line_to_task(line))
+        _out({"success": True, "message": "Task deleted.", "remaining": remaining})
+        return
+
+    # Fall back to title substring match in tasks.md (legacy).
     path = _tasks_path(args.user_id, args.session_dir)
     tasks = _read_tasks_md(path)
     before = len(tasks)
-    # Try exact ID match first
     tasks = [t for t in tasks if not (
-        t.get("id", "") and t["id"] == args.task_id
+        t.get("title", "").lower() == args.task_id.lower()
+        or args.task_id.lower() in t.get("title", "").lower()
     )]
-    if len(tasks) == before:
-        # Fall back to title substring match
-        tasks = [t for t in tasks if not (
-            t.get("title", "").lower() == args.task_id.lower()
-            or args.task_id.lower() in t.get("title", "").lower()
-        )]
     if len(tasks) == before:
         _out({"success": False, "error": f"Task not found: {args.task_id}"})
         return
@@ -1032,6 +1136,10 @@ def cmd_delete_reminder(args) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_add_job(args) -> None:
+    ok, err = _validate_schedule(args.schedule)
+    if not ok:
+        _out({"success": False, "error": f"Ungültiger Schedule: {err}"})
+        return
     if args.no_notify:
         notify: bool | str = False
     elif args.notify_on_error:
