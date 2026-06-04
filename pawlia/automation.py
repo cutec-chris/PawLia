@@ -434,6 +434,9 @@ class JobRunner:
                 return False
             return _in_window(hour, minute) and _not_run_recently()
 
+        if _is_cron(schedule):
+            return _cron_matches(schedule, now) and _not_run_recently()
+
         try:
             parts = schedule.split(":")
             target_hour = int(parts[0])
@@ -442,6 +445,208 @@ class JobRunner:
             return False
 
         return _in_window(target_hour, target_minute) and _not_run_recently()
+
+
+def _is_cron(schedule: str) -> bool:
+    parts = schedule.split()
+    return len(parts) == 5 and all(
+        p.replace("*", "").replace(",", "").replace("-", "").replace("/", "").isdigit()
+        or p in ("*", "")
+        for p in parts
+    )
+
+
+def _cron_field_matches(field: str, value: int, low: int, high: int) -> bool:
+    if field == "*":
+        return True
+
+    if field.startswith("*/"):
+        step = int(field[2:])
+        if step <= 0:
+            return False
+        return value % step == 0
+
+    for part in field.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo_str, hi_str = part.split("-", 1)
+            try:
+                lo, hi = int(lo_str), int(hi_str)
+                if lo <= value <= hi:
+                    return True
+            except ValueError:
+                continue
+        elif part == "*":
+            return True
+        else:
+            try:
+                if int(part) == value:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def _cron_matches(schedule: str, now: datetime) -> bool:
+    parts = schedule.split()
+    if len(parts) != 5:
+        return False
+    try:
+        return (
+            _cron_field_matches(parts[0], now.minute, 0, 59)
+            and _cron_field_matches(parts[1], now.hour, 0, 23)
+            and _cron_field_matches(parts[2], now.day, 1, 31)
+            and _cron_field_matches(parts[3], now.month, 1, 12)
+            and _cron_field_matches(parts[4], (now.weekday() + 1) % 7, 0, 6)
+        )
+    except ValueError:
+        return False
+
+
+_CRON_FIELD_RE = re.compile(r"^(\*/\d+|[0-9*,/\-]+)$")
+
+
+def _cron_field_values_in_range(field: str, low: int, high: int) -> bool:
+    """Return True if every numeric value in `field` lies in [low, high]."""
+    for part in field.split(","):
+        part = part.strip()
+        if not part or part == "*":
+            continue
+        if part.startswith("*/"):
+            try:
+                step = int(part[2:])
+            except ValueError:
+                return False
+            if step <= 0 or step > (high - low + 1):
+                return False
+            continue
+        if "-" in part:
+            try:
+                lo_s, hi_s = part.split("-", 1)
+                lo, hi = int(lo_s), int(hi_s)
+            except ValueError:
+                return False
+            if not (low <= lo <= high) or not (low <= hi <= high) or lo > hi:
+                return False
+            continue
+        try:
+            v = int(part)
+        except ValueError:
+            return False
+        if not (low <= v <= high):
+            return False
+    return True
+
+
+def _validate_cron_field(field: str, low: int, high: int, name: str) -> None:
+    if not _CRON_FIELD_RE.match(field.strip()):
+        raise ValueError(f"Cron {name} field '{field}' is invalid")
+    if not _cron_field_values_in_range(field.strip(), low, high):
+        raise ValueError(
+            f"Cron {name} field '{field}' contains a value outside {low}-{high}"
+        )
+
+
+def validate_schedule(schedule: str) -> tuple[bool, str]:
+    """Validate a schedule string. Returns (is_valid, error_message)."""
+    if not schedule or not schedule.strip():
+        return False, "Schedule ist leer."
+
+    s = schedule.strip()
+
+    if s.startswith("interval:"):
+        try:
+            _parse_offset(f"+{s[len('interval:'):]}")
+            return True, ""
+        except ValueError:
+            return False, (
+                f"Ungültiges Intervall '{s}'. "
+                f"Erlaubte Formate: interval:30m, interval:2h, interval:1d"
+            )
+
+    if s.startswith("weekly:"):
+        parts = s.split(":")
+        if len(parts) != 4:
+            return False, (
+                f"Wöchentlicher Schedule muss weekly:DAY:HH:MM sein "
+                f"(z.B. weekly:0:09:00, 0=Mo..6=So). Bekam: '{s}'"
+            )
+        try:
+            dow, hour, minute = int(parts[1]), int(parts[2]), int(parts[3])
+        except ValueError:
+            return False, (
+                f"Wöchentlicher Schedule muss weekly:DAY:HH:MM sein "
+                f"(z.B. weekly:0:09:00, 0=Mo..6=So). Bekam: '{s}'"
+            )
+        if not (0 <= dow <= 6):
+            return False, f"Wochentag muss 0-6 sein (0=Mo..6=So), nicht {dow}."
+        if not (0 <= hour <= 23):
+            return False, f"Stunde muss 0-23 sein, nicht {hour}."
+        if not (0 <= minute <= 59):
+            return False, f"Minute muss 0-59 sein, nicht {minute}."
+        return True, ""
+
+    if s.startswith("monthly:"):
+        parts = s.split(":")
+        if len(parts) != 4:
+            return False, (
+                f"Monatlicher Schedule muss monthly:DAY:HH:MM sein "
+                f"(z.B. monthly:1:10:00). Bekam: '{s}'"
+            )
+        try:
+            day, hour, minute = int(parts[1]), int(parts[2]), int(parts[3])
+        except ValueError:
+            return False, (
+                f"Monatlicher Schedule muss monthly:DAY:HH:MM sein "
+                f"(z.B. monthly:1:10:00). Bekam: '{s}'"
+            )
+        if not (1 <= day <= 31):
+            return False, f"Tag muss 1-31 sein, nicht {day}."
+        if not (0 <= hour <= 23):
+            return False, f"Stunde muss 0-23 sein, nicht {hour}."
+        if not (0 <= minute <= 59):
+            return False, f"Minute muss 0-59 sein, nicht {minute}."
+        return True, ""
+
+    if _is_cron(s):
+        parts = s.split()
+        try:
+            _validate_cron_field(parts[0], 0, 59, "Minute")
+            _validate_cron_field(parts[1], 0, 23, "Stunde")
+            _validate_cron_field(parts[2], 1, 31, "Tag")
+            _validate_cron_field(parts[3], 1, 12, "Monat")
+            _validate_cron_field(parts[4], 0, 6, "Wochentag")
+            return True, ""
+        except ValueError as e:
+            return False, str(e)
+
+    parts = s.split(":")
+    if 2 <= len(parts) <= 3:
+        try:
+            hour, minute = int(parts[0]), int(parts[1])
+        except ValueError:
+            return False, (
+                f"Unbekanntes Schedule-Format: '{s}'. "
+                f"Erlaubt: HH:MM (täglich), interval:30m, weekly:0:09:00, "
+                f"monthly:1:10:00, oder Cron-Syntax (5 Felder: '* * * * *')"
+            )
+        if not (0 <= hour <= 23):
+            return False, f"Stunde muss 0-23 sein, nicht {hour}."
+        if not (0 <= minute <= 59):
+            return False, f"Minute muss 0-59 sein, nicht {minute}."
+        return True, ""
+
+    return False, (
+        f"Unbekanntes Schedule-Format: '{s}'. "
+        f"Erlaubte Formate:\n"
+        f"  HH:MM          — täglich um diese Uhrzeit (z.B. 16:00)\n"
+        f"  interval:30m   — alle 30 Minuten\n"
+        f"  weekly:0:09:00 — wöchentlich Mo 09:00 (0=Mo..6=So)\n"
+        f"  monthly:1:10:00 — monatlich am 1. um 10:00\n"
+        f"  '* * * * *'    — Cron-Syntax (Minute Stunde Tag Monat Wochentag)"
+    )
 
 
 # ---------------------------------------------------------------------------

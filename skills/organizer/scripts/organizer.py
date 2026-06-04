@@ -28,6 +28,13 @@ from datetime import date, datetime, timedelta
 
 import yaml
 
+# Add the project root to the Python path so we can import pawlia modules
+# __file__ = skills/organizer/scripts/organizer.py -> up 4 levels to project root
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, project_root)
+
+from pawlia.automation import validate_schedule as _validate_schedule
+
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -1032,6 +1039,10 @@ def cmd_delete_reminder(args) -> None:
 # ---------------------------------------------------------------------------
 
 def cmd_add_job(args) -> None:
+    ok, err = _validate_schedule(args.schedule)
+    if not ok:
+        _out({"success": False, "error": f"Ungültiger Schedule: {err}"})
+        return
     if args.no_notify:
         notify: bool | str = False
     elif args.notify_on_error:

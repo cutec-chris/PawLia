@@ -175,3 +175,100 @@ def test_ical_recurring_event_imports_fullcalendar_fields():
     assert fm["type"] == "recurring"
     assert fm["rrule"] == "FREQ=WEEKLY;BYDAY=TU,TH;UNTIL=20261231"
     assert fm["daysOfWeek"] == [2, 4]
+
+
+# ---------------------------------------------------------------------------
+# schedule validation — single source of truth in pawlia.automation
+# ---------------------------------------------------------------------------
+def _load_automation():
+    spec = importlib.util.spec_from_file_location(
+        "pawlia_automation", REPO / "pawlia" / "automation.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("schedule", [
+    "16:00", "08:30", "0:0",
+    "interval:30m", "interval:2h", "interval:1d",
+    "weekly:0:09:00", "weekly:6:23:59",
+    "monthly:1:10:00", "monthly:31:00:00",
+    "* * * * *", "30 8 * * 1,3", "*/5 * * * *",
+    "0 0 1,15 * *", "0 9-17 * * 1-5",
+])
+def test_validate_schedule_accepts_well_formed_inputs(schedule):
+    mod = _load_automation()
+    ok, err = mod.validate_schedule(schedule)
+    assert ok is True, f"expected '{schedule}' to be valid, got error: {err!r}"
+
+
+@pytest.mark.parametrize("schedule", [
+    "", "   ",
+    "interval:xyz", "interval:",
+    "weekly:7:00:00", "weekly:0:24:00", "weekly:0:00:60",
+    "monthly:0:00:00", "monthly:32:00:00",
+    "99:99", "25:00", "12:60",
+    "* * * *",        # too few fields
+    "* * * * * *",    # too many fields
+    "60 * * * *",     # minute out of range
+    "* 24 * * *",     # hour out of range
+    "* * 32 * *",     # day out of range
+    "* * 0 * *",      # day=0 out of range
+    "* * * 13 *",     # month=13 out of range
+    "* * * 0 *",      # month=0 out of range
+    "* * * * 7",      # dow=7 out of range
+    "0 9-99 * * *",   # hour range overflow
+    "0 0 1,40 * *",   # day list overflow
+    "*/0 * * * *",    # zero step
+    "*/100 * * * *",  # step larger than field
+    "abc * * * *",    # non-numeric
+])
+def test_validate_schedule_rejects_malformed_inputs(schedule):
+    mod = _load_automation()
+    ok, _err = mod.validate_schedule(schedule)
+    assert ok is False, f"expected '{schedule}' to be rejected"
+
+
+def test_cron_matches_at_exact_minute():
+    mod = _load_automation()
+    now = datetime(2026, 6, 4, 8, 30)  # Thu 4 Jun 2026
+    assert mod._cron_matches("30 8 * * *", now) is True
+    assert mod._cron_matches("0 8 * * *", now) is False
+
+
+def test_cron_matches_day_of_week_with_zero_based_sunday():
+    mod = _load_automation()
+    # weekday(): Mon=0..Sun=6; cron dow: Sun=0..Sat=6
+    # Thu Jun 4 2026 -> weekday=3 -> cron dow=(3+1)%7=4
+    thursday = datetime(2026, 6, 4, 8, 30)
+    assert mod._cron_matches("30 8 * * 4", thursday) is True
+    assert mod._cron_matches("30 8 * * 1,3", thursday) is False  # Sun, Tue
+
+
+def test_organizer_add_job_rejects_bad_cron(tmp_path, capsys):
+    import json
+    mod = _load_organizer()
+    with pytest.raises(SystemExit):
+        mod.cmd_add_job(argparse.Namespace(
+            user_id="u1", session_dir=str(tmp_path), name="Bad",
+            schedule="60 * * * *", instruction="x",
+            no_notify=False, notify_on_error=False,
+        ))
+    result = json.loads(capsys.readouterr().out)
+    assert result["success"] is False
+    assert "0-59" in result["error"] or "Minute" in result["error"]
+
+
+def test_organizer_add_job_accepts_cron(tmp_path, capsys):
+    import json
+    mod = _load_organizer()
+    mod.cmd_add_job(argparse.Namespace(
+        user_id="u1", session_dir=str(tmp_path), name="WeekdayMorning",
+        schedule="30 8 * * 1-5", instruction="Morgenbericht",
+        no_notify=False, notify_on_error=False,
+    ))
+    result = json.loads(capsys.readouterr().out)
+    assert result["success"] is True
+    jobs = mod._load_json(str(tmp_path / "u1" / "automations" / "jobs.json"))
+    assert jobs[0]["schedule"] == "30 8 * * 1-5"
