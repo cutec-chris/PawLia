@@ -13,6 +13,9 @@ event notifications — stays in test_scheduler.py as a system test.)
 
 import argparse
 import importlib.util
+import io
+import json
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -261,7 +264,6 @@ def test_organizer_add_job_rejects_bad_cron(tmp_path, capsys):
 
 
 def test_organizer_add_job_accepts_cron(tmp_path, capsys):
-    import json
     mod = _load_organizer()
     mod.cmd_add_job(argparse.Namespace(
         user_id="u1", session_dir=str(tmp_path), name="WeekdayMorning",
@@ -272,3 +274,204 @@ def test_organizer_add_job_accepts_cron(tmp_path, capsys):
     assert result["success"] is True
     jobs = mod._load_json(str(tmp_path / "u1" / "automations" / "jobs.json"))
     assert jobs[0]["schedule"] == "30 8 * * 1-5"
+
+
+# ---------------------------------------------------------------------------
+# organizer note-task complete / delete — audit problem #1
+# ---------------------------------------------------------------------------
+def _seed_note_workspace(tmp_path) -> dict:
+    """Create a workspace with one memory note containing 4 task lines."""
+    user = "u1"
+    ws = tmp_path / user / "workspace"
+    mem = ws / "memory"
+    mem.mkdir(parents=True)
+    note = mem / "2026-03-25.md"
+    note.write_text(
+        "# 25. März\n\n"
+        "- [ ] Initiales Konzept erstellen\n"
+        "- [ ] Hardware-Auswahl\n"
+        "- [ ] Budgetplanung\n"
+        "- [ ] Zeitplanung\n",
+        encoding="utf-8",
+    )
+    return {
+        "session": str(tmp_path),
+        "user": user,
+        "note": note,
+    }
+
+
+def _capture(mod, fn, *args, **kwargs):
+    """Run a cmd_* function, capture its JSON stdout, and return the parsed dict.
+
+    Returns (parsed_dict, exit_code). exit_code is None if the call exited
+    cleanly (success or no _out call), or the integer passed to sys.exit.
+    """
+    buf = io.StringIO()
+    real = sys.stdout
+    sys.stdout = buf
+    exit_code = None
+    try:
+        try:
+            fn(*args, **kwargs)
+        except SystemExit as e:
+            exit_code = e.code
+    finally:
+        sys.stdout = real
+    return json.loads(buf.getvalue()), exit_code
+
+
+def test_complete_task_toggles_note_task_in_source_file(tmp_path, capsys):
+    mod = _load_organizer()
+    seed = _seed_note_workspace(tmp_path)
+    listing, _ = _capture(mod, mod.cmd_list_tasks, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        status="all", limit=100, project="",
+    ))
+    target = next(t for t in listing["tasks"]
+                  if t["title"] == "Initiales Konzept erstellen")
+    assert target["source"] == "memory/2026-03-25.md"
+
+    result, _ = _capture(mod, mod.cmd_complete_task, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        task_id=target["id"],
+    ))
+    assert result["success"] is True
+
+    after = seed["note"].read_text(encoding="utf-8")
+    assert "- [x] Initiales Konzept erstellen ✅" in after
+    # The other tasks in the same file must be untouched
+    assert "- [ ] Hardware-Auswahl\n" in after
+    assert "- [ ] Budgetplanung\n" in after
+
+
+def test_complete_task_is_idempotent_on_note_task(tmp_path):
+    mod = _load_organizer()
+    seed = _seed_note_workspace(tmp_path)
+    listing, _ = _capture(mod, mod.cmd_list_tasks, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        status="all", limit=100, project="",
+    ))
+    target = next(t for t in listing["tasks"] if t["title"] == "Hardware-Auswahl")
+    _capture(mod, mod.cmd_complete_task, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        task_id=target["id"],
+    ))
+    # Second call should be a no-op (no double-✅).
+    _capture(mod, mod.cmd_complete_task, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        task_id=target["id"],
+    ))
+    after = seed["note"].read_text(encoding="utf-8")
+    assert after.count("✅") == 1, after
+
+
+def test_delete_task_removes_note_task_line(tmp_path):
+    mod = _load_organizer()
+    seed = _seed_note_workspace(tmp_path)
+    listing, _ = _capture(mod, mod.cmd_list_tasks, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        status="all", limit=100, project="",
+    ))
+    target = next(t for t in listing["tasks"] if t["title"] == "Budgetplanung")
+
+    result, _ = _capture(mod, mod.cmd_delete_task, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        task_id=target["id"],
+    ))
+    assert result["success"] is True
+    assert result["remaining"] == 3
+
+    after = seed["note"].read_text(encoding="utf-8")
+    assert "Budgetplanung" not in after
+    assert "Initiales Konzept" in after
+    assert "Hardware-Auswahl" in after
+    assert "Zeitplanung" in after
+
+
+def test_complete_and_delete_fall_back_to_tasks_md(tmp_path):
+    mod = _load_organizer()
+    # tasks.md only, no workspace notes
+    user = "u1"
+    (tmp_path / user / "workspace").mkdir(parents=True)
+    add, _ = _capture(mod, mod.cmd_add_task, argparse.Namespace(
+        user_id=user, session_dir=str(tmp_path), title="In Tasks",
+        due_date="", priority="", project="", reminders="", description="",
+    ))
+    tid = add["task_id"]
+
+    c, _ = _capture(mod, mod.cmd_complete_task, argparse.Namespace(
+        user_id=user, session_dir=str(tmp_path), task_id=tid,
+    ))
+    assert c["success"] is True
+    md = (tmp_path / user / "workspace" / "tasks.md").read_text(encoding="utf-8")
+    assert "- [x] In Tasks" in md
+
+    add, _ = _capture(mod, mod.cmd_add_task, argparse.Namespace(
+        user_id=user, session_dir=str(tmp_path), title="Auch In Tasks",
+        due_date="", priority="", project="", reminders="", description="",
+    ))
+    d, _ = _capture(mod, mod.cmd_delete_task, argparse.Namespace(
+        user_id=user, session_dir=str(tmp_path), task_id=add["task_id"],
+    ))
+    assert d["success"] is True
+    md = (tmp_path / user / "workspace" / "tasks.md").read_text(encoding="utf-8")
+    assert "Auch In Tasks" not in md
+
+
+def test_complete_task_still_falls_back_to_title_substring_in_tasks_md(tmp_path):
+    """Legacy callers pass a title substring instead of a stable ID."""
+    mod = _load_organizer()
+    user = "u1"
+    (tmp_path / user / "workspace").mkdir(parents=True)
+    _capture(mod, mod.cmd_add_task, argparse.Namespace(
+        user_id=user, session_dir=str(tmp_path), title="Einkaufen",
+        due_date="", priority="", project="", reminders="", description="",
+    ))
+    result, _ = _capture(mod, mod.cmd_complete_task, argparse.Namespace(
+        user_id=user, session_dir=str(tmp_path), task_id="Einkaufen",
+    ))
+    assert result["success"] is True
+    md = (tmp_path / user / "workspace" / "tasks.md").read_text(encoding="utf-8")
+    assert "- [x] Einkaufen" in md
+
+
+def test_complete_task_unknown_id_still_reports_not_found(tmp_path):
+    mod = _load_organizer()
+    user = "u1"
+    (tmp_path / user / "workspace").mkdir(parents=True)
+    result, _ = _capture(mod, mod.cmd_complete_task, argparse.Namespace(
+        user_id=user, session_dir=str(tmp_path), task_id="deadbeef",
+    ))
+    assert result["success"] is False
+    assert "deadbeef" in result["error"]
+
+
+def test_complete_task_rejects_id_whose_line_shifted_above(tmp_path):
+    """The stable ID is derived from (filepath, line_no). If other tasks
+    above the target are deleted between list-tasks and complete-task,
+    the ID no longer points to the task — the user must re-list."""
+    mod = _load_organizer()
+    seed = _seed_note_workspace(tmp_path)
+    listing, _ = _capture(mod, mod.cmd_list_tasks, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        status="all", limit=100, project="",
+    ))
+    target = next(t for t in listing["tasks"] if t["title"] == "Zeitplanung")
+    stale_id = target["id"]
+
+    # Manually delete the three tasks above Zeitplanung so its line shifts up.
+    note_text = seed["note"].read_text(encoding="utf-8")
+    stripped = "\n".join(
+        line for line in note_text.splitlines()
+        if "Zeitplanung" in line
+    )
+    seed["note"].write_text("# 25. März\n\n" + stripped + "\n", encoding="utf-8")
+
+    result, exit_code = _capture(mod, mod.cmd_complete_task, argparse.Namespace(
+        user_id=seed["user"], session_dir=seed["session"],
+        task_id=stale_id,
+    ))
+    assert result["success"] is False
+    assert stale_id in result["error"]
+    assert exit_code == 1
