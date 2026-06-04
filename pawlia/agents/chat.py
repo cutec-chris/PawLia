@@ -645,6 +645,23 @@ class ChatAgent(BaseAgent):
         content = message.content
         return content if isinstance(content, str) else str(content)
 
+    @staticmethod
+    def _format_max_tool_turns_warning(
+        max_turns: int, tool_calls_info: List[Dict[str, Any]]
+    ) -> str:
+        """Render a one-line summary of the tool-call sequence that
+        triggered the iteration budget so the cause is visible in the
+        log (not just the bare 'Max chat tool turns reached' message)."""
+        from collections import Counter
+        names = [str(tc.get("name", "?")) for tc in tool_calls_info]
+        counts = Counter(names)
+        tail = ", ".join(names[-6:]) if names else "(none)"
+        return (
+            f"Max chat tool turns ({max_turns}) reached after {len(names)} "
+            f"tool calls — forcing final response. "
+            f"Counts: {dict(counts.most_common())}. Tail: {tail}"
+        )
+
     def _clone_message_with_trimmed_content(
         self,
         message: BaseMessage,
@@ -936,7 +953,9 @@ class ChatAgent(BaseAgent):
             )
 
         else:
-            self.logger.warning("Max chat tool turns (%d) reached, forcing final response", self.max_tool_turns)
+            self.logger.warning(self._format_max_tool_turns_warning(
+                self.max_tool_turns, tool_calls_info
+            ))
             final = await self._invoke(
                 self._prepare_messages_for_context_budget(
                     messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)],

@@ -252,3 +252,47 @@ def test_workflow_substitute_fills_config_and_quotes_model_params():
     assert "/tmp/skill/scripts/s.py" in command.replace("\\", "/")
     assert "--query hello" in command               # model param, shell-quoted
     assert '--url "http://example.test"' in command  # config value, verbatim
+
+
+# ---------------------------------------------------------------------------
+# ChatAgent max-tool-turns warning — audit problem #17
+# ---------------------------------------------------------------------------
+from pawlia.agents.chat import ChatAgent
+
+
+def test_max_tool_turns_warning_summarises_tool_sequence():
+    """The budget-exhausted warning must include the tool name counts and
+    a tail of recent calls so the cause is obvious in the log, not
+    just 'Max chat tool turns reached'."""
+    calls = [
+        {"name": "list-tasks", "args": {}},
+        {"name": "bash", "args": {"command": "ls"}},
+        {"name": "list-tasks", "args": {}},
+        {"name": "delete-task", "args": {"task-id": "abc"}},
+        {"name": "list-tasks", "args": {}},
+    ]
+    msg = ChatAgent._format_max_tool_turns_warning(20, calls)
+
+    assert "20" in msg
+    assert "5 tool calls" in msg
+    assert "'list-tasks': 3" in msg
+    assert "'bash': 1" in msg
+    assert "'delete-task': 1" in msg
+    # The last six (in this case all 5) calls appear in tail form.
+    assert "list-tasks, bash, list-tasks, delete-task, list-tasks" in msg
+
+
+def test_max_tool_turns_warning_handles_empty_sequence():
+    msg = ChatAgent._format_max_tool_turns_warning(20, [])
+    assert "0 tool calls" in msg
+    assert "Tail: (none)" in msg
+
+
+def test_max_tool_turns_warning_truncates_tail_to_last_six():
+    """A 50-call loop should still produce a one-line tail."""
+    calls = [{"name": f"tool{i}"} for i in range(50)]
+    msg = ChatAgent._format_max_tool_turns_warning(20, calls)
+
+    assert "50 tool calls" in msg
+    # Tail shows the last 6 names only.
+    assert "tool44, tool45, tool46, tool47, tool48, tool49" in msg
