@@ -658,7 +658,15 @@ def cmd_grep(args) -> None:
     try:
         regex = re.compile(args.pattern)
     except re.error as e:
-        _out({"success": False, "error": f"Invalid regex: {e}"})
+        _out({
+            "success": False,
+            "error": f"Invalid regex: {e}",
+            "hint": (
+                "--pattern is a Python re pattern, not a shell glob. "
+                "Use '.*' (not '*') to match any chars, escape literal "
+                "dots with '\\.', and use '[ ]' for character classes."
+            ),
+        })
         return
 
     if args.filename:

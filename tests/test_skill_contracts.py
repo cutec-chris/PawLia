@@ -132,6 +132,31 @@ def test_path_traversal_outside_the_workspace_is_blocked(tmp_path):
         or "access denied" in (result.get("error", "")).lower()
 
 
+def test_grep_with_invalid_regex_returns_hint_about_python_re_syntax(tmp_path):
+    """The 'Invalid regex' error must explain that --pattern is Python re,
+    not a shell glob — otherwise the LLM retries with the same mistake."""
+    ws = _workspace(tmp_path)
+    (ws / "data.txt").write_text("hello\nworld\n", encoding="utf-8")
+
+    # "*.foo" is a shell glob; the Python re compiler rejects it.
+    result = _files(tmp_path, "grep", "--pattern", "*.foo", "--filename", "data.txt")
+
+    assert result["success"] is False
+    assert "Invalid regex" in result["error"]
+    assert "hint" in result
+    assert "Python re" in result["hint"] or "shell glob" in result["hint"]
+
+
+def test_grep_with_valid_regex_still_works(tmp_path):
+    ws = _workspace(tmp_path)
+    (ws / "data.txt").write_text("foo\nbar\n", encoding="utf-8")
+
+    result = _files(tmp_path, "grep", "--pattern", "f.o", "--filename", "data.txt")
+
+    assert result["success"] is True
+    assert result.get("matches"), f"expected matches, got {result!r}"
+
+
 # ---------------------------------------------------------------------------
 # config skill — promises to discover Piper voices from env / configured dir.
 # ---------------------------------------------------------------------------
