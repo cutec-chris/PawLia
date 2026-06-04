@@ -30,6 +30,9 @@ _INTERRUPT_KEYWORD_RE = re.compile(
 _STANDALONE_STT_HALLUCINATION_RE = re.compile(
     r"^(?:"
     r"(?:vielen\s+dank|danke(?:\s+schön)?)"
+    # YouTube-style sign-off Whisper invents on noise ("Vielen Dank für's
+    # Zuschauen", "Danke fürs Zuschauen") — nobody says this on a call.
+    r"|(?:(?:vielen\s+dank|danke)\s+für'?s?\s+zuschauen)"
     r"|(?:tschüss|auf\s+wiedersehen)"
     r"|(?:untertitelung\s+des\s+zdf(?:,\s*\d{4})?)"
     r")\.?$",
@@ -87,7 +90,7 @@ class SpeechDetector:
     MIN_SPEECH_LIKE_RATIO: float = 0.08
     MIN_CONSECUTIVE_SPEECHLIKE_FRAMES: int = 4
     MIN_RESUME_SPEECH_FRAMES: int = 3
-    PRE_SPEECH_SECONDS: float = 0.4
+    PRE_SPEECH_SECONDS: float = 0.6
     WEBRTC_VAD_ENABLED: bool = True
     WEBRTC_VAD_MODE: int = 2
     WEBRTC_VAD_MIN_VOICED_RATIO: float = 0.12

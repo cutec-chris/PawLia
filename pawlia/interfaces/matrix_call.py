@@ -1736,25 +1736,23 @@ class CallSession:
         sample_rate: int,
         interrupt_playback: bool = False,
     ) -> None:
-        """Transcribe a speech chunk and optionally use it to barge into TTS."""
-        started_hold = False
-        if not interrupt_playback and self._tts_track:
-            self._tts_track.start_hold()
-            started_hold = True
+        """Transcribe a speech chunk and optionally use it to barge into TTS.
+
+        The hold tone is started only once the transcript is confirmed real
+        speech (after the empty/hallucination checks), not on STT dispatch.
+        Noise chunks constantly pass the VAD and round-trip through STT as
+        hallucinations; starting the hold up front made it flicker on every one.
+        """
         try:
             text = await self._transcribe_speech(pcm, sample_rate)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             logger.error("call %s: transcription error: %s", self.call_id[:8], e)
-            if started_hold and self._tts_track:
-                self._tts_track.stop_hold()
             return
 
         if not text:
             logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
-            if started_hold and self._tts_track:
-                self._tts_track.stop_hold()
             return
 
         if self._speech_detector.looks_like_stt_hallucination(text):
@@ -1763,8 +1761,6 @@ class CallSession:
                 self.call_id[:8],
                 text,
             )
-            if started_hold and self._tts_track:
-                self._tts_track.stop_hold()
             return
 
         try:
@@ -1786,6 +1782,11 @@ class CallSession:
                     await self._send_discarded_transcript(text)
                 return
 
+            # Confirmed real speech → start the hold tone now (bridges the
+            # LLM/TTS gap), then queue the response. Doing it here instead of on
+            # STT dispatch means noise/hallucination chunks never flicker it.
+            if self._tts_track:
+                self._tts_track.start_hold()
             await self._queue_transcript_response(text)
         except asyncio.CancelledError:
             if self._tts_track:

@@ -134,7 +134,10 @@ async def test_process_speech_ignores_standalone_stt_hallucination():
 
     send_cb.assert_not_awaited()
     agent.run_streamed.assert_not_called()
-    session._tts_track.stop_hold.assert_called_once()
+    # Hold is only started for confirmed real speech, so a hallucination chunk
+    # never starts it (and thus never flickers the tone).
+    session._tts_track.start_hold.assert_not_called()
+    session._tts_track.stop_hold.assert_not_called()
 
 
 def test_standalone_stt_hallucination_filter_keeps_real_sentences():
@@ -152,6 +155,10 @@ def test_standalone_stt_hallucination_filter_keeps_real_sentences():
 
     flt = session._speech_detector.looks_like_stt_hallucination
     assert flt("Vielen Dank.") is True
+    # YouTube-style sign-off variants Whisper invents on noise
+    assert flt("Vielen Dank für's Zuschauen.") is True
+    assert flt("Vielen Dank fürs Zuschauen") is True
+    assert flt("Danke fürs Zuschauen.") is True
     assert flt("Untertitelung des ZDF, 2020") is True
     # subtitle/credits boilerplate with surrounding junk (observed in the wild)
     assert flt("Untertitelung des ZDF für funk, 2017") is True
@@ -692,7 +699,7 @@ async def test_process_speech_starts_hold_before_queueing_response():
 
 
 @pytest.mark.asyncio
-async def test_process_speech_stops_hold_when_transcription_is_empty():
+async def test_process_speech_does_not_start_hold_when_transcription_is_empty():
     app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     client = SimpleNamespace(room_typing=AsyncMock())
     session = CallSession(
@@ -717,8 +724,9 @@ async def test_process_speech_stops_hold_when_transcription_is_empty():
     with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value=None)):
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000)
 
-    session._tts_track.start_hold.assert_called_once()
-    session._tts_track.stop_hold.assert_called_once()
+    # Empty transcription → hold is never started (nothing to stop).
+    session._tts_track.start_hold.assert_not_called()
+    session._tts_track.stop_hold.assert_not_called()
     session._queue_transcript_response.assert_not_awaited()
 
 

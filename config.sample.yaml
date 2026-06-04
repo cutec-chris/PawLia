@@ -133,7 +133,7 @@ interfaces:
 #                                       # (auto-scaled up in noisy environments — see adaptive silence)
 #   vad_max_chunk_seconds: 15          # force-flush open speech buffer after this many seconds
 #                                       # (safety net so sustained wind can't hold a chunk open; 0 = disabled)
-#   pre_speech_seconds: 0.4           # prepend this much audio before detected speech
+#   pre_speech_seconds: 0.6           # prepend this much audio before detected speech (onset safety)
 #   webrtcvad_enabled: true           # extra lightweight speech detector
 #   webrtcvad_mode: 2                 # 0..3, higher = stricter
 #   webrtcvad_min_voiced_ratio: 0.12  # voiced-frame ratio required if enabled
