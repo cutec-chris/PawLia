@@ -1,6 +1,6 @@
 import asyncio
 
-from pawlia.dream_wiki import DreamWikiBackend
+from pawlia.dream_wiki import DreamWikiBackend, _SENTINEL, _parse_json_array
 
 
 def test_dream_wiki_writes_pages_into_type_subfolders(tmp_path):
@@ -63,3 +63,192 @@ def test_dream_wiki_links_use_typed_obsidian_paths(tmp_path):
     )
 
     assert backend._md_link("balu", {"balu": "Balu"}) == "[[object/balu|Balu]]"
+
+
+# ---------------------------------------------------------------------------
+# _parse_json_array — audit problem #6
+# ---------------------------------------------------------------------------
+def test_parse_json_array_accepts_bare_array():
+    result = _parse_json_array('[{"action": "create", "slug": "x"}]')
+    assert result is not _SENTINEL
+    assert result[0]["slug"] == "x"
+
+
+def test_parse_json_array_strips_json_code_fence():
+    content = '```json\n[{"action": "create", "slug": "y"}]\n```'
+    result = _parse_json_array(content)
+    assert result is not _SENTINEL
+    assert result[0]["slug"] == "y"
+
+
+def test_parse_json_array_strips_german_preamble():
+    content = 'Hier ist das JSON-Array:\n[{"action": "create", "slug": "z"}]'
+    result = _parse_json_array(content)
+    assert result is not _SENTINEL
+    assert result[0]["slug"] == "z"
+
+
+def test_parse_json_array_strips_english_preamble():
+    content = 'Here is the JSON:\n[{"action": "create", "slug": "a"}]'
+    result = _parse_json_array(content)
+    assert result is not _SENTINEL
+    assert result[0]["slug"] == "a"
+
+
+def test_parse_json_array_wraps_single_object():
+    """If the model returns an object instead of an array, wrap it."""
+    content = '{"action": "create", "slug": "b"}'
+    result = _parse_json_array(content)
+    assert result is not _SENTINEL
+    assert isinstance(result, list)
+    assert result[0]["slug"] == "b"
+
+
+def test_parse_json_array_returns_sentinel_for_prose():
+    content = "Hallo Chris! 👋 Hier ist dein Bericht."
+    result = _parse_json_array(content)
+    assert result is _SENTINEL
+
+
+def test_parse_json_array_handles_empty_string():
+    assert _parse_json_array("") is _SENTINEL
+    assert _parse_json_array("   \n  ") is _SENTINEL
+
+
+def test_parse_json_array_handles_malformed_json():
+    result = _parse_json_array("[{broken json")
+    assert result is _SENTINEL
+
+
+def test_parse_json_array_extracts_array_embedded_in_prose():
+    content = (
+        "Here are the extracted topics:\n\n"
+        "```\n"
+        '[{"action": "create", "slug": "c"}, {"action": "update", "slug": "d"}]\n'
+        "```\n\n"
+        "Let me know if you want to add more."
+    )
+    result = _parse_json_array(content)
+    assert result is not _SENTINEL
+    assert len(result) == 2
+    assert result[0]["slug"] == "c"
+    assert result[1]["slug"] == "d"
+
+
+# ---------------------------------------------------------------------------
+# rag_llm_call — json_mode passes the right hint to the provider
+# ---------------------------------------------------------------------------
+def test_rag_llm_call_includes_format_json_for_ollama_when_json_mode(monkeypatch):
+    """When json_mode=True and provider=ollama, the payload must include
+    'format: json' so the model is steered into JSON output."""
+    import asyncio
+    import json as _json
+    import urllib.request
+
+    from pawlia.utils import rag_llm_call
+
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        body = req.data.decode() if req.data else ""
+        captured["body"] = _json.loads(body)
+        captured["url"] = req.full_url
+
+        class _Resp:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def read(self):
+                return _json.dumps(self._payload).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _Resp({"message": {"content": "[]"}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    cfg = {"rag_provider": "ollama", "rag_model": "qwen3.5:latest",
+           "embedding_host": "http://localhost:11434"}
+
+    asyncio.run(rag_llm_call(cfg, "sys", "user", json_mode=True))
+
+    assert captured["body"].get("format") == "json"
+    assert captured["url"].endswith("/api/chat")
+
+
+def test_rag_llm_call_includes_response_format_for_openai_compat_when_json_mode(monkeypatch):
+    import asyncio
+    import json as _json
+    import urllib.request
+
+    from pawlia.utils import rag_llm_call
+
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        body = req.data.decode() if req.data else ""
+        captured["body"] = _json.loads(body)
+        captured["url"] = req.full_url
+
+        class _Resp:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def read(self):
+                return _json.dumps(self._payload).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _Resp({"choices": [{"message": {"content": "{}"}}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    cfg = {"rag_provider": "openai", "rag_model": "x",
+           "rag_base_url": "http://api.example/v1"}
+
+    asyncio.run(rag_llm_call(cfg, "sys", "user", json_mode=True))
+
+    assert captured["body"].get("response_format") == {"type": "json_object"}
+    assert captured["url"].endswith("/chat/completions")
+
+
+def test_rag_llm_call_omits_json_hints_when_disabled(monkeypatch):
+    import asyncio
+    import json as _json
+    import urllib.request
+
+    from pawlia.utils import rag_llm_call
+
+    captured = {}
+
+    def _fake_urlopen(req, timeout=None):
+        body = req.data.decode() if req.data else ""
+        captured["body"] = _json.loads(body)
+
+        class _Resp:
+            def read(self):
+                return b'{"message":{"content":""}}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    cfg = {"rag_provider": "ollama", "embedding_host": "http://localhost:11434"}
+    asyncio.run(rag_llm_call(cfg, "sys", "user"))  # no json_mode
+
+    assert "format" not in captured["body"]
+    assert "response_format" not in captured["body"]
