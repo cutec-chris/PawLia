@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional
 from pawlia.config import load_config
 from pawlia.llm import LLMFactory
 from pawlia.memory import MemoryManager
+from pawlia.tools import AttachFileTool
 from pawlia.tools.base import ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.skills.loader import AgentSkill, SkillLoader
