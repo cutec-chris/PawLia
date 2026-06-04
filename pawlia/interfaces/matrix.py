@@ -24,10 +24,13 @@ Config (in config.yaml under "interfaces.matrix"):
 """
 
 import asyncio
+import base64
+import io
 import json
 import logging
 import os
 import tempfile
+import time
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 import markdown
@@ -105,6 +108,18 @@ def _matrix_file_info(event: RoomMessageFile) -> tuple[str, str]:
     filename = content.get("filename") or getattr(event, "body", "") or "attachment"
     mimetype = info.get("mimetype") or "application/octet-stream"
     return filename, mimetype
+
+
+def _matrix_msgtype_for(mimetype: str) -> str:
+    """Map a MIME type to the corresponding Matrix ``m.room.message`` msgtype."""
+    mt = (mimetype or "").lower()
+    if mt.startswith("image/"):
+        return "m.image"
+    if mt.startswith("video/"):
+        return "m.video"
+    if mt.startswith("audio/"):
+        return "m.audio"
+    return "m.file"
 
 
 def _is_text_matrix_file(filename: str, mimetype: str) -> bool:
@@ -470,6 +485,86 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return None
         return bytes_to_data_uri(resp.body, resp.content_type or mimetype)
 
+    async def _save_incoming_bytes(
+        user_id: str, data: bytes, filename: str, mimetype: str
+    ) -> None:
+        """Persist an incoming file/image to the user's Downloads/ folder.
+
+        Failures are logged but never raised — saving is a best-effort side
+        effect and must not break message handling.
+        """
+        try:
+            from pawlia import attachments
+
+            max_bytes = int(
+                (app.config.get("attachments") or {}).get("max_incoming_bytes")
+                or 26214400
+            )
+            meta = attachments.save_incoming(
+                session_dir=app.session_dir,
+                user_id=user_id,
+                data=data,
+                filename=filename,
+                source="matrix",
+                mimetype=mimetype,
+                max_bytes=max_bytes,
+            )
+            if meta is None:
+                logger.info(
+                    "Matrix: dropped incoming file (empty or too large): %s (%d bytes)",
+                    filename, len(data),
+                )
+        except Exception as exc:
+            logger.warning("Matrix: failed to save incoming file %s: %s", filename, exc)
+
+    async def _send_attachment(room_id: str, att: dict) -> None:
+        """Upload + send one queued attachment to Matrix.
+
+        ``att`` is a ``pending_attachments`` entry: ``{data, mimetype, filename, caption}``.
+        Maps MIME → Matrix msgtype (image/video/audio/file) and uploads the
+        bytes via the nio content repository before sending the message.
+        """
+        data: bytes = att.get("data") or b""
+        mimetype: str = att.get("mimetype") or "application/octet-stream"
+        filename: str = att.get("filename") or "attachment"
+        caption: Optional[str] = att.get("caption")
+
+        msgtype = _matrix_msgtype_for(mimetype)
+
+        try:
+            resp, _ = await client.upload(
+                io.BytesIO(data),
+                content_type=mimetype,
+                filename=filename,
+                encrypt=False,
+                filesize=len(data),
+            )
+        except Exception as exc:
+            logger.error("Matrix: upload failed for %s: %s", filename, exc)
+            return
+        if not hasattr(resp, "content_uri"):
+            logger.error("Matrix: upload error response: %s", resp)
+            return
+
+        content: Dict[str, object] = {
+            "msgtype": msgtype,
+            "body": caption or filename,
+            "url": resp.content_uri,
+            "info": {"mimetype": mimetype, "size": len(data)},
+        }
+        if caption:
+            content["filename"] = filename
+
+        try:
+            await client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content=content,
+                ignore_unverified_devices=True,
+            )
+        except Exception as exc:
+            logger.error("Matrix: send attachment failed: %s", exc)
+
     async def _send_text(room_id: str, text: str) -> Optional[str]:
         try:
             resp = await client.room_send(
@@ -729,6 +824,10 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             await client.room_typing(room.room_id, typing_state=False)
             logger.info("Matrix: response in %s%s: %s", room.room_id, ctx, preview_text(response))
             sent_event_id = await _send(response)
+            # Drain any attachments queued by direct tools (e.g. attach_file)
+            # and ship them as separate Matrix messages after the text reply.
+            for att in getattr(agent, "pending_attachments", []) or []:
+                await _send_attachment(room.room_id, att)
             # Pre-seed so if user creates a thread from this response, context is preserved on restart
             if not thread_id and sent_event_id:
                 session = app.memory.load_session(session_id)
@@ -836,6 +935,17 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         thread_id = _resolve_thread_root(getattr(event, "source", None), thread_events)
         thread_id = _auto_thread(event.event_id, thread_id)
         _remember_thread_event(event.event_id, thread_id)
+        # Persist a copy under the user's Downloads/ so the LLM can re-attach
+        # the image to a later reply via the attach_file tool.
+        try:
+            prefix, b64 = data_uri.split(",", 1)
+            img_bytes = base64.b64decode(b64)
+            filename = caption.strip() or f"matrix-image-{int(time.time())}.{mimetype.split('/', 1)[-1]}"
+            if "." not in filename:
+                filename = f"{filename}.{mimetype.split('/', 1)[-1]}"
+            await _save_incoming_bytes(f"mx_{room.room_id}", img_bytes, filename, mimetype)
+        except Exception as exc:
+            logger.debug("Matrix: could not persist incoming image: %s", exc)
         await _handle(room, caption, images=[data_uri], thread_id=thread_id)
 
     async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
@@ -922,6 +1032,17 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         can_decode_text = _is_text_matrix_file(filename, mimetype)
         can_convert_markdown = _is_markitdown_matrix_file(filename, mimetype)
         if not can_decode_text and not can_convert_markdown:
+            # Still try to persist a copy so the LLM can re-attach the file
+            # later even when we can't decode it for context.
+            try:
+                resp_preview = await client.download(mxc_url)
+                if isinstance(resp_preview, DownloadResponse):
+                    actual_mime = resp_preview.content_type or mimetype
+                    await _save_incoming_bytes(
+                        f"mx_{room.room_id}", resp_preview.body, filename, actual_mime,
+                    )
+            except Exception as exc:
+                logger.debug("Matrix: could not persist incoming file: %s", exc)
             await _handle(
                 room,
                 (
@@ -939,7 +1060,13 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             logger.warning("Matrix: failed to download file %s: %s", filename, resp)
             return
 
+        # Always persist a copy of the file (even when we can decode it) so
+        # the user can ask the bot to re-send the file later.
         actual_mimetype = resp.content_type or mimetype
+        await _save_incoming_bytes(
+            f"mx_{room.room_id}", resp.body, filename, actual_mimetype,
+        )
+
         if can_decode_text:
             text, truncated = _decode_matrix_file_text(resp.body)
             format_label = "Text"

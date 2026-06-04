@@ -373,3 +373,165 @@ class TestToolRegistry:
         assert len(registry.names()) == 2
         specs = registry.get_specs()
         assert len(specs) == 2
+
+
+class TestAttachFileTool:
+    """Tests for AttachFileTool — re-attach a saved file to the next reply."""
+
+    def _setup(self, tmp_path):
+        user_id = "test_user"
+        workspace = tmp_path / user_id / "workspace"
+        downloads = workspace / "Downloads"
+        downloads.mkdir(parents=True)
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"not allowed")
+        return user_id, str(workspace), str(downloads), str(outside)
+
+    def _make_agent_stub(self):
+        class _Agent:
+            def __init__(self):
+                self.pending_attachments = []
+        return _Agent()
+
+    def test_attach_under_downloads(self, tmp_path):
+        from pawlia.tools.attach_file import AttachFileTool
+
+        user_id, workspace, downloads, _ = self._setup(tmp_path)
+        target = tmp_path / user_id / "workspace" / "Downloads" / "rain.gif"
+        target.write_bytes(b"GIF89a-fake-bytes")
+
+        tool = AttachFileTool()
+        agent = self._make_agent_stub()
+        result = tool.execute(
+            {"path": "Downloads/rain.gif"},
+            context={
+                "session_dir": str(tmp_path),
+                "user_id": user_id,
+                "max_outgoing_bytes": 1024 * 1024,
+                "agent": agent,
+            },
+        )
+        assert "queued" in result
+        assert len(agent.pending_attachments) == 1
+        att = agent.pending_attachments[0]
+        assert att["data"] == b"GIF89a-fake-bytes"
+        assert att["mimetype"] == "image/gif"
+        assert att["filename"] == "rain.gif"
+
+    def test_reject_outside_allowed_roots(self, tmp_path):
+        from pawlia.tools.attach_file import AttachFileTool
+
+        user_id, workspace, downloads, outside = self._setup(tmp_path)
+        tool = AttachFileTool()
+        agent = self._make_agent_stub()
+        result = tool.execute(
+            {"path": outside},
+            context={
+                "session_dir": str(tmp_path),
+                "user_id": user_id,
+                "max_outgoing_bytes": 1024 * 1024,
+                "agent": agent,
+            },
+        )
+        assert "outside allowed roots" in result
+        assert agent.pending_attachments == []
+
+    def test_reject_path_traversal(self, tmp_path):
+        from pawlia.tools.attach_file import AttachFileTool
+
+        user_id, workspace, downloads, _ = self._setup(tmp_path)
+        tool = AttachFileTool()
+        agent = self._make_agent_stub()
+        result = tool.execute(
+            {"path": "Downloads/../../etc/passwd"},
+            context={
+                "session_dir": str(tmp_path),
+                "user_id": user_id,
+                "max_outgoing_bytes": 1024 * 1024,
+                "agent": agent,
+            },
+        )
+        assert "outside allowed roots" in result or "file not found" in result
+        assert agent.pending_attachments == []
+
+    def test_size_limit(self, tmp_path):
+        from pawlia.tools.attach_file import AttachFileTool
+
+        user_id, _, _, _ = self._setup(tmp_path)
+        target = tmp_path / user_id / "workspace" / "Downloads" / "big.bin"
+        target.write_bytes(b"x" * 2048)
+
+        tool = AttachFileTool()
+        agent = self._make_agent_stub()
+        result = tool.execute(
+            {"path": "Downloads/big.bin"},
+            context={
+                "session_dir": str(tmp_path),
+                "user_id": user_id,
+                "max_outgoing_bytes": 100,
+                "agent": agent,
+            },
+        )
+        assert "too large" in result
+        assert agent.pending_attachments == []
+
+    def test_explicit_mimetype_override(self, tmp_path):
+        from pawlia.tools.attach_file import AttachFileTool
+
+        user_id, _, _, _ = self._setup(tmp_path)
+        target = tmp_path / user_id / "workspace" / "Downloads" / "blob"
+        target.write_bytes(b"raw bytes")
+
+        tool = AttachFileTool()
+        agent = self._make_agent_stub()
+        tool.execute(
+            {"path": "Downloads/blob", "mimetype": "application/x-foo", "caption": "hi"},
+            context={
+                "session_dir": str(tmp_path),
+                "user_id": user_id,
+                "max_outgoing_bytes": 1024 * 1024,
+                "agent": agent,
+            },
+        )
+        assert agent.pending_attachments[0]["mimetype"] == "application/x-foo"
+        assert agent.pending_attachments[0]["caption"] == "hi"
+
+    def test_extra_allowed_root(self, tmp_path):
+        from pawlia.tools.attach_file import AttachFileTool
+
+        user_id, _, _, _ = self._setup(tmp_path)
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "report.pdf").write_bytes(b"%PDF-fake")
+
+        tool = AttachFileTool()
+        agent = self._make_agent_stub()
+        result = tool.execute(
+            {"path": str(shared / "report.pdf")},
+            context={
+                "session_dir": str(tmp_path),
+                "user_id": user_id,
+                "max_outgoing_bytes": 1024 * 1024,
+                "attachment_extra_roots": [str(shared)],
+                "agent": agent,
+            },
+        )
+        assert "queued" in result
+        assert agent.pending_attachments[0]["filename"] == "report.pdf"
+
+    def test_missing_agent_in_context(self, tmp_path):
+        from pawlia.tools.attach_file import AttachFileTool
+
+        user_id, _, _, _ = self._setup(tmp_path)
+        (tmp_path / user_id / "workspace" / "Downloads" / "x.txt").write_bytes(b"hi")
+
+        tool = AttachFileTool()
+        result = tool.execute(
+            {"path": "Downloads/x.txt"},
+            context={
+                "session_dir": str(tmp_path),
+                "user_id": user_id,
+                "max_outgoing_bytes": 1024,
+            },
+        )
+        assert "agent context unavailable" in result

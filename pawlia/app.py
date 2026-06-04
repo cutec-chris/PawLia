@@ -228,11 +228,12 @@ class App:
             # Model-size-aware tool-turn budget
             chat_model_name = self.llm.default_model_name("chat", agent_overrides=overrides)
             chat_max_turns = self.llm.max_tool_turns_for_model(chat_model_name)
-            # No direct file tools: reads/list/grep route through the `files`
-            # skill (isolated runner context) so raw file content never lands
-            # in the slim main loop. Plumbing is kept (the kwarg below) for a
-            # possible bounded direct-read exception later.
-            direct_tools: dict = {}
+            # Direct tools: read/list/grep route through the `files` skill
+            # (isolated runner context) so raw file content never lands in
+            # the slim main loop. attach_file runs inline — it only queues
+            # bytes for the interface to send, no LLM-visible file content.
+            attachment_cfg = self.config.get("attachments", {}) or {}
+            direct_tools: dict = {"attach_file": AttachFileTool()}
 
             agent = ChatAgent(
                 llm=chat_llm,
@@ -245,6 +246,7 @@ class App:
                 workspace_search_cfg=ws_search_cfg,
                 max_tool_turns=chat_max_turns,
                 direct_tools=direct_tools,
+                attachment_cfg=attachment_cfg,
                 **kwargs,
             )
             # Resolve session/thread-specific agent selectors at run() time.

@@ -227,6 +227,15 @@ workspace:
     # weekly_squash_time: "23:30"  # squash all weekly commits into one (default: 23:30)
     # push: false                  # push to remote after squash (uses --force-with-lease)
 
+# File / image attachments — received files and images from any interface are
+# saved to <workspace>/Downloads/ and tracked in downloads_index.json. The
+# attach_file direct tool lets the LLM re-attach saved files to its replies.
+attachments:
+  max_incoming_bytes: 26214400    # 25 MB — reject larger incoming files
+  max_outgoing_bytes: 26214400    # 25 MB — attach_file hard cap
+  # extra_allowed_roots:           # additional absolute paths the attach_file
+  #   - /srv/shared                # tool may read from (besides the workspace)
+
 # CalDAV/CardDAV server — maps Radicale login names to picoclaw user_ids.
 # Login name = htpasswd username = first URL path component (e.g. /chris/calendar/).
 # Add users to radicale/users with: htpasswd -B -b radicale/users chris mypassword

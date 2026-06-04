@@ -9,6 +9,23 @@ rename it to the new version with a date and bump `pawlia.__version__`.
 See `agents.md` › "Versioning & Releases (git-flow)".
 
 ## [Unreleased]
+### Added
+- File / image attachments over Matrix, Telegram, and Discord.
+- Incoming files and images are saved to `<workspace>/Downloads/` and tracked
+  in `downloads_index.json` (kept outside the workspace so it does not
+  pollute the workspace git repo).
+- `attach_file` direct tool — the LLM can re-attach a previously received or
+  generated file (e.g. a rain-radar GIF) to its next reply. Path is validated
+  against the workspace + `attachments.extra_allowed_roots`; symlinks and
+  path traversal are rejected.
+- Per-interface attachment senders:
+  - Matrix: `client.upload()` + `room_send(msgtype=m.image|video|audio|file)`
+  - Telegram: `send_photo()` for images, `send_document()` for everything else
+  - Discord: `channel.send(file=discord.File(...))`
+- New `on_document` handler on the Telegram interface (PDFs, Office docs,
+  archives, etc.) — previously only photos and voice were handled.
+- Config section `attachments:` with `max_incoming_bytes` (25 MB),
+  `max_outgoing_bytes` (25 MB) and `extra_allowed_roots` defaults.
 
 ## [0.1.0] - 2026-06-04
 ### Added
