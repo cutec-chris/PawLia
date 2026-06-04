@@ -406,10 +406,19 @@ async def test_process_speech_writes_debug_wav(tmp_path):
     finally:
         matrix_call.logger.setLevel(old_level)
 
+    import shutil
     debug_dir = tmp_path / "log" / "debug_audio"
-    files = list(debug_dir.glob("*.flac"))
-    assert len(files) == 1
-    assert files[0].stat().st_size > 42  # fLaC marker (4) + STREAMINFO block (38)
+    # The code writes a .wav and only converts to .flac when the `flac` CLI is
+    # installed (matrix_call.py: shutil.which("flac")). Assert against whichever
+    # format this environment actually produces.
+    if shutil.which("flac"):
+        files = list(debug_dir.glob("*.flac"))
+        assert len(files) == 1
+        assert files[0].stat().st_size > 42  # fLaC marker (4) + STREAMINFO block (38)
+    else:
+        files = list(debug_dir.glob("*.wav"))
+        assert len(files) == 1
+        assert files[0].stat().st_size > 44  # minimal WAV header
 
 
 def test_should_transcribe_chunk_rejects_background_noise():
