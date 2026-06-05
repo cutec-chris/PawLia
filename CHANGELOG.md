@@ -26,6 +26,16 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   archives, etc.) — previously only photos and voice were handled.
 - Config section `attachments:` with `max_incoming_bytes` (25 MB),
   `max_outgoing_bytes` (25 MB) and `extra_allowed_roots` defaults.
+- Runtime vision-capability detection: when an image arrives, PawLia checks
+  whether the image-handling model can actually see. Detection order is the
+  explicit `supports_images` model-config flag → a cached probe result →
+  a one-time verified probe (a tiny generated image is sent and the answer
+  checked) → a name heuristic. Results are cached in
+  `<session_dir>/model_capabilities.json`.
+- Vision-blind fallback: if the image model can't see, a vision-capable model
+  from the fallback chain describes the image and the description is injected
+  into context as text — invisible to the user — so a text-only chat model can
+  still reason about images and keep driving the conversation.
 
 ## [0.1.0] - 2026-06-04
 ### Added

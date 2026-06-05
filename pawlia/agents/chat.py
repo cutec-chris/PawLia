@@ -201,6 +201,7 @@ class ChatAgent(BaseAgent):
         max_tool_turns: Optional[int] = None,
         direct_tools: Optional[Dict[str, "Tool"]] = None,
         attachment_cfg: Optional[Dict[str, Any]] = None,
+        llm_factory: Optional[Any] = None,
     ):
         super().__init__(llm, logger)
         self._all_skills = dict(skills)  # unfiltered — kept for re-enable support
@@ -242,6 +243,12 @@ class ChatAgent(BaseAgent):
         self._skills_refresher: Optional[Callable[[], None]] = None
         # Optional callback returning the active context window for an agent type.
         self._context_window_resolver: Optional[Callable[[str, Optional[str]], int]] = None
+
+        # LLM factory + per-thread agent overrides — used to probe whether the
+        # image-handling model can actually see, and (when it can't) to borrow
+        # a vision-capable model from the fallback chain to describe images.
+        self._llm_factory: Optional[Any] = llm_factory
+        self._overrides_resolver: Optional[Callable[[Optional[str]], Dict[str, Any]]] = None
 
     def _bind_all_tools(self, llm=None, vision_llm=None) -> None:
         """Bind skill specs + direct tool specs to the LLM."""
@@ -857,25 +864,32 @@ class ChatAgent(BaseAgent):
                     content=self._format_replayed_assistant_turn(bot_text, tool_calls_info)
                 ))
 
+        # Decide how to feed images: inline (model can see) or as injected
+        # text descriptions (model is blind → a vision model describes them).
+        inline_images, image_descriptions = (images, [])
+        if images:
+            inline_images, image_descriptions = await self._prepare_image_input(images, thread_id)
+        vision_turn = bool(inline_images)
+
         # Resolve the LLMs to use for this call.
         # A thread-specific model override takes priority over the session default.
-        bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
+        bound_llm, unbound_llm = self._resolve_llms(thread_id, images=vision_turn)
 
         context_block, clean_input = _augment_with_workspace_refs(user_input, self.session)
 
-        # Build multimodal content when images are present
-        if images:
-            self.logger.debug("Sending %d image(s) to LLM", len(images))
+        # Build multimodal content when images are sent inline
+        if inline_images:
+            self.logger.debug("Sending %d image(s) to LLM", len(inline_images))
             if context_block:
                 messages.append(HumanMessage(content=context_block))
             content: List[Dict[str, Any]] = [{"type": "text", "text": clean_input or "What's in this image?"}]
-            for data_uri in images:
+            for data_uri in inline_images:
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             messages.append(HumanMessage(content=content))
         else:
             if context_block:
                 messages.append(HumanMessage(content=context_block))
-            messages.append(HumanMessage(content=clean_input))
+            messages.append(HumanMessage(content=self._with_image_descriptions(clean_input, image_descriptions)))
 
         # Turn 1: LLM decides whether to call a skill or answer directly
         active_llm = bound_llm
@@ -883,7 +897,7 @@ class ChatAgent(BaseAgent):
             messages,
             llm=active_llm,
             thread_id=thread_id,
-            images=bool(images),
+            images=vision_turn,
         )
 
         tool_calls_info: List[Dict[str, Any]] = []
@@ -918,7 +932,7 @@ class ChatAgent(BaseAgent):
                         messages,
                         llm=active_llm,
                         thread_id=thread_id,
-                        images=bool(images),
+                        images=vision_turn,
                     )
                     continue
                 if self._should_nudge_for_incomplete_task(
@@ -937,7 +951,7 @@ class ChatAgent(BaseAgent):
                         messages,
                         llm=active_llm,
                         thread_id=thread_id,
-                        images=bool(images),
+                        images=vision_turn,
                     )
                     continue
                 break
@@ -971,7 +985,7 @@ class ChatAgent(BaseAgent):
                 messages,
                 llm=active_llm,
                 thread_id=thread_id,
-                images=bool(images),
+                images=vision_turn,
             )
 
         else:
@@ -982,7 +996,7 @@ class ChatAgent(BaseAgent):
                 self._prepare_messages_for_context_budget(
                     messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)],
                     thread_id=thread_id,
-                    images=bool(images),
+                    images=vision_turn,
                 ),
                 llm=unbound_llm,
             )
@@ -1055,22 +1069,27 @@ class ChatAgent(BaseAgent):
                     content=self._format_replayed_assistant_turn(bot_text, tc_info)
                 ))
 
-        bound_llm, unbound_llm = self._resolve_llms(thread_id, images=bool(images))
+        inline_images, image_descriptions = (images, [])
+        if images:
+            inline_images, image_descriptions = await self._prepare_image_input(images, thread_id)
+        vision_turn = bool(inline_images)
+
+        bound_llm, unbound_llm = self._resolve_llms(thread_id, images=vision_turn)
         first_turn_llm = bound_llm if allow_skills else unbound_llm
 
         context_block, clean_input = _augment_with_workspace_refs(user_input, self.session)
 
-        if images:
+        if inline_images:
             if context_block:
                 messages.append(HumanMessage(content=context_block))
             content: List[Dict[str, Any]] = [{"type": "text", "text": clean_input or "What's in this image?"}]
-            for data_uri in images:
+            for data_uri in inline_images:
                 content.append({"type": "image_url", "image_url": {"url": data_uri}})
             messages.append(HumanMessage(content=content))
         else:
             if context_block:
                 messages.append(HumanMessage(content=context_block))
-            messages.append(HumanMessage(content=clean_input))
+            messages.append(HumanMessage(content=self._with_image_descriptions(clean_input, image_descriptions)))
 
         # ---- Stream turn 1 ----
         # _partial_text tracks generated text for persist-on-cancel (barge-in during TTS
@@ -1082,7 +1101,7 @@ class ChatAgent(BaseAgent):
                 first_turn_llm,
                 on_sentence,
                 thread_id=thread_id,
-                images=bool(images),
+                images=vision_turn,
             )
             _partial_text = raw_text
 
@@ -1097,7 +1116,7 @@ class ChatAgent(BaseAgent):
                     messages,
                     llm=retry_llm,
                     thread_id=thread_id,
-                    images=bool(images),
+                    images=vision_turn,
                 )
                 raw_text = accumulated.content if isinstance(accumulated.content, str) else ""
                 _partial_text = raw_text
@@ -1139,7 +1158,7 @@ class ChatAgent(BaseAgent):
                     messages,
                     llm=bound_llm,
                     thread_id=thread_id,
-                    images=bool(images),
+                    images=vision_turn,
                 )
 
                 if not next_response.tool_calls:
@@ -1365,6 +1384,97 @@ class ChatAgent(BaseAgent):
             if hasattr(l, "set_on_fallback") and self._on_fallback:
                 l.set_on_fallback(self._on_fallback)
         return (self.vision_bound_llm if images else self.bound_llm), self.llm
+
+    async def _prepare_image_input(
+        self, images: List[str], thread_id: Optional[str]
+    ) -> Tuple[Optional[List[str]], List[str]]:
+        """Decide how to feed *images* to the model.
+
+        Returns ``(inline_images, descriptions)``:
+
+        * ``(images, [])`` — the image-handling model can see; send the image
+          data inline (best fidelity). This is the default and the only path
+          when no factory is wired.
+        * ``(None, [descriptions])`` — the image-handling model is blind, so a
+          vision-capable model from the fallback chain has described each image
+          as text. The caller injects that text into context instead of the
+          image data and runs the normal chat model.
+
+        Any failure degrades gracefully to inline sending — image handling must
+        never break because the probe misbehaved.
+        """
+        factory = self._llm_factory
+        session_dir = getattr(self.memory, "session_dir", None) if self.memory else None
+        if not factory or not session_dir or not images:
+            return images, []
+
+        from pawlia import vision_probe
+
+        overrides = self._overrides_resolver(thread_id) if self._overrides_resolver else None
+        try:
+            chain = factory.get_fallback_chain("vision", agent_overrides=overrides)
+        except Exception as exc:
+            self.logger.debug("vision: could not resolve vision chain (%s); sending inline", exc)
+            return images, []
+        if not chain:
+            return images, []
+
+        try:
+            primary_sees = await vision_probe.resolve_supports_images(factory, session_dir, chain[0])
+        except Exception as exc:
+            self.logger.debug("vision: capability probe failed (%s); sending inline", exc)
+            return images, []
+        if primary_sees:
+            return images, []
+
+        # Primary image model is blind — borrow the first vision-capable model
+        # from the chain to describe the image(s).
+        describer_name = None
+        for name in chain[1:]:
+            try:
+                if await vision_probe.resolve_supports_images(factory, session_dir, name):
+                    describer_name = name
+                    break
+            except Exception:
+                continue
+        if not describer_name:
+            self.logger.warning(
+                "vision: model '%s' cannot see and no vision-capable fallback found; sending inline",
+                chain[0],
+            )
+            return images, []
+
+        try:
+            describer = factory.get_with_model(describer_name)
+        except Exception as exc:
+            self.logger.warning("vision: cannot build describer '%s' (%s); sending inline", describer_name, exc)
+            return images, []
+
+        descriptions: List[str] = []
+        for uri in images:
+            desc = await vision_probe.describe_image(describer, uri)
+            descriptions.append(desc or "(Bild konnte nicht analysiert werden.)")
+        self.logger.info(
+            "vision: '%s' is blind — described %d image(s) via '%s' and injecting as text",
+            chain[0], len(descriptions), describer_name,
+        )
+        return None, descriptions
+
+    @staticmethod
+    def _with_image_descriptions(clean_input: str, descriptions: List[str]) -> str:
+        """Fold vision-model image descriptions into the user turn as context.
+
+        The user never sees this text — it lives only in the LLM context so a
+        text-only chat model can reason about images it cannot natively view.
+        """
+        base = clean_input or "(Bild ohne Begleittext gesendet.)"
+        if not descriptions:
+            return base
+        if len(descriptions) == 1:
+            block = f"[Bildanalyse]: {descriptions[0]}"
+        else:
+            block = "\n".join(f"[Bildanalyse {i + 1}]: {d}" for i, d in enumerate(descriptions))
+        return f"{base}\n\n{block}"
 
     def set_callbacks(self, *, on_fallback: Optional[Callable[[str, str], None]] = None) -> None:
         """Register callbacks for this agent instance.

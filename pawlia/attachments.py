@@ -154,18 +154,3 @@ def list_index_file(path: str) -> list:
 
 def list_for_user(session_dir: str, user_id: str) -> List[AttachmentMeta]:
     return [AttachmentMeta.from_dict(e) for e in list_index_file(index_path(session_dir, user_id))]
-
-
-def resolve_under_downloads(
-    session_dir: str, user_id: str, relpath: str
-) -> Optional[str]:
-    """Resolve ``relpath`` under the user's Downloads dir to an absolute path.
-
-    Returns ``None`` if the resolved path would escape the downloads
-    directory (defence against path traversal in the ``attach_file`` tool).
-    """
-    ddir = os.path.realpath(downloads_dir(session_dir, user_id))
-    candidate = os.path.realpath(os.path.join(ddir, relpath or ""))
-    if candidate != ddir and not candidate.startswith(ddir + os.sep):
-        return None
-    return candidate
