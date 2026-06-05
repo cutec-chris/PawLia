@@ -66,11 +66,11 @@ class SkillRunnerAgent(BaseAgent):
     tool-call mode produces no output, falls back to command mode.
 
     Context policy: the skill's tool-call history is kept **complete** for
-    the entire run. No trimming, no summarization, no truncation of tool
-    outputs between turns. Compaction is allowed ONLY as a guardrail when
-    the real LLM context window is about to overflow — and even then via
-    summary, never by dropping messages. Do not introduce prune/shrink
-    heuristics in this loop.
+    the entire run. Individual tool outputs larger than 4 kB are truncated
+    (the LLM only needs success status and key fields; raw output is in
+    the Docker logs). Compaction is allowed ONLY as a guardrail when the
+    real LLM context window is about to overflow — and even then via
+    summary, never by dropping messages.
     """
 
     MAX_TOOL_TURNS = 30
@@ -349,6 +349,16 @@ class SkillRunnerAgent(BaseAgent):
             else:
                 clean_lines.append(line)
         result_str = "\n".join(clean_lines)
+
+        # Keep tool results small enough for the model context window.
+        # The LLM rarely needs more than a few hundred chars — just success
+        # status, paths, and key fields.  The full raw output is in the
+        # Docker logs if ever needed for debugging.
+        MAX_RESULT = 4_000
+        if len(result_str) > MAX_RESULT:
+            omitted = len(result_str) - MAX_RESULT
+            result_str = result_str[:MAX_RESULT].rstrip()
+            result_str += f"\n\n[Tool output truncated: {omitted} characters omitted]"
 
         messages.append(ToolMessage(content=result_str, tool_call_id=tc_id))
         return result

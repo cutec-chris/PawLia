@@ -7,6 +7,7 @@ Config (in config.yaml under "interfaces.telegram"):
 """
 
 import asyncio
+import io
 import logging
 import re
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -34,6 +35,7 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     """
     token: str = cfg["token"]
 
+    from pawlia import attachments
     from pawlia.interfaces.common import (
         AgentCache, build_status, format_status, md_to_tg_html,
         handle_model_command,
@@ -45,6 +47,46 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     # One agent per user; thread context is passed at run() time
     agent_cache = AgentCache(app)
     chat_ids: Dict[str, int] = {}
+
+    def _max_incoming_bytes() -> int:
+        return int(
+            (app.config.get("attachments") or {}).get("max_incoming_bytes")
+            or 26214400
+        )
+
+    def _save_telegram_bytes(user_id: str, data: bytes, filename: str, mimetype: Optional[str]) -> None:
+        try:
+            attachments.save_incoming(
+                session_dir=app.session_dir,
+                user_id=user_id,
+                data=data,
+                filename=filename,
+                source="telegram",
+                mimetype=mimetype,
+                max_bytes=_max_incoming_bytes(),
+            )
+        except Exception as exc:
+            logger.warning("Telegram: failed to save incoming file %s: %s", filename, exc)
+
+    async def _send_attachment(bot_inst, chat_id: int, thread_id: Optional[int], att: dict) -> None:
+        data: bytes = att.get("data") or b""
+        mimetype: str = att.get("mimetype") or "application/octet-stream"
+        filename: str = att.get("filename") or "attachment"
+        caption: Optional[str] = att.get("caption")
+        kwargs = {"message_thread_id": thread_id} if thread_id else {}
+        if caption:
+            kwargs["caption"] = caption
+        try:
+            if mimetype.lower().startswith("image/"):
+                await bot_inst.send_photo(
+                    chat_id=chat_id, photo=data, filename=filename, **kwargs,
+                )
+            else:
+                await bot_inst.send_document(
+                    chat_id=chat_id, document=data, filename=filename, **kwargs,
+                )
+        except Exception as exc:
+            logger.error("Telegram: failed to send attachment %s: %s", filename, exc)
 
     async def _handle(update: Update, user_id: str, text: str,
                       thread_id: Optional[int] = None,
@@ -133,6 +175,11 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
             await update.message.reply_text(
                 md_to_tg_html(response), parse_mode=ParseMode.HTML,
             )
+            # Drain any attachments queued by direct tools (e.g. attach_file).
+            bot_inst = update.get_bot()
+            chat_id = update.message.chat_id
+            for att in getattr(agent, "pending_attachments", []) or []:
+                await _send_attachment(bot_inst, chat_id, thread_id, att)
         except Exception as e:
             logger.error("Telegram: error processing message: %s", e)
             session = app.memory.load_session(user_id)
@@ -319,13 +366,51 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
         # Grab the highest-resolution photo
         photo = update.message.photo[-1]
         file = await photo.get_file()
-        data = await file.download_as_bytearray()
-        data_uri = bytes_to_data_uri(bytes(data), "image/jpeg")
+        data = bytes(await file.download_as_bytearray())
+        data_uri = bytes_to_data_uri(data, "image/jpeg")
 
         caption = (update.message.caption or "").strip()
 
+        # Persist a copy under the user's Downloads/ folder so the user can
+        # later ask the bot to re-send the photo via the attach_file tool.
+        photo_filename = f"telegram-photo-{int.from_bytes(data[:8], 'big') & 0xffffff:06x}.jpg"
+        _save_telegram_bytes(user_id, data, photo_filename, "image/jpeg")
+
         logger.info("Telegram: photo from %s (%s), caption: %s", user.first_name, user_id, caption[:80])
         await _handle(update, user_id, caption, thread_id=thread_id, images=[data_uri])
+
+    async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle generic file uploads (PDFs, Office docs, archives, etc.)."""
+        if not update.message or not update.message.document:
+            return
+
+        user = update.message.from_user
+        if user is None:
+            return
+
+        user_id = f"tg_{user.id}"
+        chat_ids[user_id] = update.message.chat_id
+        thread_id: Optional[int] = update.message.message_thread_id
+
+        doc = update.message.document
+        try:
+            tg_file = await doc.get_file()
+            data = bytes(await tg_file.download_as_bytearray())
+        except Exception as exc:
+            logger.warning("Telegram: failed to download document: %s", exc)
+            return
+
+        filename = doc.file_name or "document"
+        mimetype = doc.mime_type or "application/octet-stream"
+        caption = (update.message.caption or "").strip()
+
+        _save_telegram_bytes(user_id, data, filename, mimetype)
+
+        logger.info(
+            "Telegram: document from %s (%s): %s (%s, %d bytes)",
+            user.first_name, user_id, filename, mimetype, len(data),
+        )
+        await _handle(update, user_id, caption, thread_id=thread_id)
 
     async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.message:
@@ -393,6 +478,9 @@ async def start_telegram(app: "App", cfg: Dict) -> None:
     )
     application.add_handler(
         MessageHandler(filters.PHOTO, on_photo),
+    )
+    application.add_handler(
+        MessageHandler(filters.Document.ALL, on_document),
     )
     application.add_handler(
         MessageHandler(filters.VOICE | filters.AUDIO, on_voice),

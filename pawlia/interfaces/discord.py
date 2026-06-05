@@ -14,6 +14,7 @@ Config (in config.yaml under "interfaces.discord"):
 """
 
 import asyncio
+import io
 import logging
 import os
 import tempfile
@@ -246,6 +247,42 @@ async def start_discord(app: "App", cfg: Dict) -> None:
             logger.warning("Discord: failed to download attachment %s: %s", att.filename, e)
             return None
 
+    def _max_incoming_bytes() -> int:
+        return int(
+            (app.config.get("attachments") or {}).get("max_incoming_bytes")
+            or 26214400
+        )
+
+    def _save_discord_bytes(
+        user_id: str, data: bytes, filename: str, mimetype: Optional[str]
+    ) -> None:
+        try:
+            from pawlia import attachments
+            attachments.save_incoming(
+                session_dir=app.session_dir,
+                user_id=user_id,
+                data=data,
+                filename=filename,
+                source="discord",
+                mimetype=mimetype,
+                max_bytes=_max_incoming_bytes(),
+            )
+        except Exception as exc:
+            logger.warning("Discord: failed to save incoming file %s: %s", filename, exc)
+
+    async def _send_attachment(channel, att: dict) -> None:
+        data: bytes = att.get("data") or b""
+        mimetype: str = att.get("mimetype") or "application/octet-stream"
+        filename: str = att.get("filename") or "attachment"
+        caption: Optional[str] = att.get("caption")
+        try:
+            kwargs: Dict[str, Any] = {"file": discord.File(io.BytesIO(data), filename=filename)}
+            if caption:
+                kwargs["content"] = caption
+            await channel.send(**kwargs)
+        except Exception as exc:
+            logger.error("Discord: failed to send attachment %s: %s", filename, exc)
+
     # ------------------------------------------------------------------
     # Voice message handling
     # ------------------------------------------------------------------
@@ -300,12 +337,21 @@ async def start_discord(app: "App", cfg: Dict) -> None:
         images: List[discord.Attachment],
     ) -> None:
         data_uris = []
+        guild_id = message.guild.id if message.guild else 0
+        channel_id = message.channel.id
+        user_id = _session_id(guild_id, channel_id)
         for att in images[:4]:  # max 4 images per message
             data = await _download_attachment(att)
             if data:
                 mimetype = att.content_type or "image/png"
                 data_uri = bytes_to_data_uri(data, mimetype)
                 data_uris.append(data_uri)
+                # Persist a copy under the user's Downloads/ folder so the
+                # user can later ask the bot to re-send the image via the
+                # attach_file tool.
+                _save_discord_bytes(
+                    user_id, data, att.filename or "image", mimetype,
+                )
 
         if not data_uris:
             return
@@ -326,7 +372,14 @@ async def start_discord(app: "App", cfg: Dict) -> None:
             return
 
         filename = attachment.filename or "attachment"
+        mimetype = attachment.content_type or "application/octet-stream"
         ext = _file_ext(filename)
+
+        # Persist a copy under the user's Downloads/ folder so the user can
+        # later ask the bot to re-send the file via the attach_file tool.
+        guild_id = message.guild.id if message.guild else 0
+        channel_id = message.channel.id
+        _save_discord_bytes(_session_id(guild_id, channel_id), data, filename, mimetype)
 
         if ext in _TEXT_FILE_EXTENSIONS:
             for encoding in ("utf-8-sig", "utf-8", "latin-1"):
@@ -607,6 +660,10 @@ async def start_discord(app: "App", cfg: Dict) -> None:
 
         logger.info("Discord: response in %s/%s%s: %s", guild_id, channel_id, ctx, preview_text(response))
         await _reply(message, response)
+        # Drain any attachments queued by direct tools (e.g. attach_file)
+        # and ship them as separate Discord messages after the text reply.
+        for att in getattr(agent, "pending_attachments", []) or []:
+            await _send_attachment(message.channel, att)
 
     # ------------------------------------------------------------------
     # Event handlers

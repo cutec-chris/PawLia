@@ -200,6 +200,7 @@ class ChatAgent(BaseAgent):
         workspace_search_cfg: Optional[Dict[str, Any]] = None,
         max_tool_turns: Optional[int] = None,
         direct_tools: Optional[Dict[str, "Tool"]] = None,
+        attachment_cfg: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(llm, logger)
         self._all_skills = dict(skills)  # unfiltered — kept for re-enable support
@@ -209,6 +210,7 @@ class ChatAgent(BaseAgent):
         self.session = session
         self.on_interim = on_interim
         self._workspace_search_cfg: Dict[str, Any] = workspace_search_cfg or {}
+        self._attachment_cfg: Dict[str, Any] = dict(attachment_cfg or {})
         self.on_skill_start: Optional[SkillStartCallback] = None  # (skill_name, query)
         self.on_skill_step: Optional[InterimCallback] = None      # (step_description)
         self.on_skill_done: Optional[SkillDoneCallback] = None    # (skill_name, result)
@@ -218,6 +220,12 @@ class ChatAgent(BaseAgent):
 
         # Direct tools (e.g. read_file, list_files) — executed inline without SkillRunner
         self.direct_tools: Dict[str, "Tool"] = dict(direct_tools) if direct_tools else {}
+
+        # Files queued by direct tools (e.g. attach_file) to be sent as part
+        # of the next reply. Drained by the chat interface after run() returns.
+        # Each entry: {"data": bytes, "mimetype": str, "filename": str,
+        #              "caption": Optional[str], "size": int}.
+        self.pending_attachments: List[Dict[str, Any]] = []
 
         # Bind all tool specs (skills + direct tools) so the LLM can call them
         self._bind_all_tools(llm, vision_llm)
@@ -403,6 +411,16 @@ class ChatAgent(BaseAgent):
                     context["user_id"] = getattr(self.session, "user_id", "")
                 if self.memory:
                     context["session_dir"] = self.memory.session_dir
+                # Direct tools (e.g. attach_file) use this to push files onto
+                # the agent's outgoing attachment queue.
+                context["agent"] = self
+                # Attachment policy from the [attachments] config section.
+                context["max_outgoing_bytes"] = int(
+                    self._attachment_cfg.get("max_outgoing_bytes") or 26214400
+                )
+                context["attachment_extra_roots"] = list(
+                    self._attachment_cfg.get("extra_allowed_roots") or []
+                )
                 try:
                     result = direct_tool.execute(normalized_args, context=context)
                 except Exception as exc:
@@ -803,6 +821,10 @@ class ChatAgent(BaseAgent):
         Optional per-call callbacks override instance-level attributes to avoid
         race conditions when the same agent is shared across concurrent requests.
         """
+        # Reset attachment queue: anything queued by the previous turn must
+        # not leak into this turn's reply.
+        self.pending_attachments = []
+
         # Resolve callbacks: per-call overrides > instance attributes
         _on_skill_start = on_skill_start or self.on_skill_start
         _on_skill_step = on_skill_step or self.on_skill_step
@@ -1001,6 +1023,10 @@ class ChatAgent(BaseAgent):
         execution when tool calls are detected; the final-answer turn is also
         streamed.
         """
+        # Reset attachment queue so a previous turn's attachments don't leak
+        # into this turn's reply.
+        self.pending_attachments = []
+
         _on_skill_start = on_skill_start or self.on_skill_start
         _on_skill_step = on_skill_step or self.on_skill_step
         _on_skill_done = on_skill_done or self.on_skill_done
