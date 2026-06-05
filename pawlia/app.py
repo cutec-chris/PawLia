@@ -248,7 +248,14 @@ class App:
                 max_tool_turns=chat_max_turns,
                 direct_tools=direct_tools,
                 attachment_cfg=attachment_cfg,
+                llm_factory=self.llm,
                 **kwargs,
+            )
+            # Per-thread agent overrides — lets the agent probe the resolved
+            # vision model and borrow a describer from the fallback chain.
+            agent._overrides_resolver = (
+                lambda thread_id=None:
+                self.memory.effective_agent_overrides(session, thread_id)
             )
             # Resolve session/thread-specific agent selectors at run() time.
             agent._agent_llm_resolver = (

@@ -38,6 +38,15 @@ models:
   # vision:
   #   model: qwen2.5vl:latest
   #   provider: ollama
+  #   # supports_images: true   # optional — skip the auto-probe and declare
+  #   #                         # image support explicitly (true/false). When
+  #   #                         # omitted, PawLia probes the model once with a
+  #   #                         # tiny test image and caches the result in
+  #   #                         # <session_dir>/model_capabilities.json.
+  #   #                         # If the image-handling model can't see, a
+  #   #                         # vision-capable model from the fallback chain
+  #   #                         # describes the image and the text is fed to the
+  #   #                         # chat model transparently.
   # groq-fast:
   #   model: qwen3:4b
   #   provider: groq
