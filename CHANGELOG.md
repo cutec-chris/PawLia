@@ -48,6 +48,22 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   from the fallback chain describes the image and the description is injected
   into context as text — invisible to the user — so a text-only chat model can
   still reason about images and keep driving the conversation.
+- Searchable sidecar markdown for incoming attachments, plus bridging of
+  received images into live (voice) calls.
+- Index-free recall of recent threads in memory search — recent conversation
+  context is surfaced even before the memory index has been built.
+
+### Changed
+- Incoming attachments are unified into a single link + description note
+  instead of separate handling per type.
+
+### Fixed
+- Reminders fire in the user's timezone and @-mention the user on notify;
+  `tzdata` added so `zoneinfo` resolves IANA zones on Alpine.
+- Matrix: the conversation turn is persisted even when `agent.run()` raises,
+  so an errored turn is no longer lost.
+- Skill runner: oversized tool outputs are truncated to 4 kB to keep them from
+  blowing up the context window.
 
 ## [0.1.0] - 2026-06-04
 ### Added
