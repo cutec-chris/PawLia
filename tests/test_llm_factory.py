@@ -268,6 +268,76 @@ def test_context_length_errors_do_not_blacklist_model(monkeypatch: pytest.Monkey
     assert built["m2"].calls == 4
 
 
+def test_task_specific_errors_do_not_blacklist_model(monkeypatch: pytest.MonkeyPatch):
+    """A malformed/400 request is a property of *this* prompt, not the model's
+    health — the model must stay available for other callers (e.g. a live call
+    sharing the cached fallback chain), so it keeps getting retried."""
+    config = _base_config()
+    config["agents"]["chat"] = "m1,m2"
+
+    built: Dict[str, _DummyLLM] = {}
+
+    class _BadRequestError(RuntimeError):
+        status_code = 400
+
+    class _FormatFailLLM(_DummyLLM):
+        def invoke(self, messages: List[Any], **kwargs: Any) -> str:
+            self.calls += 1
+            raise _BadRequestError("invalid request payload")
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        model_name = str(model_cfg["model"])
+        llm = _FormatFailLLM(model_name=model_name) if model_name == "m1" else _DummyLLM(model_name=model_name)
+        built[model_name] = llm
+        return llm
+
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat")
+
+    for _ in range(4):
+        assert llm.invoke([]) == "ok-m2"
+
+    # m1 never gets benched for a task-specific (format) error.
+    assert built["m1"].calls == 4
+    assert built["m2"].calls == 4
+
+
+def test_rate_limit_errors_do_blacklist_model(monkeypatch: pytest.MonkeyPatch):
+    """Rate limiting is provider-wide and transient — benching the model for a
+    cooldown is correct, so m1 stops being called after the threshold."""
+    config = _base_config()
+    config["agents"]["chat"] = "m1,m2"
+
+    built: Dict[str, _DummyLLM] = {}
+    now = 1000.0
+
+    class _RateLimitLLM(_DummyLLM):
+        def invoke(self, messages: List[Any], **kwargs: Any) -> str:
+            self.calls += 1
+            raise RuntimeError("Error code: 429 - rate limit exceeded, try again in 20s")
+
+    def fake_build(self: LLMFactory, model_cfg: Dict[str, Any]) -> _DummyLLM:
+        model_name = str(model_cfg["model"])
+        llm = _RateLimitLLM(model_name=model_name) if model_name == "m1" else _DummyLLM(model_name=model_name)
+        built[model_name] = llm
+        return llm
+
+    monkeypatch.setattr("pawlia.llm.time.monotonic", lambda: now)
+    monkeypatch.setattr(LLMFactory, "_build", fake_build)
+
+    factory = LLMFactory(config)
+    llm = factory.get("chat")
+
+    for _ in range(4):
+        assert llm.invoke([]) == "ok-m2"
+
+    # After 3 rate-limit failures m1 is blacklisted; the 4th call skips it.
+    assert built["m1"].calls == 3
+    assert built["m2"].calls == 4
+
+
 def test_fallback_skips_models_with_too_small_context(monkeypatch: pytest.MonkeyPatch):
     config = _base_config()
     config["agents"]["chat"] = "m1,m2"

@@ -96,6 +96,23 @@ def is_context_length_error(exc: BaseException) -> bool:
     return category == ErrorCategory.context_overflow
 
 
+# Only *availability*-type failures justify benching a model across requests:
+# the provider is throttled (rate_limit) or transiently down/slow (timeout,
+# server_error), which is genuinely model/provider-wide and shared by every
+# caller. Task- or prompt-specific failures are properties of *this* request,
+# not the model's health — the prompt is too big (context_overflow), the model
+# botched the tool call or the request was malformed (format_error), or the key
+# is bad (auth_error). Blacklisting for those would wrongly degrade unrelated
+# concurrent work (e.g. a live call) that shares the same cached fallback chain;
+# the per-request fallback handles them instead.
+_BLACKLIST_ELIGIBLE_CATEGORIES = frozenset({
+    ErrorCategory.rate_limit,
+    ErrorCategory.timeout,
+    ErrorCategory.server_error,
+    ErrorCategory.unknown,
+})
+
+
 def estimate_max_tool_turns(model_name: str) -> int:
     """Heuristic budget for SkillRunner tool-call loops, derived from model name.
 
@@ -359,9 +376,15 @@ class _FallbackLLMWrapper:
     def _note_failure(self, idx: int, exc: Exception) -> None:
         self._last_errors[idx] = exc
 
-        if is_context_length_error(exc):
+        category, _ = classify_error(exc)
+        if category not in _BLACKLIST_ELIGIBLE_CATEGORIES:
+            # Task/prompt-specific failure (prompt too large, malformed tool
+            # call, bad credentials). The model isn't unhealthy — only this
+            # request failed — so don't bench it for other callers sharing the
+            # chain. The per-request fallback already moved to the next model.
             logger.warning(
-                "LLM context limit: model '%s' rejected the prompt as too large",
+                "LLM %s: model '%s' failed this request (not counted toward blacklist)",
+                category.value,
                 self._labels[idx],
             )
             return
@@ -372,9 +395,10 @@ class _FallbackLLMWrapper:
             self._blacklisted_until[idx] = now + self._BLACKLIST_COOLDOWN_SECONDS
             self._failures[idx] = 0
             logger.warning(
-                "LLM blacklist: model '%s' failed %d times across requests, skipping it for %d minutes",
+                "LLM blacklist: model '%s' failed %d times (%s), skipping it for %d minutes",
                 self._labels[idx],
                 self._BLACKLIST_THRESHOLD,
+                category.value,
                 self._BLACKLIST_COOLDOWN_SECONDS // 60,
             )
 
