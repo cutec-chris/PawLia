@@ -256,7 +256,7 @@ class SkillRunnerAgent(BaseAgent):
         has_error = False
         retryable_error = False
         for tc in response.tool_calls:
-            result = self._execute_tool_call(tc, messages)
+            result = await self._execute_tool_call(tc, messages)
             if not result.ok:
                 has_error = True
                 retryable_error = retryable_error or result.retryable
@@ -302,7 +302,7 @@ class SkillRunnerAgent(BaseAgent):
             retryable_error = False
             total_tool_calls += len(response.tool_calls)
             for tc in response.tool_calls:
-                result = self._execute_tool_call(tc, messages)
+                result = await self._execute_tool_call(tc, messages)
                 if not result.ok:
                     has_error = True
                     retryable_error = retryable_error or result.retryable
@@ -314,8 +314,15 @@ class SkillRunnerAgent(BaseAgent):
 
         return self.extract_text(response)
 
-    def _execute_tool_call(self, tc: dict, messages: List[BaseMessage]) -> ToolExecutionResult:
-        """Execute a single tool call, append result to messages, and return it."""
+    async def _execute_tool_call(self, tc: dict, messages: List[BaseMessage]) -> ToolExecutionResult:
+        """Execute a single tool call, append result to messages, and return it.
+
+        The actual tool runs in a worker thread (``asyncio.to_thread``) because
+        BashTool uses a blocking ``subprocess.run``; running it inline would
+        freeze the whole event loop for the command's duration — stalling every
+        other thread, live calls, and the //stop command itself. Offloading
+        keeps the loop responsive and lets a cancel land promptly between turns.
+        """
         tc_name = str(tc.get("name", "") or "").strip()
         tc_args = _repair_tool_args(tc.get("args", {}))
         tc_id = tc.get("id", "")
@@ -337,7 +344,9 @@ class SkillRunnerAgent(BaseAgent):
         if self.on_step:
             step = self._friendly_step(tc_name, tc_args)
             asyncio.ensure_future(self.on_step(step[:120]))
-        result = self.tool_registry.execute_detailed(tc_name, tc_args, self.context)
+        result = await asyncio.to_thread(
+            self.tool_registry.execute_detailed, tc_name, tc_args, self.context
+        )
         result_str = result.to_tool_message()
         self.logger.debug("Tool result: %s", result_str[:200])
 
@@ -389,7 +398,9 @@ class SkillRunnerAgent(BaseAgent):
             return self.extract_text(response) or "Error: could not determine command."
 
         self.logger.debug("Executing: %s", command[:200])
-        result = self.tool_registry.execute("bash", {"command": command}, self.context)
+        result = await asyncio.to_thread(
+            self.tool_registry.execute, "bash", {"command": command}, self.context
+        )
         result_str = str(result)
         self.logger.debug("Result: %s", result_str[:300])
 

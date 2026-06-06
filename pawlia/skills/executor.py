@@ -251,7 +251,7 @@ class WorkflowExecutor:
                         if k not in block.env_params
                     }
                 command = self._substitute(block.command, cmd_params)
-                result = self._run_bash(command, env_extra=env_extra)
+                result = await self._run_bash(command, env_extra=env_extra)
                 outputs.append(result.output)
                 for line in result.output.splitlines():
                     if '"__directive__"' in line:
@@ -269,7 +269,7 @@ class WorkflowExecutor:
                     if block.on_error:
                         error_block = self._find_block(workflow, block.on_error)
                         if error_block:
-                            recovery = self._run_bash(
+                            recovery = await self._run_bash(
                                 self._substitute(error_block.command, {})
                             )
                             error_content += f"\n\nRecovery:\n{recovery.output}"
@@ -397,15 +397,22 @@ class WorkflowExecutor:
                 result[str(key)] = str(value)
         return result
 
-    def _run_bash(
+    async def _run_bash(
         self, command: str, env_extra: Optional[Dict[str, str]] = None
     ) -> StepResult:
-        """Execute a bash command via the tool registry."""
+        """Execute a bash command via the tool registry.
+
+        Runs in a worker thread (``asyncio.to_thread``): BashTool blocks on
+        ``subprocess.run``, so running it inline would freeze the event loop —
+        and every other thread/call sharing it — for the command's duration.
+        """
         self.logger.debug("Executing: %s", command[:200])
         ctx = self.context
         if env_extra:
             ctx = {**self.context, "env_extra": env_extra}
-        raw = self.tool_registry.execute_detailed("bash", {"command": command}, ctx)
+        raw = await asyncio.to_thread(
+            self.tool_registry.execute_detailed, "bash", {"command": command}, ctx
+        )
         output = raw.to_tool_message() if not raw.ok else str(raw.output)
         exit_code = 0 if raw.ok else 1
         self.logger.debug("Result (exit=%d): %s", exit_code, output)
