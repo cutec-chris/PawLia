@@ -35,6 +35,9 @@ class _DummyLLM:
 
 def _base_config() -> Dict[str, Any]:
     return {
+        # Probing the (unreachable) test provider would add network latency;
+        # the dedicated probe tests below exercise that path with mocks.
+        "context-probe": {"enabled": False},
         "providers": {
             "test": {
                 "backend": "pawlia",
@@ -630,3 +633,132 @@ def test_summary_threshold_invalid_fraction_falls_back_to_default():
     }
     factory = LLMFactory(config)
     assert factory.summary_threshold_tokens("m1") == int(8192 * 0.6)
+
+
+# ---------------------------------------------------------------------------
+# Context-window API probe (pawlia.context_probe + LLMFactory integration)
+# ---------------------------------------------------------------------------
+
+from pawlia import context_probe  # noqa: E402
+
+
+def test_probe_parses_groq_models_list():
+    body = {"data": [
+        {"id": "other-model", "context_window": 4096},
+        {"id": "openai/gpt-oss-120b", "context_window": 131072},
+    ]}
+    assert context_probe._from_models_list(body, "openai/gpt-oss-120b") == 131072
+
+
+def test_probe_parses_openrouter_context_length():
+    body = {"data": [{"id": "google/gemini-3-flash-preview", "context_length": 1048576}]}
+    assert context_probe._from_models_list(body, "google/gemini-3-flash-preview") == 1048576
+
+
+def test_probe_parses_ollama_show():
+    body = {"model_info": {"qwen35.context_length": 262144, "qwen35.block_count": 64}}
+    assert context_probe._from_ollama_show(body) == 262144
+
+
+def test_probe_returns_none_when_field_absent():
+    body = {"data": [{"id": "glm-5", "object": "model", "owned_by": "z-ai"}]}
+    assert context_probe._from_models_list(body, "glm-5") is None
+
+
+def test_probe_groq_via_models_endpoint(monkeypatch: pytest.MonkeyPatch):
+    calls = {}
+
+    def fake_http(url, headers, payload=None):
+        calls["url"] = url
+        return {"data": [{"id": "gpt-oss", "context_window": 131072}]}
+
+    monkeypatch.setattr(context_probe, "_http_json", fake_http)
+    ctx = context_probe.probe_context_window(
+        {"apiBase": "https://api.groq.com/openai/v1", "apiKey": "k"}, "gpt-oss"
+    )
+    assert ctx == 131072
+    assert calls["url"].endswith("/models")
+
+
+def test_probe_ollama_prefers_api_show(monkeypatch: pytest.MonkeyPatch):
+    seen = []
+
+    def fake_http(url, headers, payload=None):
+        seen.append(url)
+        if url.endswith("/api/show"):
+            return {"model_info": {"llama.context_length": 32768}}
+        raise AssertionError("should not fall through to /models")
+
+    monkeypatch.setattr(context_probe, "_http_json", fake_http)
+    ctx = context_probe.probe_context_window(
+        {"apiBase": "http://192.168.0.5:11434/v1", "apiKey": "ollama"}, "llama3.1:8b"
+    )
+    assert ctx == 32768
+    assert seen[0].endswith("/api/show")
+
+
+def test_probe_swallows_network_errors(monkeypatch: pytest.MonkeyPatch):
+    def boom(url, headers, payload=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(context_probe, "_http_json", boom)
+    assert context_probe.probe_context_window(
+        {"apiBase": "https://api.example/v1", "apiKey": "k"}, "m"
+    ) is None
+
+
+def test_context_size_uses_probe_over_heuristic(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["context-probe"] = {"enabled": True}
+    config["models"]["glm"] = {"model": "glm-5-turbo", "provider": "test"}
+
+    # Heuristic would return 8192 for an unknown model; the probe wins.
+    assert estimate_context_size("glm-5-turbo") == 8192
+    monkeypatch.setattr(
+        "pawlia.llm.probe_context_window", lambda cfg, mid: 131072
+    )
+    factory = LLMFactory(config)
+    assert factory.context_size_for_model("glm") == 131072
+
+
+def test_explicit_context_size_beats_probe(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["context-probe"] = {"enabled": True}
+    config["models"]["glm"] = {"model": "glm-5-turbo", "provider": "test", "context_size": 65536}
+
+    def fail(cfg, mid):  # probe must not even be consulted
+        raise AssertionError("explicit context_size should short-circuit the probe")
+
+    monkeypatch.setattr("pawlia.llm.probe_context_window", fail)
+    factory = LLMFactory(config)
+    assert factory.context_size_for_model("glm") == 65536
+
+
+def test_probe_result_is_cached(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()
+    config["context-probe"] = {"enabled": True}
+    config["models"]["glm"] = {"model": "glm-5-turbo", "provider": "test"}
+
+    calls = {"n": 0}
+
+    def counting_probe(cfg, mid):
+        calls["n"] += 1
+        return 131072
+
+    monkeypatch.setattr("pawlia.llm.probe_context_window", counting_probe)
+    factory = LLMFactory(config)
+    factory.context_size_for_model("glm")
+    factory.context_size_for_model("glm")
+    assert calls["n"] == 1
+
+
+def test_probe_disabled_falls_back_to_heuristic(monkeypatch: pytest.MonkeyPatch):
+    config = _base_config()  # probe disabled by default in _base_config
+    config["models"]["glm"] = {"model": "glm-5-turbo", "provider": "test"}
+
+    def fail(cfg, mid):
+        raise AssertionError("probe must not run when disabled")
+
+    monkeypatch.setattr("pawlia.llm.probe_context_window", fail)
+    factory = LLMFactory(config)
+    assert factory.context_size_for_model("glm") == 8192

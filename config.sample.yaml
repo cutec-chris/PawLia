@@ -79,6 +79,18 @@ providers:
   #   apiBase: https://api.groq.com/openai/v1
   #   apiKey: gsk_...
 
+# Context-window auto-probe. To decide whether a prompt fits a model, PawLia
+# needs each model's context window. Resolution order per model:
+#   1. explicit `context_size:` in the model config (authoritative)
+#   2. value probed from the provider API (cached once per process)
+#   3. name-based heuristic (last resort — goes stale for brand-new models)
+# The probe reads Ollama's /api/show (model_info.context_length), Groq's
+# /models `context_window`, and OpenRouter's /models `context_length`.
+# Providers that expose none (e.g. zai, opencodezen) fall through to the
+# heuristic — set an explicit `context_size:` on those models.
+# context-probe:
+#   enabled: true   # default true; set false to skip the API probe entirely
+
 interfaces:
   # Remove the comment to enable an interface.
 

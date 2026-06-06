@@ -63,6 +63,7 @@ from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
 from pawlia.agents.error_classifier import classify_error, ErrorCategory
+from pawlia.context_probe import probe_context_window
 
 
 logger = logging.getLogger(__name__)
@@ -770,6 +771,13 @@ class LLMFactory:
         self.models: Dict[str, Dict[str, Any]] = config.get("models", {})
         self.agents_cfg: Dict[str, Any] = config.get("agents", {})
         self._cache: Dict[Tuple, Any] = {}
+        # In-process cache of API-probed context windows (keyed by
+        # apiBase::model). ``None`` is cached too, so an unsupported provider
+        # is probed at most once per process.
+        self._ctx_probe_cache: Dict[str, Optional[int]] = {}
+        self._context_probe_enabled = bool(
+            (config.get("context-probe") or {}).get("enabled", True)
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -858,15 +866,47 @@ class LLMFactory:
         """Return per-model context-window size (tokens).
 
         Priority: explicit ``context_size`` (or legacy ``num_ctx``) in the
-        model config → heuristic from the model identifier.
+        model config → window probed from the provider API (cached) →
+        heuristic from the model identifier.
         """
         cfg = self.get_model_config(model_name)
         for key in ("context_size", "num_ctx"):
             explicit = cfg.get(key)
             if isinstance(explicit, int) and explicit > 0:
                 return explicit
+        probed = self._probed_context_size(cfg)
+        if probed is not None:
+            return probed
         model_id = str(cfg.get("model") or model_name)
         return estimate_context_size(model_id)
+
+    def _probed_context_size(self, model_cfg: Dict[str, Any]) -> Optional[int]:
+        """Best-effort context window from the provider API, cached per process.
+
+        Returns ``None`` when probing is disabled, the provider doesn't run on
+        the local backend, or the API doesn't expose a window — so the caller
+        falls back to the name heuristic.
+        """
+        if not self._context_probe_enabled:
+            return None
+        model_id = str(model_cfg.get("model") or "")
+        if not model_id:
+            return None
+        provider_name = model_cfg.get("provider") or self._default_provider_name()
+        provider_cfg = self._get_provider(provider_name)
+        if str(provider_cfg.get("backend") or "pawlia") != "pawlia":
+            return None
+        key = f"{provider_cfg.get('apiBase', '')}::{model_id}"
+        if key in self._ctx_probe_cache:
+            return self._ctx_probe_cache[key]
+        ctx = probe_context_window(provider_cfg, model_id)
+        if ctx is not None:
+            logger.info(
+                "context_probe: %s reports a %d-token context window (via API)",
+                model_id, ctx,
+            )
+        self._ctx_probe_cache[key] = ctx
+        return ctx
 
     def summary_threshold_tokens(self, model_name: str) -> int:
         """Return the token threshold above which the conversation should
