@@ -20,6 +20,21 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]  # thalia/
 BUNDLED_DIR = PROJECT_ROOT / "skills"
 
 
+def _load_sandbox():
+    """Import pawlia.sandbox for write-isolation during `test`.
+
+    Returns the module or None if pawlia is not importable (e.g. the skill was
+    distributed standalone). Enforcement degrades to "no sandbox" in that case.
+    """
+    try:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from pawlia import sandbox  # noqa: WPS433
+        return sandbox
+    except Exception:
+        return None
+
+
 def _workspace_skills_dir() -> Path:
     """Return the user's workspace skills directory from env."""
     session_dir = os.environ.get("PAWLIA_SESSION_DIR")
@@ -613,6 +628,33 @@ def cmd_test(args):
     config_env, missing_config = _build_skill_config_env(name, meta)
     env = {**os.environ, **cred_env, **config_env}
 
+    # Filesystem write policy: the harness may only write under the per-user
+    # session dir or /tmp. Enforce it two ways so a violation is caught at the
+    # latest here, during testing:
+    #   1. bubblewrap — read-only root, writable roots bind-mounted rw (the
+    #      kernel rejects out-of-bounds writes outright).
+    #   2. a stray-write scan around the run — a no-dependency backstop that
+    #      works even when bubblewrap is unavailable.
+    sandbox = _load_sandbox()
+    session_dir = os.environ.get("PAWLIA_SESSION_DIR")
+    user_id = os.environ.get("PAWLIA_USER_ID")
+    sandbox_mode = "none"
+    writable = []
+    scan_roots = []
+    before = {}
+    if sandbox:
+        writable = sandbox.writable_roots(session_dir, user_id)
+        # Scan the session root (catches the classic "wrote to session/<x>"
+        # bug) and the skill dir itself (catches a harness writing beside
+        # itself in a bundled, read-only skill). Writable roots are pruned.
+        scan_roots = [p for p in (session_dir, str(skill_path)) if p]
+        before = sandbox.snapshot_mtimes(scan_roots, writable)
+        if sandbox.bwrap_available():
+            cmd = sandbox.wrap_argv(cmd, writable)
+            sandbox_mode = "bubblewrap"
+        else:
+            sandbox_mode = "scan-only"
+
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True,
@@ -625,17 +667,32 @@ def cmd_test(args):
         exit_code = None
         timed_out = True
 
-    print(json.dumps({
-        "success": (not timed_out) and exit_code == 0,
+    stray_writes = []
+    if sandbox:
+        stray_writes = sandbox.diff_stray_writes(before, scan_roots, writable)
+
+    harness_ok = (not timed_out) and exit_code == 0
+    result = {
+        "success": harness_ok and not stray_writes,
         "name": name,
         "harness": str(harness_path),
         "exit_code": exit_code,
         "timed_out": timed_out,
         "missing_credentials": missing,
         "missing_config": missing_config,
+        "sandbox": sandbox_mode,
         "stdout": stdout,
         "stderr": stderr,
-    }, ensure_ascii=False))
+    }
+    if stray_writes:
+        result["error"] = (
+            "Skill wrote outside the allowed roots (per-user session dir + "
+            "/tmp). Skills must only write to the workspace, Downloads, or "
+            "/tmp for scratch. Offending paths: "
+            + ", ".join(stray_writes[:20])
+        )
+        result["stray_writes"] = stray_writes
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def cmd_compile(args):

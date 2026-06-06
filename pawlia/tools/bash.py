@@ -1,13 +1,21 @@
 """Bash tool - executes shell commands."""
 
 import json
+import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 from typing import Any, Dict, Optional
 
 from pawlia.tools.base import Tool
+
+logger = logging.getLogger(__name__)
+
+# Emitted once if a skill command runs without the filesystem sandbox because
+# bubblewrap is unavailable, so the missing protection is visible in the logs.
+_sandbox_warned = False
 
 
 # Tools commonly missing in the PawLia container (alpine + busybox) plus
@@ -198,6 +206,36 @@ class BashTool(Tool):
         if sys.platform == "win32":
             shells.append(["powershell", "-Command", _to_powershell(cmd)])
             shells.append(None)  # sentinel for cmd.exe fallback
+
+        # Filesystem write-sandbox: skill commands may only write under the
+        # per-user session dir or /tmp. When bubblewrap is available we run the
+        # command inside it with a read-only root so out-of-bounds writes are
+        # rejected by the kernel. Resolve the shell up front (bwrap would mask
+        # the bash→sh FileNotFoundError fallback otherwise).
+        sandbox_on = bool(
+            context
+            and context.get("session_dir")
+            and context.get("sandbox", True)
+        )
+        if sandbox_on:
+            from pawlia.sandbox import bwrap_available, wrap_argv, writable_roots
+
+            if bwrap_available():
+                writable = writable_roots(
+                    context.get("session_dir"), context.get("user_id")
+                )
+                shell_bin = shutil.which("bash") or shutil.which("sh")
+                if shell_bin:
+                    shells = [wrap_argv([shell_bin, "-c", cmd], writable)]
+            else:
+                global _sandbox_warned
+                if not _sandbox_warned:
+                    _sandbox_warned = True
+                    logger.warning(
+                        "Filesystem sandbox unavailable (bubblewrap missing or "
+                        "user namespaces disabled) — skill commands run "
+                        "without write isolation."
+                    )
 
         for shell in shells:
             try:

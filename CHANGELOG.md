@@ -10,6 +10,18 @@ See `agents.md` › "Versioning & Releases (git-flow)".
 
 ## [Unreleased]
 ### Added
+- Filesystem write-sandbox for skill execution (`pawlia/sandbox.py`). A skill
+  may only write under the per-user session dir (`session/<user_id>/` — the
+  workspace, `Downloads/`, credentials, memory) or `/tmp` for throwaway
+  scratch. The bash tool wraps commands in `bubblewrap` (read-only root, only
+  the writable roots bind-mounted rw) so out-of-bounds writes are rejected by
+  the kernel; falls back to a logged warning when bubblewrap / user namespaces
+  are unavailable. `skill-creator`'s `creator.py test` runs the harness the
+  same way and additionally scans for stray writes, so a violation fails the
+  smoke test at the latest. `bubblewrap` added to both Dockerfiles.
+- `attach_file` now accepts `/tmp` paths so generated throwaway artefacts
+  (e.g. a rain-radar PNG) can be attached without being written into the
+  workspace git tree.
 - File / image attachments over Matrix, Telegram, and Discord.
 - Incoming files and images are saved to `<workspace>/Downloads/` and tracked
   in `downloads_index.json` (kept outside the workspace so it does not

@@ -421,11 +421,13 @@ class TestAttachFileTool:
     def test_reject_outside_allowed_roots(self, tmp_path):
         from pawlia.tools.attach_file import AttachFileTool
 
-        user_id, workspace, downloads, outside = self._setup(tmp_path)
+        user_id, workspace, downloads, _ = self._setup(tmp_path)
         tool = AttachFileTool()
         agent = self._make_agent_stub()
+        # An absolute path under no allowed root (workspace, Downloads, /tmp, or
+        # a configured extra). /tmp IS allowed now, so the path must be elsewhere.
         result = tool.execute(
-            {"path": outside},
+            {"path": "/nonexistent_attach_root/outside.txt"},
             context={
                 "session_dir": str(tmp_path),
                 "user_id": user_id,
@@ -453,6 +455,33 @@ class TestAttachFileTool:
         )
         assert "outside allowed roots" in result or "file not found" in result
         assert agent.pending_attachments == []
+
+    def test_accepts_tmp_path(self, tmp_path):
+        # Generated throwaway artefacts live in /tmp now — attach_file must take
+        # an absolute /tmp path and queue it.
+        from pawlia.tools.attach_file import AttachFileTool
+
+        user_id, _, _, _ = self._setup(tmp_path)
+        fd, scratch = tempfile.mkstemp(prefix="pawlia_attach_", suffix=".png", dir="/tmp")
+        try:
+            os.write(fd, b"\x89PNG\r\n")
+            os.close(fd)
+            tool = AttachFileTool()
+            agent = self._make_agent_stub()
+            result = tool.execute(
+                {"path": scratch},
+                context={
+                    "session_dir": str(tmp_path),
+                    "user_id": user_id,
+                    "max_outgoing_bytes": 1024 * 1024,
+                    "agent": agent,
+                },
+            )
+            assert "queued" in result
+            assert len(agent.pending_attachments) == 1
+            assert agent.pending_attachments[0]["filename"] == os.path.basename(scratch)
+        finally:
+            os.unlink(scratch)
 
     def test_size_limit(self, tmp_path):
         from pawlia.tools.attach_file import AttachFileTool

@@ -40,6 +40,7 @@ RUN apk add --no-cache \
         openssl \
         openssh-client \
         libffi \
+        bubblewrap \
         git
 
 WORKDIR /app

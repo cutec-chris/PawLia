@@ -46,6 +46,7 @@ RUN apk add --no-cache \
         openssl \
         openssh-client \
         git \
+        bubblewrap \
         libffi \
         libstdc++ \
         crc32c \

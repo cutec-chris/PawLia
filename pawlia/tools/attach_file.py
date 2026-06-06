@@ -91,6 +91,12 @@ class AttachFileTool(Tool):
         downloads = os.path.realpath(os.path.join(workspace, "Downloads"))
         if downloads not in allowed_roots:
             allowed_roots.append(downloads)
+        # /tmp is the sanctioned scratch space for generated, throwaway
+        # artefacts (e.g. a rain-radar PNG) — skills write them there instead
+        # of polluting the workspace git tree, so attach_file must accept it.
+        tmp_root = os.path.realpath("/tmp")
+        if tmp_root not in allowed_roots:
+            allowed_roots.append(tmp_root)
 
         max_bytes = int((context or {}).get("max_outgoing_bytes") or 26214400)
 

@@ -217,6 +217,9 @@ workflow end-to-end. It's what `creator.py test --name <skill>` runs.
 - Prints exactly one final JSON line — final line must parse as JSON
 - Exits 0 on all-green, non-zero on any failure
 - Leaves no persistent side effects
+- Writes only under the workspace or `/tmp` (see SKILL.md § Filesystem rules).
+  `creator.py test` runs the harness in a write-sandbox and **fails** it if the
+  skill touches anything outside those roots — scratch files go to `/tmp`.
 
 **Output format:**
 

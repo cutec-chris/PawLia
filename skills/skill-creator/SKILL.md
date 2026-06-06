@@ -124,6 +124,30 @@ Do not teach skills to pass config values around as ordinary model-generated
 arguments. The model should provide user intent (`query`, `limit`, `project`),
 while the system supplies deployment config.
 
+## Filesystem rules — where a skill may write
+
+**Hard rule: a skill may only create or modify files under two roots.**
+
+| Write to | When |
+|----------|------|
+| `$PAWLIA_SESSION_DIR/$PAWLIA_USER_ID/...` (the workspace, `Downloads/`, etc.) | Files the **user keeps** — documents, results worth re-reading later. Reachable via the `files` skill. |
+| `/tmp/...` | **Throwaway, generated artefacts** — a rendered chart, a rain-radar PNG, an intermediate download. The default for anything ephemeral. Prefer a unique name (`/tmp/<skill>_<something>.png`). |
+
+Everything else is **forbidden and blocked**: the `session/` root (e.g.
+`$PAWLIA_SESSION_DIR/radar` — a common mistake), `/app`, `$HOME`, the skill's
+own bundled directory, or any other absolute path. At runtime the bash tool
+runs commands inside a sandbox with a read-only root, so such writes fail with
+a permission/read-only error. **`creator.py test` enforces the same rule** and
+fails the harness if the skill writes outside these roots — so a violation is
+caught at the latest during testing.
+
+**Delivering a file to the user** (image, PDF, GIF): write it to `/tmp` (or the
+workspace if it should be kept) and return its **path** in the JSON payload.
+Do **not** embed the bytes as a base64 `data:` URI in the response text —
+chat surfaces like Matrix render that as raw text, not an image. The dispatcher
+attaches the file via the `attach_file` tool, which accepts workspace and
+`/tmp` paths.
+
 ---
 
 ## Credential Management
