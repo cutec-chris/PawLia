@@ -67,6 +67,20 @@ class RouterAgent:
         return self._skills
 
     @property
+    def pending_attachments(self) -> List[Dict[str, Any]]:
+        """Expose the inner ChatAgent's attachment queue.
+
+        Direct tools (e.g. ``attach_file``) queue onto the local ChatAgent, but
+        interfaces drain ``agent.pending_attachments`` off the RouterAgent they
+        hold. Without this proxy the queue is invisible and attachments are
+        silently dropped (the "I attached it but you see nothing" bug). The
+        hermes backend has no local agent and therefore no attachments.
+        """
+        if self._local_agent is not None:
+            return self._local_agent.pending_attachments
+        return []
+
+    @property
     def llm(self) -> Any:
         meta = self.describe_backend(None)
         if meta["backend"] == "pawlia" and self._local_agent is not None:

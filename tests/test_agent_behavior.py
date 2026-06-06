@@ -422,3 +422,44 @@ async def test_router_forwards_allow_skills_flag_to_local_streaming(tmp_path):
         on_skill_done=None,
         allow_skills=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# RouterAgent exposes the inner ChatAgent's attachment queue
+# ---------------------------------------------------------------------------
+def test_router_proxies_pending_attachments_to_local_agent():
+    """attach_file queues onto the local ChatAgent; interfaces drain the queue
+    off the RouterAgent. The proxy must expose the *same* live list, or
+    attachments are silently dropped."""
+    import logging
+
+    class _StubChat:
+        def __init__(self):
+            self.pending_attachments = []
+            self.on_interim = None
+            self.on_skill_start = None
+            self.on_skill_step = None
+            self.on_skill_done = None
+            self.on_model_change = None
+            self._on_fallback = None
+
+    stub = _StubChat()
+    router = RouterAgent(
+        user_id="u",
+        llm_factory=None,
+        memory=None,
+        session=None,
+        skills={},
+        local_agent_factory=lambda: stub,
+        logger=logging.getLogger("test"),
+    )
+
+    # No local agent materialized yet → empty, no crash.
+    assert router.pending_attachments == []
+
+    router._ensure_local_agent()
+    stub.pending_attachments.append({"filename": "x.jpg"})
+
+    # The router exposes the inner agent's queue (same live list).
+    assert router.pending_attachments == [{"filename": "x.jpg"}]
+    assert router.pending_attachments is stub.pending_attachments
