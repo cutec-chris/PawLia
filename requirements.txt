@@ -9,6 +9,9 @@ markdown>=3.5
 matrix-nio>=0.25
 python-telegram-bot>=20.0
 PyYAML>=6.0
+# Pure-Python IANA timezone database — required for zoneinfo on slim/Alpine
+# images that ship no system tz data (timezone-aware reminders/scheduler).
+tzdata>=2024.1
 requests>=2.32
 networkx>=3.0
 beautifulsoup4>=4.12
