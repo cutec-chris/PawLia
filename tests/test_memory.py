@@ -600,6 +600,23 @@ class TestBootstrapCopying:
             mtime2 = os.path.getmtime(bootstrap_path)
             assert mtime1 == mtime2, "bootstrap.md should not be overwritten on second load"
 
+    def test_bootstrap_kept_without_timezone(self):
+        """Identity files alone are not enough — a timezone must be configured."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            mm.load_session("u_notz")
+            ws = mm._workspace_dir("u_notz")
+
+            for fname in ("soul.md", "identity.md", "user.md"):
+                with open(os.path.join(ws, fname), "w") as f:
+                    f.write(f"# Custom {fname}\n- fully customized\n")
+
+            mm2 = MemoryManager(tmpdir)
+            mm2.load_session("u_notz")
+
+            assert os.path.exists(os.path.join(ws, "bootstrap.md")), \
+                "bootstrap.md must stay until a timezone is configured"
+
     def test_bootstrap_removed_after_all_customized(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)
@@ -611,12 +628,15 @@ class TestBootstrapCopying:
                 with open(os.path.join(ws, fname), "w") as f:
                     f.write(f"# Custom {fname}\n- fully customized\n")
 
+            # Timezone is a mandatory part of bootstrapping
+            mm._update_session_config("u_done", "user", {"timezone": "Europe/Berlin"})
+
             # Simulate a fresh process/restart — new MemoryManager, no cache
             mm2 = MemoryManager(tmpdir)
             mm2.load_session("u_done")
 
             assert not os.path.exists(os.path.join(ws, "bootstrap.md")), \
-                "bootstrap.md should be removed once all identity files are customized"
+                "bootstrap.md should be removed once identity files and timezone are set"
 
 
 class TestSystemPromptIdentityFiles:

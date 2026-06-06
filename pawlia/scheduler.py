@@ -25,7 +25,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 import yaml
 
 from pawlia.automation import ChecklistProcessor, JobRunner, TaskReminderProcessor, _load_state, _save_state, _state_path
-from pawlia.memory import _format_workspace_refs, estimate_tokens
+from pawlia.memory import _format_workspace_refs, _local_now, estimate_tokens
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.utils import load_json, save_json
 
@@ -433,6 +433,22 @@ class Scheduler:
         last = self._last_activity.get(user_id, self._boot_time)
         return (now - last) / 60.0
 
+    def _user_now(self, user_id: str) -> datetime:
+        """Current wall-clock time in the user's configured timezone, naive.
+
+        Reminder/event times are stored as naive local wall-clock strings
+        (the model reasons in the user's timezone), so the comparison must
+        happen in that same timezone — not the server's. Falls back to
+        server-local time when no app/timezone is available.
+        """
+        tz_name = None
+        if self._app and getattr(self._app, "memory", None):
+            try:
+                tz_name = self._app.memory.load_session(user_id).timezone
+            except Exception:
+                tz_name = None
+        return _local_now(tz_name).replace(tzinfo=None)
+
     def _summary_threshold_for(self, session: Any) -> int:
         """Resolve the per-session token threshold for summarization.
 
@@ -698,7 +714,7 @@ class Scheduler:
         if not reminders:
             return
 
-        now = datetime.now()
+        now = self._user_now(user_id)
 
         for rem in reminders:
             scheduled = rem.get("scheduled", "")
@@ -741,7 +757,7 @@ class Scheduler:
 
         state = _load_state(self.session_dir, user_id)
         notified = set(state.get("notified_events", []))
-        now = datetime.now()
+        now = self._user_now(user_id)
         window = now + timedelta(minutes=EVENT_REMINDER_MINUTES)
         changed = False
 

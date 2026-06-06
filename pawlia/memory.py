@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Set, Tuple
 import yaml
@@ -232,11 +232,12 @@ class MemoryManager:
     def _prompts_dir(self) -> str:
         return os.path.join(os.path.dirname(__file__), "prompts")
 
-    def _ensure_identity_files(self, workspace: str) -> None:
+    def _ensure_identity_files(self, user_id: str, workspace: str) -> None:
         """Copy missing identity templates + bootstrap.md into workspace.
 
         Once all three identity files have been customized (differ from
-        their templates), bootstrap.md is deleted automatically.
+        their templates) **and** a timezone is configured in the session
+        config, bootstrap.md is deleted automatically.
         """
         identity_map = {
             "soul.md": "soul.md",
@@ -268,7 +269,12 @@ class MemoryManager:
                 if os.path.exists(tmpl) and self._read(ws_file) == self._read(tmpl):
                     all_customized = False
                     break
-            if all_customized:
+            # A configured timezone is mandatory to finish bootstrapping — the
+            # scheduler and time-aware prompts depend on it.
+            has_timezone = bool(
+                (self._read_session_config(user_id).get("user") or {}).get("timezone")
+            )
+            if all_customized and has_timezone:
                 os.remove(bootstrap_dst)
                 self.logger.info("Bootstrap complete — removed bootstrap.md")
 
@@ -827,7 +833,7 @@ class MemoryManager:
 
         self._memory_dir(user_id)  # ensure dirs exist
         self.migrate_session(user_id)
-        self._ensure_identity_files(self._workspace_dir(user_id))
+        self._ensure_identity_files(user_id, self._workspace_dir(user_id))
 
         session = Session(user_id)
         today_text = self._read(self._daily_path(user_id, session.current_date_str))
@@ -1066,7 +1072,7 @@ class MemoryManager:
         the model is aware of it without it being prominent.
         """
         workspace = self._workspace_dir(session.user_id)
-        self._ensure_identity_files(workspace)
+        self._ensure_identity_files(session.user_id, workspace)
         parts: list[str] = []
 
         # Only include the identity files that define the assistant's persona
@@ -1106,10 +1112,13 @@ class MemoryManager:
             )
         else:
             now_str = datetime.now().strftime("%A, %d. %B %Y %H:%M")
+            utc_str = datetime.now(timezone.utc).strftime("%H:%M UTC")
             parts.append(
-                f"Current date and time: {now_str} (server local time — user "
-                "has not configured a timezone in session config; ask the user "
-                "or set it via the `config` skill if precise local time matters)."
+                f"Current date and time: {now_str} (server local time; {utc_str}). "
+                "The user has not configured a timezone in session config. Ask the "
+                "user what time it is for them, compare it to the UTC time above to "
+                "derive their offset/IANA zone, and set it via the `config` skill — "
+                "reminders and other time-aware features need it."
             )
 
         if extra_context and extra_context.strip():

@@ -25,6 +25,12 @@ import sys
 import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
+from typing import Optional
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - py<3.9
+    ZoneInfo = None  # type: ignore
 
 import yaml
 
@@ -44,6 +50,34 @@ def _workspace_dir(user_id: str, session_dir: str) -> str:
     path = os.path.join(session_dir, user_id, "workspace")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _session_timezone(user_id: str, session_dir: str) -> Optional[str]:
+    """Read the configured IANA timezone from the session config, if any."""
+    if not user_id or not session_dir:
+        return None
+    cfg_path = os.path.join(session_dir, user_id, "config.yaml")
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    return (data.get("user") or {}).get("timezone") or None
+
+
+def _local_now(user_id: str, session_dir: str) -> datetime:
+    """Current wall-clock time in the user's timezone (naive).
+
+    Reminder times must be stored in the same frame the scheduler compares
+    against — the user's local wall clock — not the (often UTC) server clock.
+    """
+    tz_name = _session_timezone(user_id, session_dir)
+    if tz_name and ZoneInfo is not None:
+        try:
+            return datetime.now(ZoneInfo(tz_name)).replace(tzinfo=None)
+        except Exception:
+            pass
+    return datetime.now()
 
 
 def _calendar_dir(user_id: str, session_dir: str) -> str:
@@ -1019,14 +1053,19 @@ def cmd_delete_task(args) -> None:
 # Reminder commands (stored as scheduled tasks in tasks.md)
 # ---------------------------------------------------------------------------
 
-def _parse_fire_at(fire_at: str) -> datetime:
-    """Parse ISO8601 or relative time ('10m', '2h', '1d')."""
+def _parse_fire_at(fire_at: str, now: Optional[datetime] = None) -> datetime:
+    """Parse ISO8601 or relative time ('10m', '2h', '1d').
+
+    Relative offsets are added to *now*, which should be the user's local
+    wall-clock time so the stored fire-at matches the scheduler's frame.
+    """
     fire_at = fire_at.strip()
     m = re.match(r"^(\d+)\s*(m|min|h|d)$", fire_at.lower())
     if m:
         amount = int(m.group(1))
         unit = m.group(2)
-        now = datetime.now()
+        if now is None:
+            now = datetime.now()
         if unit in ("m", "min"):
             return now + timedelta(minutes=amount)
         elif unit == "h":
@@ -1045,14 +1084,15 @@ def cmd_add_reminder(args) -> None:
         return
 
     try:
-        fire_at = _parse_fire_at(args.fire_at)
+        now = _local_now(args.user_id, args.session_dir)
+        fire_at = _parse_fire_at(args.fire_at, now=now)
     except Exception as e:
         _out({"success": False, "error": f"Invalid fire_at format: {e}"})
         return
 
     recurrence = (args.recurrence or "").strip()
     recurrence_str = ""
-    if recurrence and recurrence.lower() != "none":
+    if recurrence and recurrence.lower() not in ("none", "once", "no", "never"):
         # Check if it's an RRULE string
         if recurrence.upper().startswith("FREQ="):
             recurrence_str = recurrence

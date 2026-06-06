@@ -101,6 +101,27 @@ def _make_content(text: str) -> dict:
     }
 
 
+def _add_mentions(content: dict, mentions: List[tuple]) -> dict:
+    """Prepend user pills and attach intentional mentions to a content dict.
+
+    ``mentions`` is a list of ``(user_id, display_name)`` tuples. This makes the
+    message ping the given users so it notifies even clients set to
+    "mentions and keywords only" (via the modern ``m.mentions`` field and a
+    matrix.to pill in the formatted body for older push-rule matching).
+    """
+    if not mentions:
+        return content
+    pills = " ".join(
+        f'<a href="https://matrix.to/#/{uid}">{name or uid}</a>'
+        for uid, name in mentions
+    )
+    plain = " ".join(name or uid for uid, name in mentions)
+    content["body"] = f"{plain}: {content.get('body', '')}"
+    content["formatted_body"] = f"{pills}: {content.get('formatted_body', '')}"
+    content["m.mentions"] = {"user_ids": [uid for uid, _ in mentions]}
+    return content
+
+
 def _matrix_file_info(event: RoomMessageFile) -> tuple[str, str]:
     """Return filename and mimetype from a Matrix file message."""
     content = (getattr(event, "source", None) or {}).get("content", {}) or {}
@@ -1269,12 +1290,41 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     # Scheduler callback for proactive notifications
     # ------------------------------------------------------------------
 
+    def _room_mentions(room_id: str) -> List[tuple]:
+        """Human members of a room (everyone but the bot), for @-mentioning."""
+        room = client.rooms.get(room_id)
+        if room is None:
+            return []
+        mentions = []
+        for uid in room.users:
+            if uid == client.user_id:
+                continue
+            try:
+                name = room.user_name(uid)
+            except Exception:
+                name = None
+            mentions.append((uid, name))
+        return mentions
+
     async def _matrix_notify(session_id: str, message: str) -> None:
         # session_id for matrix agents is "mx_{room_id}"
         if not session_id.startswith("mx_"):
             return
         room_id = session_id[3:]
-        event_id = await _send_text(room_id, message)
+        # Proactive notifications go to the main room timeline and ping the
+        # user so they notify even with "mentions and keywords only".
+        content = _add_mentions(_make_content(message), _room_mentions(room_id))
+        event_id = None
+        try:
+            resp = await client.room_send(
+                room_id=room_id,
+                message_type="m.room.message",
+                content=content,
+                ignore_unverified_devices=True,
+            )
+            event_id = getattr(resp, "event_id", None)
+        except Exception as e:
+            logger.error("Matrix: notify send failed for %s: %s", room_id, e)
         if event_id:
             session = app.memory.load_session(session_id)
             app.memory.seed_thread_context(session, event_id, message)

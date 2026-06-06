@@ -1,9 +1,29 @@
 from pawlia.interfaces.matrix import (
+    _add_mentions,
     _decode_matrix_file_text,
     _is_markitdown_matrix_file,
     _is_text_matrix_file,
+    _make_content,
     _resolve_thread_root,
 )
+
+
+def test_add_mentions_pings_users():
+    content = _add_mentions(
+        _make_content("🔔 Reminder"),
+        [("@chris:example.org", "Chris")],
+    )
+    assert content["m.mentions"] == {"user_ids": ["@chris:example.org"]}
+    assert "https://matrix.to/#/@chris:example.org" in content["formatted_body"]
+    assert content["body"].startswith("Chris:")
+    assert "🔔 Reminder" in content["body"]
+
+
+def test_add_mentions_noop_without_members():
+    base = _make_content("🔔 Reminder")
+    content = _add_mentions(dict(base), [])
+    assert "m.mentions" not in content
+    assert content["body"] == base["body"]
 
 
 def test_resolve_thread_root_from_m_thread_relation():
