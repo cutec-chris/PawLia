@@ -75,6 +75,12 @@ class SkillRunnerAgent(BaseAgent):
 
     MAX_TOOL_TURNS = 30
     MAX_RETRIES = 2
+    # No-progress circuit breakers. Without these a model can grind for the
+    # full turn budget re-reading the same files / bloating the context until
+    # every call overflows — burning tokens and never reporting back.
+    _MAX_CONSECUTIVE_OVERFLOW = 3   # turns the prompt couldn't be made to fit
+    _NUDGE_SAME_TOOL_CALL = 4       # identical tool call repeats → nudge once
+    _ABORT_SAME_TOOL_CALL = 6       # identical tool call repeats → give up
 
     def __init__(
         self,
@@ -267,8 +273,32 @@ class SkillRunnerAgent(BaseAgent):
         nudge_count = 0
         total_tool_calls = len(first_response.tool_calls)
         max_turns = self.skill.max_tool_turns or self.max_tool_turns
+        consecutive_overflow = 0
+        sig_counts: Dict[str, int] = {}
+        for tc in first_response.tool_calls:
+            sig = self._tool_call_signature(tc)
+            sig_counts[sig] = sig_counts.get(sig, 0) + 1
+        repeat_nudged = False
+        abort_note = ""
         for _turn in range(1, max_turns):
             response = await self._invoke(messages, llm=self.bound_llm)
+
+            # Context-overflow circuit breaker: when the conversation has
+            # bloated so far that the intended model can no longer be made to
+            # fit (even after summarization) for several turns running, stop —
+            # otherwise the loop grinds on degraded fallbacks and never reports.
+            if getattr(self.bound_llm, "last_invoke_context_skipped", False):
+                consecutive_overflow += 1
+                if consecutive_overflow >= self._MAX_CONSECUTIVE_OVERFLOW:
+                    abort_note = (
+                        f"Kontext übergelaufen — nach {_turn} Schritten passt das "
+                        "Gespräch in kein Modell mehr."
+                    )
+                    self.logger.warning("skill '%s': %s — Loop abgebrochen", self.skill.name, abort_note)
+                    break
+            else:
+                consecutive_overflow = 0
+
             self.logger.debug(
                 "Tool-call mode turn %d: tool_calls=%s, content=%s",
                 _turn, bool(response.tool_calls),
@@ -301,6 +331,27 @@ class SkillRunnerAgent(BaseAgent):
             has_error = False
             retryable_error = False
             total_tool_calls += len(response.tool_calls)
+
+            # No-progress circuit breaker: detect the model repeating the exact
+            # same tool call (e.g. re-reading one file). Nudge once, then abort.
+            for tc in response.tool_calls:
+                sig = self._tool_call_signature(tc)
+                sig_counts[sig] = sig_counts.get(sig, 0) + 1
+            worst = max(sig_counts.values()) if sig_counts else 0
+            if worst >= self._ABORT_SAME_TOOL_CALL:
+                abort_note = (
+                    f"Kein Fortschritt — derselbe Tool-Aufruf wiederholte sich "
+                    f"{worst}× bis Schritt {_turn}."
+                )
+                self.logger.warning("skill '%s': %s — Loop abgebrochen", self.skill.name, abort_note)
+                break
+            if worst >= self._NUDGE_SAME_TOOL_CALL and not repeat_nudged:
+                repeat_nudged = True
+                self.logger.info(
+                    "skill '%s': identischer Tool-Aufruf %d× — einmaliger Nudge", self.skill.name, worst
+                )
+                messages.append(HumanMessage(content=self._repeat_guidance()))
+
             for tc in response.tool_calls:
                 result = await self._execute_tool_call(tc, messages)
                 if not result.ok:
@@ -312,7 +363,13 @@ class SkillRunnerAgent(BaseAgent):
             if response.tool_calls:
                 response = await self._invoke(messages, llm=self.llm)
 
-        return self.extract_text(response)
+        result_text = self.extract_text(response)
+        if abort_note:
+            # Always leave a traceable outcome so on_skill_done posts something
+            # to the thread instead of the run vanishing silently.
+            prefix = f"⚠ {self.skill.name} gestoppt: {abort_note}"
+            return f"{prefix}\n\n{result_text}".strip() if result_text.strip() else prefix
+        return result_text
 
     async def _execute_tool_call(self, tc: dict, messages: List[BaseMessage]) -> ToolExecutionResult:
         """Execute a single tool call, append result to messages, and return it.
@@ -375,6 +432,26 @@ class SkillRunnerAgent(BaseAgent):
     @staticmethod
     def _retry_guidance() -> str:
         return load_system_prompt("skills/runner_retry_guidance.md")
+
+    @staticmethod
+    def _repeat_guidance() -> str:
+        return (
+            "Du hast denselben Tool-Aufruf mehrfach mit identischen Argumenten "
+            "ausgeführt, ohne Fortschritt. Wiederhole ihn nicht erneut. Arbeite "
+            "mit dem Ergebnis, das du bereits hast, oder gib jetzt dein "
+            "abschließendes Ergebnis aus."
+        )
+
+    @staticmethod
+    def _tool_call_signature(tc: Dict[str, Any]) -> str:
+        """Stable signature of a tool call (name + normalized args) for
+        detecting a model stuck repeating the exact same action."""
+        name = str(tc.get("name", "") or "").strip()
+        try:
+            args = json.dumps(_repair_tool_args(tc.get("args", {})), sort_keys=True)
+        except Exception:
+            args = str(tc.get("args", {}))
+        return f"{name}|{args}"
 
     # ------------------------------------------------------------------
     # Mode 2: Command mode (for small models that can't do tool calls)

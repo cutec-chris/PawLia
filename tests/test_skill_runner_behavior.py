@@ -8,11 +8,44 @@ command extractor and the WorkflowExecutor selection contract.
 
 import pytest
 
+from langchain_core.messages import AIMessage
+
 from pawlia.agents.skill_runner import SkillRunnerAgent
 from pawlia.skills.executor import WorkflowExecutor
 from pawlia.skills.workflow_schema import BuildingBlock, Workflow
 from pawlia.tools.base import ToolRegistry
 from support.llm import Reply, ScriptedLLM
+
+
+class _OverflowLLM:
+    """Always returns the same tool call and reports a context overflow, so the
+    skill runner's overflow circuit breaker has to stop the loop."""
+
+    model_name = "ovf"
+    model = "ovf"
+    temperature = 0.0
+    last_invoke_context_skipped = True
+
+    def __init__(self):
+        self.calls = 0
+
+    def invoke(self, messages, **kwargs):
+        self.calls += 1
+        msg = AIMessage(content="")
+        msg.tool_calls = [{
+            "id": f"c{self.calls}", "name": "bash",
+            "args": {"command": "echo working"}, "type": "tool_call",
+        }]
+        return msg
+
+    async def ainvoke(self, messages, **kwargs):
+        return self.invoke(messages, **kwargs)
+
+    def bind_tools(self, *args, **kwargs):
+        return self
+
+    def set_on_fallback(self, callback):
+        pass
 
 
 def _tool_message_texts(llm):
@@ -215,3 +248,31 @@ def test_workflow_execute_ignores_hallucinated_extra_arguments(tool_registry):
     substituted = executor._substitute("echo workflow_out",
                                        {"path": "x", "depth": 1})
     assert substituted == "echo workflow_out"
+
+
+# ---------------------------------------------------------------------------
+# No-progress circuit breakers
+# ---------------------------------------------------------------------------
+async def test_repeated_identical_tool_call_aborts_with_outcome(make_skill_runner):
+    # The model keeps issuing the exact same tool call, making no progress.
+    llm = ScriptedLLM().default(ScriptedLLM.tool("bash", command="echo same"))
+    runner = make_skill_runner(llm=llm)
+
+    result = await runner.run("do the task")
+
+    # Bailed out with a traceable outcome instead of grinding the turn budget.
+    assert "gestoppt" in result.lower()
+    assert "fortschritt" in result.lower()
+    assert llm.call_count <= 10
+
+
+async def test_context_overflow_aborts_loop_with_outcome(make_skill_runner):
+    fake = _OverflowLLM()
+    runner = make_skill_runner(llm=fake)
+
+    result = await runner.run("do the task")
+
+    assert "gestoppt" in result.lower()
+    assert "übergelaufen" in result.lower()
+    # Aborted after a few overflow turns, not after the full turn budget.
+    assert fake.calls <= 6

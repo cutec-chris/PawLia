@@ -64,6 +64,7 @@ from langchain_openai import ChatOpenAI
 
 from pawlia.agents.error_classifier import classify_error, ErrorCategory
 from pawlia.context_probe import probe_context_window
+from pawlia.prompt_utils import load_system_prompt
 
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,15 @@ _CONTEXT_SKIP_RESERVE_TOKENS = 1024
 # significantly more expensive than their raw text length suggests.
 _TOKENS_PER_MESSAGE_OVERHEAD = 12
 _TOOL_CALL_OVERHEAD_PER_CALL = 24
+# Hard ceiling (in characters) for the mechanically-condensed "middle" block.
+# Without this the condenser kept one line per old message, so its output grew
+# linearly with the message count and a long tool loop could never be made to
+# fit any window. ~8k chars ≈ ~2k tokens — recent lines are kept, older ones
+# dropped with a count note.
+_MECHANICAL_SUMMARY_CHAR_BUDGET = 8000
+# Cap for a single tool result retained in the recent (untruncated) tail. A
+# raw `cat` of a large file would otherwise blow the window all by itself.
+_TAIL_TOOL_RESULT_CHAR_CAP = 800
 
 
 # Heuristic: how many tool-call turns to grant the SkillRunner per model.
@@ -324,7 +334,8 @@ class _FallbackLLMWrapper:
 
     def __init__(self, llms: List[Any], labels: List[str], context_sizes: List[int],
                  on_fallback: Optional[Callable[[str, str], None]] = None,
-                 active_label: Optional[str] = None):
+                 active_label: Optional[str] = None,
+                 summary_llm: Optional[Any] = None):
         if not llms:
             raise ValueError("Fallback wrapper requires at least one LLM")
         self._llms = llms
@@ -336,6 +347,16 @@ class _FallbackLLMWrapper:
         self._failures = [0 for _ in llms]
         self._blacklisted_until = [0.0 for _ in llms]
         self._last_errors: List[Optional[Exception]] = [None for _ in llms]
+        # Plain (tool-free, non-wrapped) model used to LLM-distill an
+        # overflowing conversation into a compact summary. Kept separate from
+        # ``_llms`` so the summary call never recurses back through this
+        # wrapper's fallback/summarize machinery. ``None`` → mechanical only.
+        self._summary_llm = summary_llm
+        # True after the most recent (a)invoke had to skip a model purely
+        # because the prompt could not be made to fit its context window even
+        # after summarization. Callers (e.g. the skill runner) read this to
+        # break out of a loop that has bloated past usefulness.
+        self.last_invoke_context_skipped = False
 
     @staticmethod
     def _estimate_tokens_for_messages(messages: List[BaseMessage]) -> int:
@@ -442,24 +463,40 @@ class _FallbackLLMWrapper:
         if not middle:
             return system + tail
 
-        summary_lines = [
-            f"[Earlier conversation summarized — {len(middle)} messages condensed]"
-        ]
-
+        body_lines: List[str] = []
         for msg in middle:
             if isinstance(msg, ToolMessage):
-                summary_lines.append(self._summarize_tool_message(msg))
+                body_lines.append(self._summarize_tool_message(msg))
             elif isinstance(msg, HumanMessage):
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 preview = content[:500].replace("\n", " ")
-                summary_lines.append(f"[User: {preview}]")
+                body_lines.append(f"[User: {preview}]")
             elif isinstance(msg, AIMessage):
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
                 preview = content[:500].replace("\n", " ")
-                summary_lines.append(f"[Assistant: {preview}]")
+                body_lines.append(f"[Assistant: {preview}]")
 
-        summary_text = "\n".join(summary_lines)
+        # Cap the condensed block so it can't grow without bound: keep the most
+        # recent lines that fit the budget (recent context matters more) and
+        # note how many older ones were dropped.
+        kept: List[str] = []
+        used = 0
+        dropped = 0
+        for line in reversed(body_lines):
+            cost = len(line) + 1
+            if used + cost > _MECHANICAL_SUMMARY_CHAR_BUDGET and kept:
+                dropped += 1
+                continue
+            kept.append(line)
+            used += cost
+        kept.reverse()
+
+        header = f"[Earlier conversation summarized — {len(middle)} messages condensed"
+        header += f", {dropped} oldest dropped]" if dropped else "]"
+        summary_text = "\n".join([header] + kept)
         summarized = HumanMessage(content=summary_text)
+
+        tail = self._truncate_tail_tool_results(tail)
 
         # Ensure tail doesn't start with a ToolMessage orphaned from its
         # preceding AI(tool_calls) — makes the sequence invalid for strict APIs.
@@ -467,6 +504,30 @@ class _FallbackLLMWrapper:
             tail = tail[1:]
 
         return system + [summarized] + tail
+
+    @staticmethod
+    def _truncate_tail_tool_results(tail: List[BaseMessage]) -> List[BaseMessage]:
+        """Cap oversized ToolMessage content in the retained recent tail.
+
+        A single raw tool dump (e.g. ``cat`` of a large file) can exceed a
+        small model's whole window on its own, defeating summarization of the
+        older middle. Truncate each tail ToolMessage to a fixed cap.
+        """
+        out: List[BaseMessage] = []
+        for msg in tail:
+            if isinstance(msg, ToolMessage):
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if len(content) > _TAIL_TOOL_RESULT_CHAR_CAP:
+                    truncated = content[:_TAIL_TOOL_RESULT_CHAR_CAP] + (
+                        f"\n…[truncated {len(content) - _TAIL_TOOL_RESULT_CHAR_CAP} chars]"
+                    )
+                    out.append(ToolMessage(
+                        content=truncated,
+                        tool_call_id=getattr(msg, "tool_call_id", ""),
+                    ))
+                    continue
+            out.append(msg)
+        return out
 
     def _summarize_to_fit(self, idx: int, messages: List[BaseMessage],
                           force: bool = False) -> Optional[List[BaseMessage]]:
@@ -510,6 +571,114 @@ class _FallbackLLMWrapper:
 
         return None
 
+    _DISTILL_KEEP_RECENT = 5
+    _DISTILL_INPUT_CHAR_CAP = 60000
+
+    async def _summarize_to_fit_async(self, idx: int, messages: List[BaseMessage],
+                                      force: bool = False) -> Optional[List[BaseMessage]]:
+        """Async context-fit that prefers a *real* LLM-written summary.
+
+        A genuine model summary collapses the whole older conversation into a
+        few hundred tokens of key facts/decisions (no tool mechanics), so even
+        a very long tool loop fits with the window nearly empty. Falls back to
+        the mechanical condenser when no summary model is configured or the
+        LLM call fails / still doesn't fit.
+        """
+        if not force and self._fits_context(idx, messages):
+            return messages
+        if self._summary_llm is not None:
+            prep = self._distill_prepare(messages)
+            if prep is not None:
+                system, tail, transcript = prep
+                try:
+                    resp = await self._summary_llm.ainvoke([
+                        SystemMessage(content=load_system_prompt("llm/context_distill.md")),
+                        HumanMessage(content=transcript),
+                    ])
+                    distilled = self._distill_assemble(idx, system, tail, resp, len(messages))
+                except Exception as exc:  # never let summarization sink the request
+                    logger.warning("LLM distillation errored (%s); using mechanical summary", exc)
+                    distilled = None
+                if distilled is not None:
+                    return distilled
+        return self._summarize_to_fit(idx, messages, force=force)
+
+    def _summarize_to_fit_sync(self, idx: int, messages: List[BaseMessage],
+                               force: bool = False) -> Optional[List[BaseMessage]]:
+        """Sync counterpart of :meth:`_summarize_to_fit_async` for the blocking
+        ``invoke`` path (used by the skill runner's tool loop)."""
+        if not force and self._fits_context(idx, messages):
+            return messages
+        if self._summary_llm is not None:
+            prep = self._distill_prepare(messages)
+            if prep is not None:
+                system, tail, transcript = prep
+                try:
+                    resp = self._summary_llm.invoke([
+                        SystemMessage(content=load_system_prompt("llm/context_distill.md")),
+                        HumanMessage(content=transcript),
+                    ])
+                    distilled = self._distill_assemble(idx, system, tail, resp, len(messages))
+                except Exception as exc:
+                    logger.warning("LLM distillation errored (%s); using mechanical summary", exc)
+                    distilled = None
+                if distilled is not None:
+                    return distilled
+        return self._summarize_to_fit(idx, messages, force=force)
+
+    def _distill_prepare(self, messages: List[BaseMessage]):
+        """Build (system, tail, transcript) for LLM distillation, or ``None``
+        when there's no older 'middle' worth summarizing."""
+        keep_recent = self._DISTILL_KEEP_RECENT
+        if len(messages) <= 2 + keep_recent * 2:
+            return None
+        system = messages[:1]
+        tail = messages[-(keep_recent * 2):]
+        middle = messages[1:-(keep_recent * 2)]
+        if not middle:
+            return None
+
+        lines: List[str] = []
+        for m in middle:
+            if isinstance(m, ToolMessage):
+                lines.append(self._summarize_tool_message(m))
+            elif isinstance(m, HumanMessage):
+                c = m.content if isinstance(m.content, str) else str(m.content)
+                lines.append(f"User: {c[:1000]}")
+            elif isinstance(m, AIMessage):
+                c = m.content if isinstance(m.content, str) else str(m.content)
+                tc = getattr(m, "tool_calls", None)
+                tc_note = f" (called {', '.join(t.get('name', '?') for t in tc)})" if tc else ""
+                lines.append(f"Assistant{tc_note}: {c[:1000]}")
+        transcript = "\n".join(lines)
+        if len(transcript) > self._DISTILL_INPUT_CHAR_CAP:
+            # Keep the most recent portion — that's where the live task state is.
+            transcript = "…[older omitted]…\n" + transcript[-self._DISTILL_INPUT_CHAR_CAP:]
+        return system, tail, transcript
+
+    def _distill_assemble(self, idx: int, system: List[BaseMessage],
+                          tail: List[BaseMessage], resp: Any,
+                          orig_len: int) -> Optional[List[BaseMessage]]:
+        """Turn a summary LLM response into a fitting message list, or ``None``
+        if the summary was empty or the result still overflows."""
+        from pawlia.agents.base import BaseAgent
+        raw = resp.content if resp is not None else ""
+        summary = BaseAgent.strip_thinking(raw if isinstance(raw, str) else str(raw)).strip()
+        if not summary:
+            return None
+        summarized = HumanMessage(content="[Earlier conversation summarized]\n" + summary)
+        tail = self._truncate_tail_tool_results(tail)
+        while tail and isinstance(tail[0], ToolMessage):
+            tail = tail[1:]
+        candidate = system + [summarized] + tail
+        if self._fits_context(idx, candidate):
+            logger.info(
+                "LLM summarization: %d → %d messages (%d-char summary) fits '%s'",
+                orig_len, len(candidate), len(summary), self._labels[idx],
+            )
+            return candidate
+        return None
+
     def _raise_if_all_blacklisted(self) -> None:
         now = self._now()
         active = [
@@ -536,6 +705,7 @@ class _FallbackLLMWrapper:
     def invoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
         saw_context_error = False
+        self.last_invoke_context_skipped = False
         self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
             now = self._now()
@@ -547,7 +717,7 @@ class _FallbackLLMWrapper:
                 )
                 continue
             if not self._fits_context(idx, messages):
-                fitted = self._summarize_to_fit(idx, messages)
+                fitted = self._summarize_to_fit_sync(idx, messages)
                 if fitted is not None:
                     messages = fitted
                 else:
@@ -558,6 +728,7 @@ class _FallbackLLMWrapper:
                     last_exc = RuntimeError(
                         f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
                     )
+                    self.last_invoke_context_skipped = True
                     saw_context_error = True
                     continue
             try:
@@ -570,7 +741,7 @@ class _FallbackLLMWrapper:
                 self._note_failure(idx, exc)
                 saw_context_error = saw_context_error or is_context_length_error(exc)
                 if is_context_length_error(exc):
-                    fitted = self._summarize_to_fit(idx, messages, force=True)
+                    fitted = self._summarize_to_fit_sync(idx, messages, force=True)
                     if fitted is not None:
                         try:
                             result = llm.invoke(fitted, **kwargs)
@@ -605,6 +776,7 @@ class _FallbackLLMWrapper:
     async def ainvoke(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
         saw_context_error = False
+        self.last_invoke_context_skipped = False
         self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
             now = self._now()
@@ -616,7 +788,7 @@ class _FallbackLLMWrapper:
                 )
                 continue
             if not self._fits_context(idx, messages):
-                fitted = self._summarize_to_fit(idx, messages)
+                fitted = await self._summarize_to_fit_async(idx, messages)
                 if fitted is not None:
                     messages = fitted
                 else:
@@ -628,6 +800,7 @@ class _FallbackLLMWrapper:
                         f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
                     )
                     saw_context_error = True
+                    self.last_invoke_context_skipped = True
                     continue
             try:
                 result = await llm.ainvoke(messages, **kwargs)
@@ -639,7 +812,7 @@ class _FallbackLLMWrapper:
                 self._note_failure(idx, exc)
                 saw_context_error = saw_context_error or is_context_length_error(exc)
                 if is_context_length_error(exc):
-                    fitted = self._summarize_to_fit(idx, messages, force=True)
+                    fitted = await self._summarize_to_fit_async(idx, messages, force=True)
                     if fitted is not None:
                         try:
                             result = await llm.ainvoke(fitted, **kwargs)
@@ -678,11 +851,13 @@ class _FallbackLLMWrapper:
             self._context_sizes,
             on_fallback=self._on_fallback,
             active_label=self.active_label,
+            summary_llm=self._summary_llm,
         )
 
     async def astream(self, messages: List[BaseMessage], **kwargs: Any) -> Any:
         last_exc: Optional[Exception] = None
         saw_context_error = False
+        self.last_invoke_context_skipped = False
         self._raise_if_all_blacklisted()
         for idx, llm in enumerate(self._llms):
             now = self._now()
@@ -694,7 +869,7 @@ class _FallbackLLMWrapper:
                 )
                 continue
             if not self._fits_context(idx, messages):
-                fitted = self._summarize_to_fit(idx, messages)
+                fitted = await self._summarize_to_fit_async(idx, messages)
                 if fitted is not None:
                     messages = fitted
                 else:
@@ -706,6 +881,7 @@ class _FallbackLLMWrapper:
                         f"Estimated prompt exceeds context window for model '{self._labels[idx]}'"
                     )
                     saw_context_error = True
+                    self.last_invoke_context_skipped = True
                     continue
             yielded_any = False
             try:
@@ -721,7 +897,7 @@ class _FallbackLLMWrapper:
                 last_exc = exc
                 saw_context_error = saw_context_error or is_context_length_error(exc)
                 if is_context_length_error(exc):
-                    fitted = self._summarize_to_fit(idx, messages, force=True)
+                    fitted = await self._summarize_to_fit_async(idx, messages, force=True)
                     if fitted is not None:
                         try:
                             async for chunk in llm.astream(fitted, **kwargs):
@@ -798,7 +974,12 @@ class LLMFactory:
             llms = [self._get_or_build_model(cfg) for cfg in model_cfgs]
             labels = [str(cfg.get("model", "unknown")) for cfg in model_cfgs]
             context_sizes = [self.context_size_for_model(str(cfg.get("model", "unknown"))) for cfg in model_cfgs]
-            self._cache[key] = _FallbackLLMWrapper(llms, labels, context_sizes)
+            # Summary model = the primary, tool-free model. Used to LLM-distill
+            # an overflowing conversation; kept unbound so the summary call
+            # never tries to emit tool calls or recurse through the wrapper.
+            self._cache[key] = _FallbackLLMWrapper(
+                llms, labels, context_sizes, summary_llm=llms[0],
+            )
         return self._cache[key]
 
     def get_fallback_chain(
