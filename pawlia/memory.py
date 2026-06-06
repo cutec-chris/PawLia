@@ -482,6 +482,120 @@ class MemoryManager:
         ]
         return [os.path.join(memory_dir, name) for name in sorted(names)]
 
+    # Tiny stopword set so lexical thread search isn't dominated by filler.
+    _RECALL_STOPWORDS = frozenset({
+        "der", "die", "das", "und", "ich", "war", "was", "wie", "wer", "wo",
+        "den", "dem", "ein", "eine", "mit", "von", "für", "auf", "ist", "des",
+        "the", "and", "you", "was", "what", "who", "how", "for", "with", "that",
+        "this", "have", "has", "did", "does", "about", "from",
+    })
+
+    @classmethod
+    def _lexical_tokens(cls, text: str) -> set:
+        """Lowercased word tokens (len ≥ 3, no stopwords) for keyword matching."""
+        return {
+            tok for tok in re.findall(r"\w+", text.lower())
+            if len(tok) >= 3 and tok not in cls._RECALL_STOPWORDS
+        }
+
+    def recent_threads(
+        self,
+        user_id: str,
+        *,
+        limit: int = 5,
+        max_days: int = 2,
+        exclude_thread_id: Optional[str] = None,
+        max_chars_per_thread: int = 700,
+        query: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Recent thread conversations read straight from the daily logs.
+
+        No RAG index required, so today's threads (and the call/PDF from a
+        few minutes ago) are immediately recallable — the background indexer
+        lags and distils logs into wiki topics, losing the raw exchanges.
+
+        With ``query``, threads are *searched*: only those whose title/body
+        share keywords with the query are returned, ranked by match strength
+        then recency.  Without ``query``, the most recent threads are returned
+        ordered by (log date, last timestamp in the body).  Each entry is
+        ``{"date", "thread_id", "title", "body"}``; ``body`` is tail-trimmed
+        to ``max_chars_per_thread`` so the most recent exchanges survive.
+        """
+        paths = self._daily_log_paths(user_id)
+        if not paths:
+            return []
+        pattern = self._new_thread_section_pattern()
+        collected: List[Dict[str, Any]] = []
+        for path in reversed(paths[-max_days:]):
+            date_str = os.path.basename(path)[:-3]
+            text = self._read(path)
+            if not text:
+                continue
+            for m in pattern.finditer(text):
+                thread_id = m.group(2).strip()
+                if exclude_thread_id and thread_id == exclude_thread_id:
+                    continue
+                body = m.group(3)
+                stamps = re.findall(r"\[(\d{2}:\d{2}:\d{2})\]", body)
+                # Drop verbose TOOL_CALL blobs from the recall view (the stored
+                # log keeps them) so the char budget goes to conversation text.
+                body = re.sub(r"\n?<!-- TOOL_CALL: .*? -->", "", body, flags=re.DOTALL).strip()
+                title = m.group(1).lstrip("#").strip() or "Thread"
+                collected.append({
+                    "date": date_str,
+                    "thread_id": thread_id,
+                    "title": title,
+                    "body": body,
+                    "_sort": (date_str, stamps[-1] if stamps else "00:00:00"),
+                })
+
+        q_tokens = self._lexical_tokens(query) if query else set()
+        if q_tokens:
+            for t in collected:
+                t["_score"] = len(q_tokens & self._lexical_tokens(t["title"] + " " + t["body"]))
+            collected = [t for t in collected if t["_score"] > 0]
+            collected.sort(key=lambda t: (t["_score"], t["_sort"]), reverse=True)
+        else:
+            collected.sort(key=lambda t: t["_sort"], reverse=True)
+
+        result: List[Dict[str, Any]] = []
+        for t in collected[:limit]:
+            body = t["body"]
+            if max_chars_per_thread and len(body) > max_chars_per_thread:
+                body = body[-max_chars_per_thread:]
+                nl = body.find("\n")
+                if nl != -1:
+                    body = body[nl + 1:]
+                body = "…\n" + body
+            result.append({
+                "date": t["date"],
+                "thread_id": t["thread_id"],
+                "title": t["title"],
+                "body": body,
+            })
+        return result
+
+    def last_conversation_pointer(
+        self, user_id: str, *, exclude_thread_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """A one-line pointer to the most recent prior conversation's log file.
+
+        Injected into the live context so the model can pull that conversation
+        (or parts of it) with the ``files`` skill if the user refers back to
+        it — without dumping the whole thread into every prompt.
+        """
+        recent = self.recent_threads(
+            user_id, limit=1, max_days=2, exclude_thread_id=exclude_thread_id,
+        )
+        if not recent:
+            return None
+        t = recent[0]
+        return (
+            f"Letztes Gespräch (anderer Thread): `memory/{t['date']}.md` — "
+            f"Thema „{t['title']}\". Falls der User sich darauf bezieht, lies die "
+            f"Datei bei Bedarf mit der files-Skill."
+        )
+
     @classmethod
     def _extract_main_history(cls, daily_text: str) -> str:
         text = cls._new_thread_section_pattern().sub("", daily_text)

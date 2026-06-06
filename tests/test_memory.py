@@ -784,3 +784,77 @@ class TestSummaryFromExchanges:
             session.summary = ""
             prompt = mm.build_system_prompt(session)
             assert "Conversation Summary" not in prompt
+
+
+class TestRecentThreads:
+    def _write_log(self, mm, user_id, date_str, sections):
+        """sections: list of (thread_id, title, body) → one daily log file."""
+        mm.load_session(user_id)  # ensure memory dir exists
+        text = ""
+        for tid, title, body in sections:
+            text = mm._upsert_thread_section(text, tid, body, title)
+        with open(mm._daily_path(user_id, date_str), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_recency_orders_by_timestamp_then_date(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            self._write_log(mm, "u", "2026-06-04", [
+                ("$old", "alt", "[09:00:00] User: gestern\nAssistant: ok"),
+            ])
+            self._write_log(mm, "u", "2026-06-05", [
+                ("$a", "früh", "[08:00:00] User: morgens\nAssistant: ok"),
+                ("$b", "spät", "[20:00:00] User: abends\nAssistant: ok"),
+            ])
+            threads = mm.recent_threads("u", limit=5)
+            assert [t["thread_id"] for t in threads] == ["$b", "$a", "$old"]
+
+    def test_exclude_thread_and_limit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            self._write_log(mm, "u", "2026-06-05", [
+                ("$a", "a", "[08:00:00] User: x\nAssistant: ok"),
+                ("$b", "b", "[20:00:00] User: y\nAssistant: ok"),
+            ])
+            threads = mm.recent_threads("u", limit=1, exclude_thread_id="$b")
+            assert [t["thread_id"] for t in threads] == ["$a"]
+
+    def test_query_filters_by_keyword_overlap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            self._write_log(mm, "u", "2026-06-05", [
+                ("$call", "Anruf", "[18:00:00] User: kannst du homeassistant?\nAssistant: ja"),
+                ("$audio", "Audio", "[20:00:00] User: stop audio\nAssistant: ok"),
+            ])
+            hits = mm.recent_threads("u", query="homeassistant steuern")
+            assert [t["thread_id"] for t in hits] == ["$call"]
+            # No keyword overlap → no hits (not a recency dump).
+            assert mm.recent_threads("u", query="börsenkurs quantenphysik") == []
+
+    def test_tool_call_blobs_stripped_from_body(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            body = (
+                "[10:00:00] User: status\nAssistant: ok"
+                '\n<!-- TOOL_CALL: {"name": "config", "result": "huge dump"} -->'
+            )
+            self._write_log(mm, "u", "2026-06-05", [("$t", "T", body)])
+            t = mm.recent_threads("u")[0]
+            assert "TOOL_CALL" not in t["body"]
+            assert "huge dump" not in t["body"]
+            assert "status" in t["body"]
+
+    def test_last_conversation_pointer(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            assert mm.last_conversation_pointer("u") is None  # nothing yet
+            self._write_log(mm, "u", "2026-06-05", [
+                ("$a", "Erstes", "[08:00:00] User: x\nAssistant: ok"),
+                ("$b", "Letztes", "[20:00:00] User: y\nAssistant: ok"),
+            ])
+            ptr = mm.last_conversation_pointer("u")
+            assert "memory/2026-06-05.md" in ptr
+            assert "Letztes" in ptr
+            # Excluding the current thread points at the previous one.
+            ptr2 = mm.last_conversation_pointer("u", exclude_thread_id="$b")
+            assert "Erstes" in ptr2

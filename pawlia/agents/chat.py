@@ -840,7 +840,21 @@ class ChatAgent(BaseAgent):
         # Workspace context: search on first substantive turn, re-search on topic shift
         self._handle_workspace_context(user_input, allow_workspace_search=workspace_search)
 
-        prompt = self.build_system_prompt(system_prompt=system_prompt)
+        # A lightweight pointer to the most recent *other* conversation's log
+        # file, so the model can pull it with the files skill if the user
+        # refers back to it — without replaying the whole thread every turn.
+        extra_context: Optional[str] = None
+        if not system_prompt and self.memory and self.session:
+            try:
+                extra_context = self.memory.last_conversation_pointer(
+                    self.session.user_id, exclude_thread_id=thread_id,
+                )
+            except Exception:
+                extra_context = None
+
+        prompt = self.build_system_prompt(
+            system_prompt=system_prompt, extra_context=extra_context,
+        )
 
         messages: List[BaseMessage] = [SystemMessage(content=prompt)]
 
@@ -1048,7 +1062,21 @@ class ChatAgent(BaseAgent):
         # Workspace context: search on first substantive turn, re-search on topic shift
         self._handle_workspace_context(user_input, allow_workspace_search=workspace_search)
 
-        prompt = self.build_system_prompt(system_prompt=system_prompt)
+        # A lightweight pointer to the most recent *other* conversation's log
+        # file, so the model can pull it with the files skill if the user
+        # refers back to it — without replaying the whole thread every turn.
+        extra_context: Optional[str] = None
+        if not system_prompt and self.memory and self.session:
+            try:
+                extra_context = self.memory.last_conversation_pointer(
+                    self.session.user_id, exclude_thread_id=thread_id,
+                )
+            except Exception:
+                extra_context = None
+
+        prompt = self.build_system_prompt(
+            system_prompt=system_prompt, extra_context=extra_context,
+        )
 
         messages: List[BaseMessage] = [SystemMessage(content=prompt)]
 

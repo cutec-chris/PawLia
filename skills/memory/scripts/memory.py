@@ -86,16 +86,49 @@ async def _get_backend(user_id: str):
 # Commands
 # ---------------------------------------------------------------------------
 
+def _recent_threads_block(user_id: str, question: str, limit: int = 5, max_days: int = 2) -> str:
+    """Search the recent (not-yet-indexed) threads straight from the daily logs.
+
+    Covers the gap the RAG index lags behind on — threads from today and the
+    last day are matched against *question* by keyword, so a call or file from
+    minutes ago is findable before the background indexer has processed it.
+    """
+    try:
+        from pawlia.memory import MemoryManager
+
+        threads = MemoryManager(str(_SESSION_DIR)).recent_threads(
+            user_id, limit=limit, max_days=max_days, query=question,
+        )
+    except Exception:
+        return ""
+    if not threads:
+        return ""
+    lines = ["## Treffer in den jüngsten Gesprächen (noch nicht indiziert, direkt aus den Chat-Logs)"]
+    for t in threads:
+        lines.append(f"\n### {t['date']} — {t['title']}")
+        lines.append(t["body"])
+    return "\n".join(lines)
+
+
 async def cmd_search(user_id: str, question: str):
+    # Search the recent, not-yet-indexed threads too. These go first so they
+    # survive any downstream output truncation.
+    recent = _recent_threads_block(user_id, question)
+
     backend = await _get_backend(user_id)
     if backend is None:
         print(json.dumps({
-            "result": "Noch kein Langzeitgedächtnis vorhanden. Chatlogs werden automatisch im Hintergrund indiziert.",
+            "result": recent or "Noch kein Langzeitgedächtnis vorhanden. Chatlogs werden automatisch im Hintergrund indiziert.",
         }, ensure_ascii=False))
         return
 
-    result = await backend.query(question)
-    print(json.dumps({"result": result}, ensure_ascii=False))
+    rag_result = await backend.query(question)
+    parts = []
+    if recent:
+        parts.append(recent)
+    if rag_result and rag_result.strip():
+        parts.append("## Langzeit-Wissen (Wiki)\n" + rag_result.strip())
+    print(json.dumps({"result": "\n\n".join(parts)}, ensure_ascii=False))
 
 
 async def cmd_index(user_id: str):
