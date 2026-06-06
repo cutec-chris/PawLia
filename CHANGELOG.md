@@ -58,6 +58,9 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   instead of separate handling per type.
 
 ### Fixed
+- Matrix: attachments (e.g. a generated rain-radar image) are now sent into the
+  active thread via `m.relates_to`, instead of landing loose in the room
+  timeline where a user viewing the thread never saw them.
 - Reminders fire in the user's timezone and @-mention the user on notify;
   `tzdata` added so `zoneinfo` resolves IANA zones on Alpine.
 - Matrix: the conversation turn is persisted even when `agent.run()` raises,

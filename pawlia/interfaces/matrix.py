@@ -608,12 +608,19 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return f"{head}\n\nBeschreibung:\n{snippet}"
         return head
 
-    async def _send_attachment(room_id: str, att: dict) -> None:
+    async def _send_attachment(
+        room_id: str, att: dict, thread_root: Optional[str] = None
+    ) -> None:
         """Upload + send one queued attachment to Matrix.
 
         ``att`` is a ``pending_attachments`` entry: ``{data, mimetype, filename, caption}``.
         Maps MIME → Matrix msgtype (image/video/audio/file) and uploads the
         bytes via the nio content repository before sending the message.
+
+        ``thread_root`` is the thread's root event id when the conversation runs
+        in a thread — the attachment must carry the same ``m.relates_to`` block
+        as the text reply, otherwise it lands in the room timeline instead of
+        the thread and the user never sees it there.
         """
         data: bytes = att.get("data") or b""
         mimetype: str = att.get("mimetype") or "application/octet-stream"
@@ -645,14 +652,23 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         }
         if caption:
             content["filename"] = filename
+        if thread_root:
+            content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": thread_root,
+                "is_falling_back": False,
+                "m.in_reply_to": {"event_id": thread_root},
+            }
 
         try:
-            await client.room_send(
+            resp = await client.room_send(
                 room_id=room_id,
                 message_type="m.room.message",
                 content=content,
                 ignore_unverified_devices=True,
             )
+            if thread_root:
+                _remember_thread_event(getattr(resp, "event_id", None), thread_root)
         except Exception as exc:
             logger.error("Matrix: send attachment failed: %s", exc)
 
@@ -917,8 +933,10 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             sent_event_id = await _send(response)
             # Drain any attachments queued by direct tools (e.g. attach_file)
             # and ship them as separate Matrix messages after the text reply.
+            # Pass thread_id so the attachment lands in the same thread as the
+            # reply, not loose in the room timeline.
             for att in getattr(agent, "pending_attachments", []) or []:
-                await _send_attachment(room.room_id, att)
+                await _send_attachment(room.room_id, att, thread_id)
             # Pre-seed so if user creates a thread from this response, context is preserved on restart
             if not thread_id and sent_event_id:
                 session = app.memory.load_session(session_id)
