@@ -840,17 +840,24 @@ class ChatAgent(BaseAgent):
         # Workspace context: search on first substantive turn, re-search on topic shift
         self._handle_workspace_context(user_input, allow_workspace_search=workspace_search)
 
-        # A lightweight pointer to the most recent *other* conversation's log
-        # file, so the model can pull it with the files skill if the user
-        # refers back to it — without replaying the whole thread every turn.
+        # Lightweight pointers (most recent other conversation + last received
+        # attachment) so the model can pull them with the files skill on demand
+        # instead of replaying everything every turn.
         extra_context: Optional[str] = None
         if not system_prompt and self.memory and self.session:
-            try:
-                extra_context = self.memory.last_conversation_pointer(
-                    self.session.user_id, exclude_thread_id=thread_id,
-                )
-            except Exception:
-                extra_context = None
+            pointers: List[str] = []
+            for _getter in (
+                lambda: self.memory.last_conversation_pointer(
+                    self.session.user_id, exclude_thread_id=thread_id),
+                lambda: self.memory.last_attachment_pointer(self.session.user_id),
+            ):
+                try:
+                    _line = _getter()
+                except Exception:
+                    _line = None
+                if _line:
+                    pointers.append(_line)
+            extra_context = "\n".join(pointers) or None
 
         prompt = self.build_system_prompt(
             system_prompt=system_prompt, extra_context=extra_context,
@@ -1062,17 +1069,24 @@ class ChatAgent(BaseAgent):
         # Workspace context: search on first substantive turn, re-search on topic shift
         self._handle_workspace_context(user_input, allow_workspace_search=workspace_search)
 
-        # A lightweight pointer to the most recent *other* conversation's log
-        # file, so the model can pull it with the files skill if the user
-        # refers back to it — without replaying the whole thread every turn.
+        # Lightweight pointers (most recent other conversation + last received
+        # attachment) so the model can pull them with the files skill on demand
+        # instead of replaying everything every turn.
         extra_context: Optional[str] = None
         if not system_prompt and self.memory and self.session:
-            try:
-                extra_context = self.memory.last_conversation_pointer(
-                    self.session.user_id, exclude_thread_id=thread_id,
-                )
-            except Exception:
-                extra_context = None
+            pointers: List[str] = []
+            for _getter in (
+                lambda: self.memory.last_conversation_pointer(
+                    self.session.user_id, exclude_thread_id=thread_id),
+                lambda: self.memory.last_attachment_pointer(self.session.user_id),
+            ):
+                try:
+                    _line = _getter()
+                except Exception:
+                    _line = None
+                if _line:
+                    pointers.append(_line)
+            extra_context = "\n".join(pointers) or None
 
         prompt = self.build_system_prompt(
             system_prompt=system_prompt, extra_context=extra_context,

@@ -486,9 +486,14 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         return bytes_to_data_uri(resp.body, resp.content_type or mimetype)
 
     async def _save_incoming_bytes(
-        user_id: str, data: bytes, filename: str, mimetype: str
-    ) -> None:
+        user_id: str, data: bytes, filename: str, mimetype: str,
+        description: Optional[str] = None,
+    ) -> Optional[str]:
         """Persist an incoming file/image to the user's Downloads/ folder.
+
+        *description* (vision description / extracted text) is written into the
+        markdown sidecar so the file is findable by content via the files skill.
+        Returns the relative ``Downloads/<name>`` path on success, else ``None``.
 
         Failures are logged but never raised — saving is a best-effort side
         effect and must not break message handling.
@@ -507,6 +512,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 filename=filename,
                 source="matrix",
                 mimetype=mimetype,
+                description=description,
                 max_bytes=max_bytes,
             )
             if meta is None:
@@ -514,8 +520,58 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                     "Matrix: dropped incoming file (empty or too large): %s (%d bytes)",
                     filename, len(data),
                 )
+                return None
+            return f"{attachments.DOWNLOADS_SUBDIR}/{meta.saved_as}"
         except Exception as exc:
             logger.warning("Matrix: failed to save incoming file %s: %s", filename, exc)
+            return None
+
+    async def _describe_incoming_image(data_uri: str) -> str:
+        """Best-effort text description of an incoming image for its sidecar.
+
+        Uses the first vision-capable model in the ``vision`` fallback chain.
+        Returns "" if no vision model is available or describing fails.
+        """
+        factory = getattr(app, "llm", None)
+        session_dir = getattr(app, "session_dir", None)
+        if not factory or not session_dir:
+            return ""
+        try:
+            from pawlia import vision_probe
+
+            chain = factory.get_fallback_chain("vision")
+            describer_name = None
+            for name in chain or []:
+                try:
+                    if await vision_probe.resolve_supports_images(factory, session_dir, name):
+                        describer_name = name
+                        break
+                except Exception:
+                    continue
+            if not describer_name:
+                return ""
+            describer = factory.get_with_model(describer_name)
+            desc = await vision_probe.describe_image(describer, data_uri)
+            return (desc or "").strip()
+        except Exception as exc:
+            logger.debug("Matrix: could not describe incoming image: %s", exc)
+            return ""
+
+    def _attachment_pointer_line(
+        saved_rel: Optional[str], description: str, *, kind: str = "Datei",
+    ) -> str:
+        """One-line context note about an attachment received during a call."""
+        if saved_rel:
+            note = (
+                f"[Der Anrufer hat ein {kind} geschickt: `{saved_rel}` "
+                f"(Beschreibung in `{saved_rel}.md`)."
+            )
+        else:
+            note = f"[Der Anrufer hat ein {kind} geschickt."
+        snippet = " ".join((description or "").split())
+        if snippet:
+            note += f" Beschreibung: {snippet[:500]}"
+        return note + "]"
 
     async def _send_attachment(room_id: str, att: dict) -> None:
         """Upload + send one queued attachment to Matrix.
@@ -935,17 +991,38 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         thread_id = _resolve_thread_root(getattr(event, "source", None), thread_events)
         thread_id = _auto_thread(event.event_id, thread_id)
         _remember_thread_event(event.event_id, thread_id)
+        # Describe the image once (vision model) so the sidecar markdown is
+        # searchable and the description can be reused for an active call.
+        description = await _describe_incoming_image(data_uri)
+
         # Persist a copy under the user's Downloads/ so the LLM can re-attach
         # the image to a later reply via the attach_file tool.
+        saved_rel: Optional[str] = None
         try:
             prefix, b64 = data_uri.split(",", 1)
             img_bytes = base64.b64decode(b64)
             filename = caption.strip() or f"matrix-image-{int(time.time())}.{mimetype.split('/', 1)[-1]}"
             if "." not in filename:
                 filename = f"{filename}.{mimetype.split('/', 1)[-1]}"
-            await _save_incoming_bytes(f"mx_{room.room_id}", img_bytes, filename, mimetype)
+            saved_rel = await _save_incoming_bytes(
+                f"mx_{room.room_id}", img_bytes, filename, mimetype, description=description,
+            )
         except Exception as exc:
             logger.debug("Matrix: could not persist incoming image: %s", exc)
+
+        # If a call is live in this room, make the image available to the voice
+        # agent (silently) instead of running a separate in-thread chat turn.
+        call_session = call_manager.active_session_for_room(room.room_id)
+        if call_session is not None:
+            call_session.register_inbound_attachment(
+                _attachment_pointer_line(saved_rel, description, kind="Bild")
+            )
+            logger.info(
+                "Matrix: image during call %s routed to voice agent (%s)",
+                call_session.call_id[:8], saved_rel or "unsaved",
+            )
+            return
+
         await _handle(room, caption, images=[data_uri], thread_id=thread_id)
 
     async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
@@ -1031,76 +1108,76 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
 
         can_decode_text = _is_text_matrix_file(filename, mimetype)
         can_convert_markdown = _is_markitdown_matrix_file(filename, mimetype)
-        if not can_decode_text and not can_convert_markdown:
-            # Still try to persist a copy so the LLM can re-attach the file
-            # later even when we can't decode it for context.
-            try:
-                resp_preview = await client.download(mxc_url)
-                if isinstance(resp_preview, DownloadResponse):
-                    actual_mime = resp_preview.content_type or mimetype
-                    await _save_incoming_bytes(
-                        f"mx_{room.room_id}", resp_preview.body, filename, actual_mime,
-                    )
-            except Exception as exc:
-                logger.debug("Matrix: could not persist incoming file: %s", exc)
-            await _handle(
-                room,
-                (
-                    "[Datei empfangen]\n"
-                    f"Name: {filename}\n"
-                    f"MIME-Type: {mimetype}\n"
-                    "Die Datei ist kein erkennbares Textformat und wurde nicht inhaltlich gelesen."
-                ),
-                thread_id=thread_id,
-            )
-            return
 
         resp = await client.download(mxc_url)
         if not isinstance(resp, DownloadResponse):
             logger.warning("Matrix: failed to download file %s: %s", filename, resp)
             return
-
-        # Always persist a copy of the file (even when we can decode it) so
-        # the user can ask the bot to re-send the file later.
         actual_mimetype = resp.content_type or mimetype
-        await _save_incoming_bytes(
-            f"mx_{room.room_id}", resp.body, filename, actual_mimetype,
-        )
 
-        if can_decode_text:
-            text, truncated = _decode_matrix_file_text(resp.body)
-            format_label = "Text"
-            suffix = "\n\n[Hinweis: Dateiinhalt wurde wegen Groesse gekuerzt.]" if truncated else ""
-        else:
-            text, error = _convert_matrix_file_markdown(resp.body, filename)
-            if error:
-                await _handle(
-                    room,
-                    (
-                        "[Datei empfangen]\n"
-                        f"Name: {filename}\n"
-                        f"MIME-Type: {actual_mimetype}\n"
-                        f"{error}"
-                    ),
-                    thread_id=thread_id,
-                )
-                return
-            format_label = "Markdown"
-            suffix = ""
-
-        await _handle(
-            room,
-            (
+        # Extract a textual representation (also used as the sidecar description
+        # so the file is findable by content) and the chat-turn text.
+        description = ""
+        if not can_decode_text and not can_convert_markdown:
+            handle_text = (
                 "[Datei empfangen]\n"
                 f"Name: {filename}\n"
                 f"MIME-Type: {actual_mimetype}\n"
-                f"Konvertiert als: {format_label}\n\n"
+                "Die Datei ist kein erkennbares Textformat und wurde nicht inhaltlich gelesen."
+            )
+        elif can_decode_text:
+            text, truncated = _decode_matrix_file_text(resp.body)
+            description = text
+            suffix = "\n\n[Hinweis: Dateiinhalt wurde wegen Groesse gekuerzt.]" if truncated else ""
+            handle_text = (
+                "[Datei empfangen]\n"
+                f"Name: {filename}\n"
+                f"MIME-Type: {actual_mimetype}\n"
+                "Konvertiert als: Text\n\n"
                 "Inhalt:\n"
                 f"```markdown\n{text}\n```"
                 f"{suffix}"
-            ),
-            thread_id=thread_id,
+            )
+        else:
+            text, error = _convert_matrix_file_markdown(resp.body, filename)
+            if error:
+                handle_text = (
+                    "[Datei empfangen]\n"
+                    f"Name: {filename}\n"
+                    f"MIME-Type: {actual_mimetype}\n"
+                    f"{error}"
+                )
+            else:
+                description = text
+                handle_text = (
+                    "[Datei empfangen]\n"
+                    f"Name: {filename}\n"
+                    f"MIME-Type: {actual_mimetype}\n"
+                    "Konvertiert als: Markdown\n\n"
+                    "Inhalt:\n"
+                    f"```markdown\n{text}\n```"
+                )
+
+        # Always persist a copy (with the extracted text in the sidecar) so the
+        # user can ask the bot to re-send or re-read the file later.
+        saved_rel = await _save_incoming_bytes(
+            f"mx_{room.room_id}", resp.body, filename, actual_mimetype, description=description,
         )
+
+        # If a call is live in this room, make the file available to the voice
+        # agent (silently) instead of running a separate in-thread chat turn.
+        call_session = call_manager.active_session_for_room(room.room_id)
+        if call_session is not None:
+            call_session.register_inbound_attachment(
+                _attachment_pointer_line(saved_rel, description, kind="Datei")
+            )
+            logger.info(
+                "Matrix: file during call %s routed to voice agent (%s)",
+                call_session.call_id[:8], saved_rel or "unsaved",
+            )
+            return
+
+        await _handle(room, handle_text, thread_id=thread_id)
 
     async def on_file(room: MatrixRoom, event: RoomMessageFile) -> None:
         if event.sender == client.user_id:

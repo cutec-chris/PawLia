@@ -445,6 +445,9 @@ class CallSession:
         self._greeting_task: Optional[asyncio.Task] = None
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
+        # Context notes about attachments received mid-call (images/files). Fed
+        # into the call prompt so the voice agent can talk about them on request.
+        self._pending_attachments: List[str] = []
         # Network-quality monitoring state (see _update_net_state)
         self._net_degraded = False
         self._net_bad_streak = 0
@@ -904,7 +907,7 @@ class CallSession:
             return
 
         try:
-            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._network_prompt_hint())
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._call_extra_context())
             greeting_input = (
                 "[SYSTEM: A voice call was just accepted. "
                 "Greet the caller with a short, friendly greeting. "
@@ -985,7 +988,7 @@ class CallSession:
             return
 
         try:
-            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._network_prompt_hint())
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._call_extra_context())
             greeting_input = (
                 "[SYSTEM: A voice call was just accepted. "
                 "Greet the caller with a short, friendly greeting. "
@@ -1252,7 +1255,7 @@ class CallSession:
 
         try:
             first_sentence_received = False
-            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._network_prompt_hint())
+            call_prompt = self._agent.build_system_prompt(mode="call", thread_id=self.thread_id, extra_context=self._call_extra_context())
 
             async def _on_sentence(sentence: str) -> None:
                 """Synthesize and enqueue one sentence for immediate TTS playback."""
@@ -1905,6 +1908,27 @@ class CallSession:
             )
         return "Call network quality: good."
 
+    def register_inbound_attachment(self, note: str) -> None:
+        """Record an attachment received mid-call so the voice agent knows.
+
+        The *note* (a one-line pointer with the file path + description) is
+        surfaced in the call prompt on subsequent turns. The agent stays silent
+        until the caller asks — no proactive interruption.
+        """
+        if note:
+            self._pending_attachments.append(note)
+            logger.info("call %s: inbound attachment registered for voice agent", self.call_id[:8])
+
+    def _call_extra_context(self) -> str:
+        """Live-context block for the call prompt: network hint + attachments."""
+        parts = [self._network_prompt_hint()]
+        if self._pending_attachments:
+            parts.append(
+                "Während dieses Gesprächs eingegangene Anhänge (nur erwähnen/lesen, "
+                "wenn der Anrufer danach fragt):\n" + "\n".join(self._pending_attachments)
+            )
+        return "\n\n".join(p for p in parts if p)
+
     async def _log_receiver_stats(self) -> None:
         """Log RTP receiver stats and warn the thread when the network degrades.
 
@@ -2119,6 +2143,13 @@ class CallManager:
 
     def available(self) -> bool:
         return _AIORTC_AVAILABLE
+
+    def active_session_for_room(self, room_id: str) -> Optional["CallSession"]:
+        """Return the live (not finished) call session in *room_id*, if any."""
+        for session in self._sessions.values():
+            if session.room_id == room_id and not session.finished:
+                return session
+        return None
 
     async def on_invite(self, room: "MatrixRoom", event) -> None:
         """Handle ``m.call.invite``."""

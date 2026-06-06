@@ -51,7 +51,8 @@ def test_save_incoming_collision_appends_suffix(tmp_path):
         assert meta is not None
     ddir = attachments.downloads_dir(str(tmp_path), user_id)
     files = set(os.listdir(ddir))
-    assert files == {"report.pdf", "report-1.pdf"}
+    # Two binaries + their markdown sidecars.
+    assert files == {"report.pdf", "report-1.pdf", "report.pdf.md", "report-1.pdf.md"}
 
 
 def test_save_incoming_rejects_empty(tmp_path):
@@ -101,29 +102,49 @@ def test_save_incoming_sanitises_path_traversal_in_name(tmp_path):
     assert not leaked.exists()
 
 
-def test_index_path_lives_outside_workspace(tmp_path):
+def test_sidecar_written_with_description(tmp_path):
     from pawlia import attachments
 
-    idx = attachments.index_path(str(tmp_path), "chris")
-    # Must be a sibling of workspace/, not inside it.
-    workspace = attachments.workspace_dir(str(tmp_path), "chris")
-    assert os.path.dirname(idx) != workspace
-    assert idx.endswith("downloads_index.json")
+    user_id = "chris"
+    meta = attachments.save_incoming(
+        session_dir=str(tmp_path),
+        user_id=user_id,
+        data=b"\x89PNG fake",
+        filename="cat.png",
+        source="matrix",
+        mimetype="image/png",
+        description="Eine getigerte Katze auf einem Sofa.",
+    )
+    assert meta is not None
+    assert meta.description == "Eine getigerte Katze auf einem Sofa."
 
+    ddir = attachments.downloads_dir(str(tmp_path), user_id)
+    sidecar = os.path.join(ddir, "cat.png.md")
+    assert os.path.isfile(sidecar)
+    content = open(sidecar, encoding="utf-8").read()
+    # Sidecar lives in the workspace (searchable) and carries the description.
+    assert "Eine getigerte Katze" in content
+    assert 'mimetype: "image/png"' in content
 
-def test_index_truncates_at_max(tmp_path):
-    from pawlia import attachments
-
-    user_id = "loop"
-    for i in range(attachments._INDEX_MAX_ENTRIES + 10):
-        attachments.save_incoming(
-            session_dir=str(tmp_path),
-            user_id=user_id,
-            data=str(i).encode(),
-            filename=f"f{i}.txt",
-            source="matrix",
-        )
+    # Roundtrip: list_for_user reconstructs metadata + description from sidecars.
     entries = attachments.list_for_user(str(tmp_path), user_id)
-    assert len(entries) == attachments._INDEX_MAX_ENTRIES
-    # Newest entries kept
-    assert entries[-1].saved_as == f"f{attachments._INDEX_MAX_ENTRIES + 9}.txt"
+    assert len(entries) == 1
+    assert entries[0].saved_as == "cat.png"
+    assert entries[0].description == "Eine getigerte Katze auf einem Sofa."
+
+
+def test_save_incoming_without_description_uses_placeholder(tmp_path):
+    from pawlia import attachments
+
+    attachments.save_incoming(
+        session_dir=str(tmp_path),
+        user_id="x",
+        data=b"data",
+        filename="doc.bin",
+        source="telegram",
+    )
+    ddir = attachments.downloads_dir(str(tmp_path), "x")
+    content = open(os.path.join(ddir, "doc.bin.md"), encoding="utf-8").read()
+    assert "keine Beschreibung" in content
+    # Empty description roundtrips to "".
+    assert attachments.list_for_user(str(tmp_path), "x")[0].description == ""

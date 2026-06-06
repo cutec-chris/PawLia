@@ -134,10 +134,17 @@ def _out(data) -> None:
 
 
 def _walk_files(workdir: str):
-    """Yield (abs_path, rel_path) for every file under workdir, recursively."""
+    """Yield (abs_path, rel_path) for every file under workdir, recursively.
+
+    Hidden entries (names starting with ``.``) are skipped entirely — this
+    prunes ``.git`` (thousands of objects), ``.obsidian``, ``.trash`` etc. so
+    listings/greps reach real content like ``Downloads/`` instead of drowning.
+    """
     for root, dirs, files in os.walk(workdir):
-        dirs.sort()
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for name in sorted(files):
+            if name.startswith("."):
+                continue
             abs_path = os.path.join(root, name)
             rel_path = os.path.relpath(abs_path, workdir)
             # Normalize to forward slashes so the LLM gets consistent paths
@@ -145,14 +152,19 @@ def _walk_files(workdir: str):
 
 
 def _walk_entries(workdir: str):
-    """Yield (abs_path, rel_path) for every file and directory under workdir, recursively."""
+    """Yield (abs_path, rel_path) for every file and directory under workdir, recursively.
+
+    Hidden entries (names starting with ``.``) are skipped — see ``_walk_files``.
+    """
     for root, dirs, files in os.walk(workdir):
-        dirs.sort()
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for d in dirs:
             abs_path = os.path.join(root, d)
             rel_path = os.path.relpath(abs_path, workdir)
             yield abs_path, rel_path.replace(os.sep, "/")
         for name in sorted(files):
+            if name.startswith("."):
+                continue
             abs_path = os.path.join(root, name)
             rel_path = os.path.relpath(abs_path, workdir)
             yield abs_path, rel_path.replace(os.sep, "/")

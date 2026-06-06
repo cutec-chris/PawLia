@@ -1471,3 +1471,37 @@ def test_should_transcribe_chunk_strict_thresholds_in_noisy_env():
         # With strict thresholds (0.12), this should be rejected
         assert session._speech_detector.should_transcribe(pcm, 48000, fps=50) is False
 
+
+
+def test_register_inbound_attachment_surfaces_in_call_context():
+    session = _make_call_session("call-att")
+    # No attachments → only the network hint, no attachment block.
+    assert "Anhänge" not in session._call_extra_context()
+
+    session.register_inbound_attachment(
+        "[Der Anrufer hat ein Bild geschickt: `Downloads/cat.png` (Beschreibung in `Downloads/cat.png.md`).]"
+    )
+    ctx = session._call_extra_context()
+    assert "Downloads/cat.png" in ctx
+    # Stays silent unless asked — instruction makes that explicit.
+    assert "wenn der Anrufer danach fragt" in ctx
+
+
+def test_active_session_for_room():
+    mgr = matrix_call.CallManager(
+        client=SimpleNamespace(),
+        app=SimpleNamespace(),
+        cfg={},
+        send_text_cb=AsyncMock(),
+        send_thread_reply_cb=AsyncMock(),
+        get_agent_cb=MagicMock(),
+    )
+    assert mgr.active_session_for_room("!room:test") is None
+
+    live = SimpleNamespace(room_id="!room:test", finished=False)
+    done = SimpleNamespace(room_id="!room:test", finished=True)
+    other = SimpleNamespace(room_id="!other:test", finished=False)
+    mgr._sessions = {"done": done, "live": live, "other": other}
+
+    assert mgr.active_session_for_room("!room:test") is live
+    assert mgr.active_session_for_room("!nope:test") is None

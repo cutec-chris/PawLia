@@ -858,3 +858,22 @@ class TestRecentThreads:
             # Excluding the current thread points at the previous one.
             ptr2 = mm.last_conversation_pointer("u", exclude_thread_id="$b")
             assert "Erstes" in ptr2
+
+    def test_last_attachment_pointer(self):
+        from pawlia import attachments
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            assert mm.last_attachment_pointer("u") is None  # nothing yet
+            attachments.save_incoming(
+                session_dir=tmpdir, user_id="u", data=b"x", filename="a.txt",
+                source="matrix", description="erstes",
+            )
+            attachments.save_incoming(
+                session_dir=tmpdir, user_id="u", data=b"\x89P", filename="b.png",
+                source="matrix", mimetype="image/png", description="zweites",
+            )
+            ptr = mm.last_attachment_pointer("u")
+            # Points at the most recent attachment + its sidecar.
+            assert "Downloads/b.png" in ptr
+            assert "Downloads/b.png.md" in ptr

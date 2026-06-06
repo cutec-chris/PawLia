@@ -596,6 +596,29 @@ class MemoryManager:
             f"Datei bei Bedarf mit der files-Skill."
         )
 
+    def last_attachment_pointer(self, user_id: str) -> Optional[str]:
+        """A one-line pointer to the most recently received attachment.
+
+        Lets the model pull the file (or its description sidecar) with the
+        ``files`` skill if the user refers to it, without dumping content into
+        every prompt. Reads the sidecar markdowns in ``Downloads/`` — no index.
+        """
+        try:
+            from pawlia import attachments
+
+            metas = attachments.list_for_user(self.session_dir, user_id)
+        except Exception:
+            return None
+        if not metas:
+            return None
+        m = metas[-1]
+        rel = f"Downloads/{m.saved_as}"
+        line = (
+            f"Letzter empfangener Anhang: `{rel}` ({m.original_name}). "
+            f"Beschreibung/Inhalt in `{rel}.md` — bei Bezug mit der files-Skill lesen."
+        )
+        return line
+
     @classmethod
     def _extract_main_history(cls, daily_text: str) -> str:
         text = cls._new_thread_section_pattern().sub("", daily_text)
