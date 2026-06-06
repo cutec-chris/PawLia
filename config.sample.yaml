@@ -1,27 +1,21 @@
-providers:
-  ollama:
-    backend: pawlia
-    apiBase: http://localhost:11434/v1
-    apiKey: ollama
-    timeout: 240
-    keepAlive: -1
-  # Hermes is an alternative *brain*, not a tool: a provider with
-  # `backend: hermes` makes the RouterAgent hand the whole turn to an external
-  # Hermes server (which keeps its own tools/context) instead of PawLia's local
-  # ChatAgent stack. PawLia stays the interface + logging + memory layer.
-  # Enable this as a fallback when the local stack misbehaves — point a model at
-  # this provider (see the `hermes:` model below) and assign it to `chat`.
-  # hermes_local:
-  #   backend: hermes
-  #   apiBase: http://127.0.0.1:8642/v1
-  #   apiKey: change-me
-  #   timeout: 600
-  #   conversation_namespace: pawlia
-  #   store: true
-  # groq:
-  #   backend: pawlia
-  #   apiBase: https://api.groq.com/openai/v1
-  #   apiKey: gsk_...
+# Assign a model (by key) to each agent type.
+# You can provide multiple models comma-separated to enable runtime failover,
+# e.g. `chat: smart,fast` (tries smart first, then fast if it errors).
+# Fallback chain: chat/vision/skill_runner → default
+#                 skill.<name> → skill_runner → default
+# Note: skill_runner and skills are optional — if omitted, they fall back to chat.
+#       Session overrides set via /model chat also propagate to skills automatically.
+agents:
+  default: fast       # global fallback — must point to a key in models:
+  # chat: smart,fast
+  # skill_runner: fast   # optional — inherits chat if omitted
+  # vision: vision
+  # skills:              # per-skill overrides (optional)
+  #   searxng: groq-fast,fast
+  #   browser: smart,fast
+  #   skill-creator: smart,fast   # give skill-building its own chain — a long
+  #                               # multi-turn skill run otherwise shares (and can
+  #                               # blacklist) the very model your live chat/calls use
 
 # Named model definitions.  Each entry bundles a model name, provider, and
 # generation parameters.  Agent types and skills reference these by key.
@@ -60,21 +54,30 @@ models:
   #   model: hermes-agent
   #   provider: hermes_local
 
-# Assign a model (by key) to each agent type.
-# You can provide multiple models comma-separated to enable runtime failover,
-# e.g. `chat: smart,fast` (tries smart first, then fast if it errors).
-# Fallback chain: chat/vision/skill_runner → default
-#                 skill.<name> → skill_runner → default
-# Note: skill_runner and skills are optional — if omitted, they fall back to chat.
-#       Session overrides set via /model chat also propagate to skills automatically.
-agents:
-  default: fast       # global fallback — must point to a key in models:
-  # chat: smart,fast
-  # skill_runner: fast   # optional — inherits chat if omitted
-  # vision: vision
-  # skills:              # per-skill overrides (optional)
-  #   searxng: groq-fast,fast
-  #   browser: smart,fast
+providers:
+  ollama:
+    backend: pawlia
+    apiBase: http://localhost:11434/v1
+    apiKey: ollama
+    timeout: 240
+    keepAlive: -1
+  # Hermes is an alternative *brain*, not a tool: a provider with
+  # `backend: hermes` makes the RouterAgent hand the whole turn to an external
+  # Hermes server (which keeps its own tools/context) instead of PawLia's local
+  # ChatAgent stack. PawLia stays the interface + logging + memory layer.
+  # Enable this as a fallback when the local stack misbehaves — point a model at
+  # this provider (see the `hermes:` model below) and assign it to `chat`.
+  # hermes_local:
+  #   backend: hermes
+  #   apiBase: http://127.0.0.1:8642/v1
+  #   apiKey: change-me
+  #   timeout: 600
+  #   conversation_namespace: pawlia
+  #   store: true
+  # groq:
+  #   backend: pawlia
+  #   apiBase: https://api.groq.com/openai/v1
+  #   apiKey: gsk_...
 
 interfaces:
   # Remove the comment to enable an interface.
