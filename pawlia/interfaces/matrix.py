@@ -557,21 +557,35 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             logger.debug("Matrix: could not describe incoming image: %s", exc)
             return ""
 
-    def _attachment_pointer_line(
-        saved_rel: Optional[str], description: str, *, kind: str = "Datei",
-    ) -> str:
-        """One-line context note about an attachment received during a call."""
+    def _attachment_kind(mimetype: str) -> str:
+        """German article+noun for an attachment, e.g. 'ein Bild' / 'ein PDF'."""
+        mt = (mimetype or "").lower()
+        if mt.startswith("image/"):
+            return "ein Bild"
+        if mt == "application/pdf" or mt.endswith("/pdf"):
+            return "ein PDF"
+        return "eine Datei"
+
+    def _attachment_note(kind: str, saved_rel: Optional[str], description: str) -> str:
+        """Synthetic 'user sent an attachment' message used in chat AND calls.
+
+        Frames the attachment as a user event with a wikilink to its sidecar so
+        the model reacts naturally (looks like a direct reaction to the file)
+        and can read the full content/description on demand via the files skill.
+        """
         if saved_rel:
-            note = (
-                f"[Der Anrufer hat ein {kind} geschickt: `{saved_rel}` "
-                f"(Beschreibung in `{saved_rel}.md`)."
+            head = (
+                f"Der User hat {kind} gesendet — Datei: `{saved_rel}`, "
+                f"Inhalt/Beschreibung: [[{saved_rel}.md]]."
             )
         else:
-            note = f"[Der Anrufer hat ein {kind} geschickt."
+            head = f"Der User hat {kind} gesendet (konnte nicht gespeichert werden)."
         snippet = " ".join((description or "").split())
         if snippet:
-            note += f" Beschreibung: {snippet[:500]}"
-        return note + "]"
+            if len(snippet) > 1500:
+                snippet = snippet[:1500] + " …"
+            return f"{head}\n\nBeschreibung:\n{snippet}"
+        return head
 
     async def _send_attachment(room_id: str, att: dict) -> None:
         """Upload + send one queued attachment to Matrix.
@@ -1010,20 +1024,25 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         except Exception as exc:
             logger.debug("Matrix: could not persist incoming image: %s", exc)
 
-        # If a call is live in this room, make the image available to the voice
-        # agent (silently) instead of running a separate in-thread chat turn.
+        # The image content now lives in the sidecar markdown; the model gets a
+        # synthetic "user sent an image" note (link + description) and reads the
+        # sidecar on demand — no inline image, same representation in chat/call.
+        note = _attachment_note(_attachment_kind(mimetype), saved_rel, description)
+        if caption:
+            note += f"\n\nText des Users dazu: {caption}"
+
+        # If a call is live in this room, file it silently into the call context
+        # instead of running a separate in-thread chat turn.
         call_session = call_manager.active_session_for_room(room.room_id)
         if call_session is not None:
-            call_session.register_inbound_attachment(
-                _attachment_pointer_line(saved_rel, description, kind="Bild")
-            )
+            call_session.register_inbound_attachment(note)
             logger.info(
                 "Matrix: image during call %s routed to voice agent (%s)",
                 call_session.call_id[:8], saved_rel or "unsaved",
             )
             return
 
-        await _handle(room, caption, images=[data_uri], thread_id=thread_id)
+        await _handle(room, note, thread_id=thread_id)
 
     async def on_image(room: MatrixRoom, event: RoomMessageImage) -> None:
         if event.sender == client.user_id:
@@ -1115,48 +1134,15 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
         actual_mimetype = resp.content_type or mimetype
 
-        # Extract a textual representation (also used as the sidecar description
-        # so the file is findable by content) and the chat-turn text.
+        # Extract a textual representation — stored as the sidecar description
+        # so the file becomes findable by content; the model reads it on demand.
         description = ""
-        if not can_decode_text and not can_convert_markdown:
-            handle_text = (
-                "[Datei empfangen]\n"
-                f"Name: {filename}\n"
-                f"MIME-Type: {actual_mimetype}\n"
-                "Die Datei ist kein erkennbares Textformat und wurde nicht inhaltlich gelesen."
-            )
-        elif can_decode_text:
+        if can_decode_text:
             text, truncated = _decode_matrix_file_text(resp.body)
-            description = text
-            suffix = "\n\n[Hinweis: Dateiinhalt wurde wegen Groesse gekuerzt.]" if truncated else ""
-            handle_text = (
-                "[Datei empfangen]\n"
-                f"Name: {filename}\n"
-                f"MIME-Type: {actual_mimetype}\n"
-                "Konvertiert als: Text\n\n"
-                "Inhalt:\n"
-                f"```markdown\n{text}\n```"
-                f"{suffix}"
-            )
-        else:
+            description = text + ("\n\n[Hinweis: Inhalt wegen Größe gekürzt.]" if truncated else "")
+        elif can_convert_markdown:
             text, error = _convert_matrix_file_markdown(resp.body, filename)
-            if error:
-                handle_text = (
-                    "[Datei empfangen]\n"
-                    f"Name: {filename}\n"
-                    f"MIME-Type: {actual_mimetype}\n"
-                    f"{error}"
-                )
-            else:
-                description = text
-                handle_text = (
-                    "[Datei empfangen]\n"
-                    f"Name: {filename}\n"
-                    f"MIME-Type: {actual_mimetype}\n"
-                    "Konvertiert als: Markdown\n\n"
-                    "Inhalt:\n"
-                    f"```markdown\n{text}\n```"
-                )
+            description = text if not error else ""
 
         # Always persist a copy (with the extracted text in the sidecar) so the
         # user can ask the bot to re-send or re-read the file later.
@@ -1164,20 +1150,20 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             f"mx_{room.room_id}", resp.body, filename, actual_mimetype, description=description,
         )
 
-        # If a call is live in this room, make the file available to the voice
-        # agent (silently) instead of running a separate in-thread chat turn.
+        note = _attachment_note(_attachment_kind(actual_mimetype), saved_rel, description)
+
+        # If a call is live in this room, file it silently into the call context
+        # instead of running a separate in-thread chat turn.
         call_session = call_manager.active_session_for_room(room.room_id)
         if call_session is not None:
-            call_session.register_inbound_attachment(
-                _attachment_pointer_line(saved_rel, description, kind="Datei")
-            )
+            call_session.register_inbound_attachment(note)
             logger.info(
                 "Matrix: file during call %s routed to voice agent (%s)",
                 call_session.call_id[:8], saved_rel or "unsaved",
             )
             return
 
-        await _handle(room, handle_text, thread_id=thread_id)
+        await _handle(room, note, thread_id=thread_id)
 
     async def on_file(room: MatrixRoom, event: RoomMessageFile) -> None:
         if event.sender == client.user_id:
