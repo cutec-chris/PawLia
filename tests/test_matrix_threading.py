@@ -100,3 +100,43 @@ def test_decode_matrix_file_text_handles_utf8_bom():
     assert text.startswith("BEGIN:VCALENDAR")
     assert "SUMMARY:Test" in text
     assert truncated is False
+
+
+# ── //stop: cancel running turns ────────────────────────────────────────────
+
+import asyncio  # noqa: E402
+
+from pawlia.interfaces.matrix import _cancel_pending_tasks  # noqa: E402
+
+
+def test_cancel_pending_tasks_cancels_live_and_skips_self_and_done():
+    async def _run():
+        async def _never():
+            await asyncio.Event().wait()
+
+        running = asyncio.create_task(_never())
+        another = asyncio.create_task(_never())
+        done = asyncio.create_task(asyncio.sleep(0))
+        await done  # ensure it has finished
+        me = asyncio.current_task()
+
+        n = _cancel_pending_tasks([running, another, done, me], exclude=me)
+
+        assert n == 2                 # running + another
+        assert not me.cancelled()     # the //stop task itself survives
+        # done task was already finished → not counted, not cancelled
+        assert done.done() and not done.cancelled()
+        # cancellation resolves once the tasks are awaited
+        for t in (running, another):
+            try:
+                await t
+                assert False, "expected CancelledError"
+            except asyncio.CancelledError:
+                pass
+            assert t.cancelled()
+
+    asyncio.run(_run())
+
+
+def test_cancel_pending_tasks_empty_returns_zero():
+    assert _cancel_pending_tasks([], exclude=None) == 0

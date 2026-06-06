@@ -90,6 +90,18 @@ _TEXT_MIMETYPES = {
 }
 
 
+def _cancel_pending_tasks(tasks, exclude=None) -> int:
+    """Cancel every not-done task in *tasks* except *exclude*.
+
+    Returns the number actually cancelled. ``exclude`` is the //stop command's
+    own task, which must survive so it can report back.
+    """
+    live = [t for t in tasks if t is not exclude and not t.done()]
+    for t in live:
+        t.cancel()
+    return len(live)
+
+
 def _make_content(text: str) -> dict:
     """Build a Matrix m.text content dict with rendered markdown."""
     _md.reset()
@@ -474,6 +486,20 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
     agent_cache = AgentCache(app)
     thread_events: Dict[str, str] = {}        # event_id → thread_root_id
     thread_members: Dict[str, List[str]] = {} # thread_root_id → [event_ids]
+    # Running agent turns, keyed by room#thread, so //stop can cancel the work
+    # the *commissioning* thread kicked off (a long skill run otherwise has no
+    # off switch).
+    running_turns: Dict[str, set] = {}
+
+    def _turn_key(room_id: str, thread_id: Optional[str]) -> str:
+        return f"{room_id}#{thread_id or ''}"
+
+    def _register_turn(key: str, task: "asyncio.Task") -> None:
+        running_turns.setdefault(key, set()).add(task)
+        task.add_done_callback(lambda t: running_turns.get(key, set()).discard(t))
+
+    def _cancel_turns(tasks: "List[asyncio.Task]") -> int:
+        return _cancel_pending_tasks(tasks, exclude=asyncio.current_task())
 
     def get_agent(room_id: str, thread_id: Optional[str] = None):
         """Return the agent for ``(room, thread)``. Per-thread cache prevents
@@ -800,6 +826,44 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                 await _send_text(room.room_id, result.message)
             return
 
+        stop_args = _cmd(text, "stop")
+        if stop_args is None:
+            stop_args = _cmd(text, "cancel")
+        if stop_args is not None:
+            stop_all = stop_args.strip().lower() in ("all", "alle", "*")
+            if stop_all:
+                all_tasks = [t for tasks in running_turns.values() for t in tasks]
+                n = _cancel_turns(all_tasks)
+                reply = (
+                    f"_🛑 {n} laufende Aufgabe{'n' if n != 1 else ''} überall abgebrochen._"
+                    if n else "_Es läuft gerade nichts, was ich abbrechen könnte._"
+                )
+            else:
+                key = _turn_key(room.room_id, thread_id)
+                n = _cancel_turns(list(running_turns.get(key, set())))
+                reply = (
+                    f"_🛑 Abgebrochen ({n} laufende Aufgabe{'n' if n != 1 else ''} in diesem Thread)._"
+                    if n else
+                    "_In diesem Thread läuft gerade nichts. Mit `//stop all` brichst du alles ab._"
+                )
+            if thread_id:
+                await _send_thread_reply(room.room_id, thread_id, reply)
+            else:
+                await _send_text(room.room_id, reply)
+            return
+
+        if _cmd(text, "stopall") is not None:
+            n = _cancel_turns([t for tasks in running_turns.values() for t in tasks])
+            reply = (
+                f"_🛑 {n} laufende Aufgabe{'n' if n != 1 else ''} überall abgebrochen._"
+                if n else "_Es läuft gerade nichts, was ich abbrechen könnte._"
+            )
+            if thread_id:
+                await _send_thread_reply(room.room_id, thread_id, reply)
+            else:
+                await _send_text(room.room_id, reply)
+            return
+
         model_args = _cmd(text, "model")
         if model_args is not None:
             await _handle_model_cmd(room, session_id, model_args, thread_id)
@@ -857,6 +921,12 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
                         await client.room_typing(room.room_id, typing_state=True)
                     except Exception:
                         pass
+
+        # Make this turn cancellable from its own thread via //stop.
+        current_turn = asyncio.current_task()
+        turn_key = _turn_key(room.room_id, thread_id)
+        if current_turn is not None:
+            _register_turn(turn_key, current_turn)
 
         try:
             await client.room_typing(room.room_id, typing_state=True)
@@ -941,6 +1011,28 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             if not thread_id and sent_event_id:
                 session = app.memory.load_session(session_id)
                 app.memory.seed_thread_context(session, sent_event_id, response)
+        except asyncio.CancelledError:
+            # //stop cancelled this turn. Clean up the typing indicator and
+            # acknowledge in-thread; re-raise so the task ends as cancelled.
+            typing_stop.set()
+            try:
+                typing_task.cancel()
+            except NameError:
+                pass
+            try:
+                await client.room_typing(room.room_id, typing_state=False)
+            except Exception:
+                pass
+            logger.info("Matrix: turn cancelled in %s%s", room.room_id, ctx)
+            try:
+                note = "_🛑 Abgebrochen._"
+                if thread_id:
+                    await _send_thread_reply(room.room_id, thread_id, note)
+                else:
+                    await _send_text(room.room_id, note)
+            except Exception:
+                pass
+            raise
         except Exception as e:
             typing_stop.set()
             try:
