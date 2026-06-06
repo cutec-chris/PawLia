@@ -914,6 +914,19 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             except Exception:
                 pass
             session = app.memory.load_session(session_id)
+            # Persist the turn even though the agent errored: agent.run() raised
+            # before reaching its own _persist, so without this the inbound
+            # message/attachment is lost from the daily log and vanishes on the
+            # next restart (the original "PDF never recorded" failure mode).
+            if text:
+                try:
+                    error_note = f"[Fehler bei der Verarbeitung: {e}]"
+                    if thread_id:
+                        app.memory.append_thread_exchange(session, thread_id, text, error_note)
+                    else:
+                        app.memory.append_exchange(session, text, error_note)
+                except Exception as persist_exc:
+                    logger.warning("Matrix: could not persist errored turn: %s", persist_exc)
             override = app.memory.get_agent_override_value(session, "chat", thread_id=thread_id)
             hint = ""
             if override:
