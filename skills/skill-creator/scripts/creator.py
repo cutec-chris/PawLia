@@ -106,7 +106,7 @@ def main():
     # Read PawLia runtime env:
     #   user_id = os.environ.get("PAWLIA_USER_ID")
     #   session_dir = os.environ.get("PAWLIA_SESSION_DIR")
-    #   skill_config = json.loads(os.environ.get("PAWLIA_SKILL_CONFIG", "{}"))
+    #   skill_config = json.loads(os.environ.get("PAWLIA_SKILL_CONFIG", "{{}}"))
 
     try:
         # TODO: implement your skill logic here
@@ -191,6 +191,27 @@ def _parse_frontmatter(skill_md: Path):
 
 # ── Commands ───────────────────────────────────────────────────────────
 
+def _safe_format(template: str, **kwargs) -> str:
+    """Like str.format(), but user-supplied values have their `{`/`}` escaped
+    so they can't crash the format call or interpolate unintended placeholders.
+
+    Use this whenever a template is filled with values that may contain
+    arbitrary text (e.g. user/LLM-supplied descriptions). After format()
+    unescapes the template's own `{{`/`}}`, the substituted (escaped) values
+    are restored to literal `{`/`}` via a second pass.
+    """
+    escaped = {}
+    for k, v in kwargs.items():
+        if isinstance(v, str):
+            # Use a sentinel that won't appear in normal text so we can
+            # round-trip braces through format().
+            escaped[k] = v.replace("{", "\x00LB\x00").replace("}", "\x00RB\x00")
+        else:
+            escaped[k] = v
+    out = template.format(**escaped)
+    return out.replace("\x00LB\x00", "{").replace("\x00RB\x00", "}")
+
+
 def cmd_init(args):
     """Initialize a new skill in the user's workspace."""
     name = _validate_name(args.name)
@@ -213,11 +234,38 @@ def cmd_init(args):
     target = ws / name
 
     if target.exists():
-        print(json.dumps({
-            "success": False,
-            "error": f"Skill '{name}' already exists at {target}",
-        }))
-        sys.exit(1)
+        # With --force, remove a partial/skeleton skill directory and retry.
+        # Without --force, refuse — never silently overwrite user work.
+        if not args.force:
+            print(json.dumps({
+                "success": False,
+                "error": (
+                    f"Skill '{name}' already exists at {target}. "
+                    f"Pass --force to overwrite a partial/skeleton init "
+                    f"(refuses if SKILL.md looks user-modified)."
+                ),
+            }))
+            sys.exit(1)
+        # Heuristic: refuse --force if SKILL.md looks hand-edited (version != "1.0"
+        # or non-template description). Avoids nuking real work.
+        existing_skill = target / "SKILL.md"
+        if existing_skill.is_file():
+            try:
+                with open(existing_skill, encoding="utf-8") as f:
+                    existing = f.read()
+                if "version: \"1.0\"" not in existing and "version: '1.0'" not in existing:
+                    print(json.dumps({
+                        "success": False,
+                        "error": (
+                            f"Refusing --force: SKILL.md at {target} looks "
+                            f"user-modified (version != 1.0). Delete manually first."
+                        ),
+                    }))
+                    sys.exit(1)
+            except OSError:
+                pass
+        import shutil
+        shutil.rmtree(target)
 
     description = args.description or f"The {name} skill."
     title = _title(name)
@@ -246,44 +294,67 @@ def cmd_init(args):
         resources = [r.strip() for r in args.resources.split(",")]
 
     script_type = args.script or "python"
-
-    # Create directory
-    target.mkdir(parents=True, exist_ok=True)
-
     sname = _script_name(name, script_type)
 
-    # Write SKILL.md
-    skill_md = SKILL_MD_TEMPLATE.format(
-        name=name,
-        description=description,
-        title=title,
-        script_name=sname,
-        credentials_field=cred_yaml,
-        config_field=config_yaml,
-    )
-    (target / "SKILL.md").write_text(skill_md, encoding="utf-8")
-    created = [str(target / "SKILL.md")]
+    created = []
 
-    # Create resource directories and files
-    for resource in resources:
-        res_dir = target / resource
-        res_dir.mkdir(exist_ok=True)
+    try:
+        # Create directory
+        target.mkdir(parents=True, exist_ok=False)
 
-        if resource == "scripts" and not args.no_script:
-            script_path = res_dir / sname
-            script_content = SCRIPT_TEMPLATES[script_type].format(
-                title=title,
-                script_name=sname,
-            )
-            script_path.write_text(script_content, encoding="utf-8")
-            script_path.chmod(0o755)
-            created.append(str(script_path))
-        elif resource == "references":
-            ref_file = res_dir / "guide.md"
-            ref_file.write_text(f"# {title} Reference\n\nTODO: Add reference documentation.\n", encoding="utf-8")
-            created.append(str(ref_file))
-        elif resource == "assets":
-            (res_dir / ".gitkeep").write_text("", encoding="utf-8")
+        # Write SKILL.md — use _safe_format so user-supplied description
+        # (which may contain { or } from JSON examples) doesn't crash format().
+        skill_md = _safe_format(
+            SKILL_MD_TEMPLATE,
+            name=name,
+            description=description,
+            title=title,
+            script_name=sname,
+            credentials_field=cred_yaml,
+            config_field=config_yaml,
+        )
+        (target / "SKILL.md").write_text(skill_md, encoding="utf-8")
+        created.append(str(target / "SKILL.md"))
+
+        # Create resource directories and files
+        for resource in resources:
+            res_dir = target / resource
+            res_dir.mkdir(exist_ok=True)
+
+            if resource == "scripts" and not args.no_script:
+                script_path = res_dir / sname
+                script_content = _safe_format(
+                    SCRIPT_TEMPLATES[script_type],
+                    title=title,
+                    script_name=sname,
+                )
+                script_path.write_text(script_content, encoding="utf-8")
+                script_path.chmod(0o755)
+                created.append(str(script_path))
+            elif resource == "references":
+                ref_file = res_dir / "guide.md"
+                ref_file.write_text(
+                    f"# {title} Reference\n\nTODO: Add reference documentation.\n",
+                    encoding="utf-8",
+                )
+                created.append(str(ref_file))
+            elif resource == "assets":
+                (res_dir / ".gitkeep").write_text("", encoding="utf-8")
+
+    except Exception as e:
+        # Cleanup partial state so the next init attempt isn't blocked by
+        # an empty / half-written directory.
+        import shutil
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+        except OSError:
+            pass
+        print(json.dumps({
+            "success": False,
+            "error": f"init failed and rolled back: {type(e).__name__}: {e}",
+        }, ensure_ascii=False))
+        sys.exit(1)
 
     print(json.dumps({
         "success": True,
@@ -797,6 +868,10 @@ def main():
     p_init.add_argument("--config", help="Comma-separated config key names (nested under metadata.requires_config, e.g. url,timeout)")
     p_init.add_argument("--script", choices=["python", "node", "bash"], default="python")
     p_init.add_argument("--no-script", action="store_true", help="Skip script template")
+    p_init.add_argument(
+        "--force", action="store_true",
+        help="Overwrite a partial/skeleton init (refuses if SKILL.md looks user-modified)",
+    )
 
     # validate
     p_validate = sub.add_parser("validate", help="Validate a skill's SKILL.md and structure")
