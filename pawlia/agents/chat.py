@@ -821,6 +821,11 @@ class ChatAgent(BaseAgent):
                         self.session.exchanges = self.session.exchanges[n_remove:]
                         marker_text = summary_lines[0] + " | " + summary_lines[-1] if len(summary_lines) > 1 else summary_lines[0]
                         self.session.exchanges.insert(0, ("__compressed__", marker_text, None))
+                        n_total = len(dropped)
+                        n_skipped = sum(1 for m in dropped if isinstance(m, (AIMessage, ToolMessage)))
+                        notify = f"[{n_total} Nachrichten ({n_total - n_skipped} Austausche) komprimiert]"
+                        if self.on_interim:
+                            asyncio.ensure_future(self.on_interim(notify))
 
         # Final cleanup via _sanitize_messages: handles surrogate cleaning,
         # orphaned ToolMessages, tool result compression, and same-role merging

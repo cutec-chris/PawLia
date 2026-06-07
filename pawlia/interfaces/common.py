@@ -166,12 +166,14 @@ def handle_model_command(
 
     if new_model.lower() in _CLEAR_TOKENS:
         app.memory.set_agent_override_value(session, path, None)
+        session.exchanges.append(("[System]", f"[Model-Override für `{path}` gelöscht]", None))
         return ModelCommandResult(
             "cleared", "(default)", ctx_label,
             path=path, available=available, invalidate_agent=True,
         )
 
     app.memory.set_agent_override_value(session, path, new_model)
+    session.exchanges.append(("[System]", f"[Model für `{path}` auf `{new_model}` geändert]", None))
     return ModelCommandResult(
         "set", new_model, ctx_label,
         path=path, available=available, invalidate_agent=True,
