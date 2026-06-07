@@ -221,7 +221,7 @@ class SkillRunnerAgent(BaseAgent):
         ]
 
         try:
-            response = await self._invoke(messages, llm=self.bound_llm)
+            response, messages = await self._invoke(messages, llm=self.bound_llm)
         except Exception as exc:
             self.logger.error("LLM error in tool-call mode: %s", exc)
             return ""
@@ -281,7 +281,7 @@ class SkillRunnerAgent(BaseAgent):
         repeat_nudged = False
         abort_note = ""
         for _turn in range(1, max_turns):
-            response = await self._invoke(messages, llm=self.bound_llm)
+            response, messages = await self._invoke(messages, llm=self.bound_llm)
 
             # Context-overflow circuit breaker: when the conversation has
             # bloated so far that the intended model can no longer be made to
@@ -361,7 +361,7 @@ class SkillRunnerAgent(BaseAgent):
                 messages.append(HumanMessage(content=self._retry_guidance()))
         else:
             if response.tool_calls:
-                response = await self._invoke(messages, llm=self.llm)
+                response, messages = await self._invoke(messages, llm=self.llm)
 
         result_text = self.extract_text(response)
         if abort_note:
@@ -465,7 +465,7 @@ class SkillRunnerAgent(BaseAgent):
             HumanMessage(content=f"Task: {query}"),
         ]
 
-        response = await self._invoke(messages, llm=self.llm)
+        response, _ = await self._invoke(messages, llm=self.llm)
         content = response.content or ""
         self.logger.debug("Command mode response: %s", repr(content[:200]))
 

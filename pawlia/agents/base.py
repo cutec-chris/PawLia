@@ -8,7 +8,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from langchain_core.messages import (
     AIMessage,
@@ -88,7 +88,7 @@ class BaseAgent(ABC):
 
     async def _invoke(self, messages: List[BaseMessage],
                       llm: Optional[ChatOpenAI] = None,
-                      max_retries: int = 3) -> AIMessage:
+                      max_retries: int = 3) -> Tuple[AIMessage, List[BaseMessage]]:
         """Invoke an LLM (default: self.llm) with the given messages.
 
         Classifies API errors and applies the correct recovery strategy:
@@ -96,6 +96,11 @@ class BaseAgent(ABC):
         - rate_limit / timeout / server_error → jittered backoff + retry
         - auth_error / format_error → surface immediately, no retry
         - tool-use-failed → inject synthetic ToolMessage, retry
+
+        Returns ``(response, messages)`` where *messages* is the (possibly
+        compacted/summarized) message list used for the successful LLM call.
+        Callers in a tool loop should use the returned *messages* to keep
+        the stored context bounded instead of appending to the original list.
         """
         messages = self._sanitize_messages(list(messages))
         log_prompt(messages, name=self.log_name)
@@ -110,7 +115,7 @@ class BaseAgent(ABC):
         retries = 0
         while True:
             try:
-                return await run_sync_in_thread(_call)
+                return await run_sync_in_thread(_call), messages
             except Exception as exc:
                 category, detail = classify_error(exc)
 

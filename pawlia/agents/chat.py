@@ -742,6 +742,7 @@ class ChatAgent(BaseAgent):
         *,
         thread_id: Optional[str],
         images: bool = False,
+        persist_compression: bool = True,
     ) -> List[BaseMessage]:
         budget = self._context_budget_for(thread_id, images=images)
         if budget <= 0:
@@ -809,6 +810,17 @@ class ChatAgent(BaseAgent):
                     tail = [HumanMessage(content=summary.content + "\n\n" + existing)] + tail[1:]
                 else:
                     tail = [summary] + tail
+
+                # Persist compression marker in session.exchanges so subsequent
+                # turns skip the compressed exchanges on replay and don't
+                # re-compress the same content every time.
+                if persist_compression and self.session and not thread_id:
+                    n_human = sum(1 for m in dropped if isinstance(m, HumanMessage))
+                    if n_human > 0:
+                        n_remove = min(n_human, len(self.session.exchanges))
+                        self.session.exchanges = self.session.exchanges[n_remove:]
+                        marker_text = summary_lines[0] + " | " + summary_lines[-1] if len(summary_lines) > 1 else summary_lines[0]
+                        self.session.exchanges.insert(0, ("__compressed__", marker_text, None))
 
         # Final cleanup via _sanitize_messages: handles surrogate cleaning,
         # orphaned ToolMessages, tool result compression, and same-role merging
@@ -886,6 +898,18 @@ class ChatAgent(BaseAgent):
                 exchanges = self.memory.get_thread_context(self.session, thread_id)
             else:
                 exchanges = self.session.exchanges
+                # Compression marker: find the last checkpoint so we only
+                # replay exchanges after it.  The marker's summary text is
+                # injected as a single HumanMessage to restore lost context.
+                cutoff = 0
+                marker_summary = None
+                for i, exchange in enumerate(exchanges):
+                    if isinstance(exchange, (list, tuple)) and len(exchange) >= 2 and exchange[0] == "__compressed__":
+                        cutoff = i + 1
+                        marker_summary = exchange[1]
+                if marker_summary:
+                    messages.append(HumanMessage(content=f"[Session compressed at checkpoint: {marker_summary}]"))
+                    exchanges = exchanges[cutoff:]
             for exchange in exchanges:
                 # Unpack 2-tuple or 3-tuple (old format compatibility)
                 if len(exchange) == 2:
@@ -1027,7 +1051,7 @@ class ChatAgent(BaseAgent):
             self.logger.warning(self._format_max_tool_turns_warning(
                 self.max_tool_turns, tool_calls_info
             ))
-            final = await self._invoke(
+            final, _ = await self._invoke(
                 self._prepare_messages_for_context_budget(
                     messages + [HumanMessage(content=_EMPTY_TURN2_NUDGE)],
                     thread_id=thread_id,
@@ -1114,6 +1138,18 @@ class ChatAgent(BaseAgent):
                 exchanges = self.memory.get_thread_context(self.session, thread_id)
             else:
                 exchanges = self.session.exchanges
+                # Compression marker: find last checkpoint so we only
+                # replay exchanges after it.  The summary from the marker
+                # is injected as a single HumanMessage.
+                cutoff = 0
+                marker_summary = None
+                for i, exchange in enumerate(exchanges):
+                    if isinstance(exchange, (list, tuple)) and len(exchange) >= 2 and exchange[0] == "__compressed__":
+                        cutoff = i + 1
+                        marker_summary = exchange[1]
+                if marker_summary:
+                    messages.append(HumanMessage(content=f"[Session compressed at checkpoint: {marker_summary}]"))
+                    exchanges = exchanges[cutoff:]
             for exchange in exchanges:
                 if len(exchange) == 2:
                     user_text, bot_text = exchange  # type: ignore
@@ -1744,7 +1780,7 @@ class ChatAgent(BaseAgent):
         context_retries = 0
         for attempt in range(_MAX_FAKE_TOOL_RETRIES):
             try:
-                response = await self._invoke(retry_messages, llm=llm)
+                response, retry_messages = await self._invoke(retry_messages, llm=llm)
             except Exception as exc:
                 from pawlia.llm import is_context_length_error
                 if not is_context_length_error(exc) or context_retries >= _MAX_CONTEXT_RECOVERY_RETRIES:
@@ -1753,6 +1789,7 @@ class ChatAgent(BaseAgent):
                     retry_messages,
                     thread_id=thread_id,
                     images=images,
+                    persist_compression=False,
                 )
                 if compacted == retry_messages and len(retry_messages) > 1:
                     compacted = [retry_messages[0]] + retry_messages[-_CONTEXT_MIN_NON_SYSTEM_KEEP:]
@@ -1792,7 +1829,7 @@ class ChatAgent(BaseAgent):
                 HumanMessage(content=_FAKE_TOOL_CALL_NUDGE),
             ]
         # Last attempt — return whatever we got
-        response = await self._invoke(retry_messages, llm=llm)
+        response, retry_messages = await self._invoke(retry_messages, llm=llm)
         return response, retry_messages
 
     async def _persist(
