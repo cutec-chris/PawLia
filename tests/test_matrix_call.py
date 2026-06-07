@@ -134,10 +134,10 @@ async def test_process_speech_ignores_standalone_stt_hallucination():
 
     send_cb.assert_not_awaited()
     agent.run_streamed.assert_not_called()
-    # Hold is only started for confirmed real speech, so a hallucination chunk
-    # never starts it (and thus never flickers the tone).
+    # The audio pipeline calls start_hold() eagerly before dispatching, so
+    # _process_speech must call stop_hold() when it discards the transcript.
     session._tts_track.start_hold.assert_not_called()
-    session._tts_track.stop_hold.assert_not_called()
+    session._tts_track.stop_hold.assert_called_once()
 
 
 def test_standalone_stt_hallucination_filter_keeps_real_sentences():
@@ -661,7 +661,8 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
         interrupt=MagicMock(),
         stop_after_current_sentence=MagicMock(),
         stop_hold=MagicMock(),
-        is_playing=False,
+        is_playing=True,
+        is_tts_playing=True,
     )
     session._cancel_active_response = AsyncMock()
     session._respond_to_transcript = AsyncMock()
@@ -733,9 +734,10 @@ async def test_process_speech_does_not_start_hold_when_transcription_is_empty():
     with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value=None)):
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000)
 
-    # Empty transcription → hold is never started (nothing to stop).
+    # Empty transcription: audio pipeline already called start_hold() eagerly,
+    # so _process_speech must stop it to avoid a stuck hold tone.
     session._tts_track.start_hold.assert_not_called()
-    session._tts_track.stop_hold.assert_not_called()
+    session._tts_track.stop_hold.assert_called_once()
     session._queue_transcript_response.assert_not_awaited()
 
 

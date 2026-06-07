@@ -468,7 +468,21 @@ class ChatAgent(BaseAgent):
                         self.logger.debug("on_skill_start error: %s", exc)
                 runner = self.skill_runner_factory(skill, thread_id)
                 runner.on_step = on_skill_step
-                result = await runner.run(query=query)
+                # Serialise skills that must not run concurrently per user.
+                # skill-creator writes to the workspace and hammers the same
+                # rate-limited LLM; two simultaneous instances interfere.
+                _SERIALIZED_SKILLS = {"skill-creator"}
+                if skill_name in _SERIALIZED_SKILLS and self.session:
+                    _lock = self.session.get_skill_lock(skill_name)
+                    if _lock.locked():
+                        self.logger.info(
+                            "Queuing '%s': another instance is already running for this user",
+                            skill_name,
+                        )
+                    async with _lock:
+                        result = await runner.run(query=query)
+                else:
+                    result = await runner.run(query=query)
                 result = self._process_directives(result, thread_id)
                 raw_result = result
                 result = self._wrap_with_trust_header(result, skill, query)

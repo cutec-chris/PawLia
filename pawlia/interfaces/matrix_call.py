@@ -1378,6 +1378,14 @@ class CallSession:
                 self._speech_detector.noise_floor,
             )
             await self._respond_to_transcript(text, announce_transcript=False)
+            # Process any transcripts that arrived during the response (queued
+            # while hold was active instead of being discarded as barge-in).
+            for _ in range(5):
+                if self._done.is_set() or not self._pending_transcripts:
+                    break
+                followup = "\n".join(self._pending_transcripts)
+                self._pending_transcripts = []
+                await self._respond_to_transcript(followup, announce_transcript=False)
         finally:
             if self._pending_response_task is asyncio.current_task():
                 self._pending_response_task = None
@@ -1754,10 +1762,14 @@ class CallSession:
             raise
         except Exception as e:
             logger.error("call %s: transcription error: %s", self.call_id[:8], e)
+            if not interrupt_playback and self._tts_track:
+                self._tts_track.stop_hold()
             return
 
         if not text:
             logger.info("call %s: empty transcription (no text returned)", self.call_id[:8])
+            if not interrupt_playback and self._tts_track:
+                self._tts_track.stop_hold()
             return
 
         if self._speech_detector.looks_like_stt_hallucination(text):
@@ -1766,6 +1778,8 @@ class CallSession:
                 self.call_id[:8],
                 text,
             )
+            if not interrupt_playback and self._tts_track:
+                self._tts_track.stop_hold()
             return
 
         try:
@@ -1783,8 +1797,20 @@ class CallSession:
                     if current_task:
                         self._track_response_task(current_task)
                     await self._queue_transcript_response(text)
-                else:
+                elif self._tts_track and self._tts_track.is_tts_playing:
+                    # Bot is actually speaking — discard non-keyword input so we
+                    # don't pile up responses mid-sentence.
                     await self._send_discarded_transcript(text)
+                else:
+                    # Hold only: bot is thinking, not speaking.  Queue the
+                    # transcript so it is answered after the current response
+                    # instead of being silently discarded.
+                    logger.info(
+                        "call %s: speech during hold (bot thinking), queueing: %s",
+                        self.call_id[:8], text,
+                    )
+                    await self._send_cb(f"🎙️ *{text}*")
+                    self._pending_transcripts.append(text)
                 return
 
             # Confirmed real speech → start the hold tone now (bridges the

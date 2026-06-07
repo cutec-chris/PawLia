@@ -164,6 +164,23 @@ class Session:
         # to prepend a section heading to the daily log entry.
         self.pending_topic_heading: Optional[str] = None
 
+        # Per-skill asyncio locks for skills that must not run concurrently
+        # (e.g. skill-creator). Created lazily so they are always bound to
+        # the running event loop at the time of first use.
+        self._skill_locks: Dict[str, Any] = {}
+
+    def get_skill_lock(self, skill_name: str):
+        """Return (creating if needed) an asyncio.Lock for *skill_name*.
+
+        Lazy creation ensures the lock is always bound to the running event
+        loop rather than being created at Session init time (which may be
+        outside the loop).
+        """
+        import asyncio
+        if skill_name not in self._skill_locks:
+            self._skill_locks[skill_name] = asyncio.Lock()
+        return self._skill_locks[skill_name]
+
 
 def _format_workspace_refs(hits: list, user_query: str = "") -> str:
     """Format workspace hits as minimal pointers — model must call `files read`.

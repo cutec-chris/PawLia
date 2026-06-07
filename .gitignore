@@ -21,4 +21,5 @@ containers/thalia/**/*.log
 containers/thalia/**/*.wav
 tests/e2e_robustness_results.json
 config.openai-eval.yaml
+config.skillmx.yaml
 tests/results/
