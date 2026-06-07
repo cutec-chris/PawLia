@@ -176,6 +176,7 @@ _CTX_BY_FAMILY: List[Tuple[Tuple[str, ...], int]] = [
     (("deepseek-r1", "deepseek-v3"), 128_000),
     (("llama-4",), 1_000_000),
     (("llama-3.3",), 128_000),
+    (("glm",), 128_000),
     (("qwen3.5", "qwen3:", "qwen3-"), 32_768),
     (("gemma4", "gemma3", "gemma:"), 8_192),
     (("llama3.1", "llama3.2", "llama3:"), 8_192),
