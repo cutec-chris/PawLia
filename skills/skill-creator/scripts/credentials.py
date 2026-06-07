@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Central credential management for PawLia skills.
 
-Manages credentials at session/{user_id}/.credentials.json —
-outside the workspace so skills can't read the file directly.
-Credentials are injected as env vars (CRED_*) by the SkillRunner.
+Manages credentials at ``<session_dir>/.credentials/<user_id>.json`` —
+**outside** the per-user session dir so the bash sandbox cannot reach the
+file. Credentials are injected as env vars (``CRED_*``) by the
+SkillRunner; skill code never needs to read the file directly.
 
-Uses PAWLIA_SESSION_DIR and PAWLIA_USER_ID env vars (set by PawLia).
+Locates the store via (in order):
+  1. ``PAWLIA_CREDENTIALS_FILE`` — set by PawLia's bash tool
+  2. ``PAWLIA_SESSION_DIR`` + ``PAWLIA_USER_ID`` — path computed locally
+     (only useful when the script runs outside the sandbox, e.g. the
+     skill-creator sub-agent itself; inside the sandbox the env var
+     above is always present)
+
+Uses ``PAWLIA_SESSION_DIR`` and ``PAWLIA_USER_ID`` env vars (set by PawLia).
 """
 
 import argparse
@@ -15,13 +23,21 @@ import sys
 from pathlib import Path
 
 
-def _cred_path() -> Path:
-    """Return the credential file path for the current user."""
+def _cred_path():
+    """Return the credential file path for the current user.
+
+    Honours ``PAWLIA_CREDENTIALS_FILE`` when set (the runtime path), so
+    the CLI cannot be tricked into writing somewhere else by a skill
+    that sets the var manually.
+    """
+    env_path = os.environ.get("PAWLIA_CREDENTIALS_FILE")
+    if env_path:
+        return Path(env_path)
     session_dir = os.environ.get("PAWLIA_SESSION_DIR")
     user_id = os.environ.get("PAWLIA_USER_ID")
     if not session_dir or not user_id:
         return None
-    return Path(session_dir) / user_id / ".credentials.json"
+    return Path(session_dir) / ".credentials" / f"{user_id}.json"
 
 
 def _load() -> dict:

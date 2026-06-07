@@ -613,20 +613,33 @@ def _build_cred_env(meta: dict):
     user_id = os.environ.get("PAWLIA_USER_ID")
     if not session_dir or not user_id:
         return {}, list(required)
-    cred_path = Path(session_dir) / user_id / ".credentials.json"
-    if not cred_path.is_file():
-        return {}, list(required)
     try:
-        with open(cred_path, encoding="utf-8") as f:
-            all_creds = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}, list(required)
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from pawlia import credentials as credstore  # noqa: WPS433
+        creds = credstore.load(session_dir, user_id)
+    except Exception:
+        # Fallback: read the file directly via the env var the bash tool
+        # already injects, or the computed path. Only key names matter
+        # for the harness — the isolation story still holds.
+        env_path = os.environ.get("PAWLIA_CREDENTIALS_FILE")
+        candidates = [Path(env_path)] if env_path else []
+        candidates.append(Path(session_dir) / ".credentials" / f"{user_id}.json")
+        creds = {}
+        for cand in candidates:
+            if cand.is_file():
+                try:
+                    with open(cand, encoding="utf-8") as f:
+                        creds = json.load(f)
+                    break
+                except (OSError, json.JSONDecodeError):
+                    continue
     env = {}
     missing = []
     for key in required:
-        if key in all_creds:
+        if key in creds:
             env_key = "CRED_" + re.sub(r"[^A-Za-z0-9]", "_", key).upper()
-            env[env_key] = str(all_creds[key])
+            env[env_key] = str(creds[key])
         else:
             missing.append(key)
     return env, missing
@@ -662,10 +675,11 @@ def _build_skill_config_env(name: str, meta: dict):
 def cmd_test(args):
     """Run the skill's harness with production-equivalent env.
 
-    Loads credentials from .credentials.json, injects them as CRED_* env
-    vars, injects skill-config.<name> as PAWLIA_SKILL_CONFIG, keeps
-    PAWLIA_SESSION_DIR/PAWLIA_USER_ID, and runs the harness script. Returns
-    full stdout/stderr — no truncation, no wrapping.
+    Loads credentials from .credentials/<user>.json (via pawlia.credentials
+    when importable), injects them as CRED_* env vars, injects
+    skill-config.<name> as PAWLIA_SKILL_CONFIG, keeps
+    PAWLIA_SESSION_DIR/PAWLIA_USER_ID, and runs the harness script.
+    Returns full stdout/stderr — no truncation, no wrapping.
     """
     name = args.name
     skill_path = _find_skill(name)

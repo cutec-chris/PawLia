@@ -24,6 +24,7 @@ from langchain_core.messages import (
 from langchain_openai import ChatOpenAI
 
 from pawlia.agents.base import BaseAgent
+from pawlia import credentials as credstore
 from pawlia.prompt_utils import load_system_prompt
 from pawlia.skills.executor import WorkflowExecutor
 from pawlia.skills.loader import AgentSkill
@@ -115,28 +116,25 @@ class SkillRunnerAgent(BaseAgent):
             self.bound_llm = llm
 
     def _load_credentials(self) -> None:
-        """Load matching credentials into context as CRED_* env vars."""
-        if not self.skill.requires_credentials:
-            return
+        """Load matching credentials into context as CRED_* env vars.
+
+        Only the keys this skill declared via ``requires_credentials`` are
+        exposed. The credential store lives outside the bash sandbox, so
+        ``PAWLIA_CREDENTIALS_FILE`` is also set so that management scripts
+        (``credentials.py``) can locate it without re-implementing the
+        path logic.
+        """
         session_dir = self.context.get("session_dir", "")
         user_id = self.context.get("user_id", "")
-        if not session_dir or not user_id:
+        if session_dir and user_id:
+            # Migrate the legacy file out of the bash-writable area on first
+            # contact — runs from PawLia's own process (outside the sandbox).
+            credstore.migrate_if_needed(session_dir, user_id)
+        if not self.skill.requires_credentials:
             return
-        cred_path = os.path.join(session_dir, user_id, ".credentials.json")
-        if not os.path.isfile(cred_path):
-            return
-        try:
-            with open(cred_path, encoding="utf-8") as f:
-                all_creds = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return
-        cred_env = {}
-        for key in self.skill.requires_credentials:
-            if key in all_creds:
-                env_key = "CRED_" + re.sub(r"[^A-Za-z0-9]", "_", key).upper()
-                cred_env[env_key] = str(all_creds[key])
-        if cred_env:
-            self.context.setdefault("env_extra", {}).update(cred_env)
+        env_extra = credstore.build_env_extra(session_dir, user_id, self.skill.requires_credentials)
+        if env_extra:
+            self.context.setdefault("env_extra", {}).update(env_extra)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -618,12 +616,14 @@ class SkillRunnerAgent(BaseAgent):
     def _build_tool_prompt(self) -> str:
         """System prompt for tool-call mode."""
         parts = [load_system_prompt("skills/runner_tool.md", skill_name=self.skill.name)]
+        parts.append(load_system_prompt("skills/credentials.md"))
         self._append_skill_context(parts)
         return "\n".join(parts)
 
     def _build_command_prompt(self) -> str:
         """System prompt for command mode (text-only, no tools)."""
         parts = [load_system_prompt("skills/runner_command.md", skill_name=self.skill.name)]
+        parts.append(load_system_prompt("skills/credentials.md"))
         self._append_skill_context(parts)
         return "\n".join(parts)
 

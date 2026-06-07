@@ -147,7 +147,7 @@ are not exposed as model-provided parameters.
 
 ## Credentials
 
-Skills that need API keys or tokens declare them via `requires_credentials` in their SKILL.md frontmatter. Credentials are stored centrally per user at `session/<user>/.credentials.json` — outside the workspace so skills can't read the file directly.
+Skills that need API keys or tokens declare them via `requires_credentials` in their SKILL.md frontmatter. Credentials are stored per user at `session/.credentials/<user_id>.json` — **outside** the per-user session dir, so the bash sandbox cannot reach the file from a running skill.
 
 When the SkillRunner starts, it injects matching credentials as environment variables (`CRED_<KEY_NAME>`) into the skill's execution context. Skill scripts read them via `os.environ`:
 

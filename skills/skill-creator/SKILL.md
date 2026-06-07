@@ -2,8 +2,9 @@
 name: skill-creator
 description: >
   Create new PawLia skills from scratch, improve or audit existing ones.
-  Also manages centralized credentials for skills — store, retrieve, check
-  API keys and tokens that other skills need at runtime.
+  Also manages credentials for skills — store, check, list and delete
+  API keys and tokens that other skills need at runtime (skills
+  themselves only see the runtime `CRED_*` env vars, never the store).
   When a skill has bugs or needs changes, delegate the full task here —
   describe the problem and let the skill-creator autonomously diagnose
   and fix it. Do not pre-read the skill files yourself.
@@ -87,9 +88,12 @@ in the body (the body is invisible to the dispatcher).
 ## Credentials vs. Config
 
 - `requires_credentials` — per-user secrets (API keys, tokens). Stored in
-  `session/<user_id>/.credentials.json` via `credentials.py`. Injected as
+  `session/.credentials/<user_id>.json` (sandboxed, **outside** the
+  per-user session dir) via `credentials.py`. Injected at runtime as
   `CRED_<NORMALIZED>` where `<NORMALIZED>` is the key uppercased with
-  non-alphanumerics → `_`. Example: `api-key` → `CRED_API_KEY`.
+  non-alphanumerics → `_`. Example: `api-key` → `CRED_API_KEY`. Skill
+  scripts read them from env — they must never `cat` the credential
+  store.
 - `metadata.requires_config` — deployment-level settings in `config.yaml` under
   `skill-config.<name>.*`. Skills with missing required config are not loaded.
   The runtime injects the full per-skill config as JSON in
@@ -159,8 +163,13 @@ python <scripts_dir>/credentials.py list
 python <scripts_dir>/credentials.py delete --key "<name>"
 ```
 
-After `set`, the response includes `value_read_back` — compare it to what you
-intended and flag any mismatch.
+The store is located outside the bash-sandboxed per-user dir, so
+ordinary skill scripts cannot reach it. The CLI is the only legitimate
+write path; reads happen implicitly at runtime via `CRED_*` env vars.
+
+After `set`, the response confirms `{"success": true, "key": "<name>"}` —
+no value is echoed back. Verify success by checking the returned `key`
+matches what you intended.
 
 ---
 
