@@ -195,8 +195,9 @@ class App:
         user_skills = self._build_user_skills(user_id, disabled=session.disabled_skills)
 
         def make_runner(skill: AgentSkill, thread_id: Optional[str] = None) -> SkillRunnerAgent:
-            skill_config_root = self.config.get("skill-config") or {}
-            skill_cfg = skill_config_root.get(skill.name, {})
+            global_cfg = (self.config.get("skill-config") or {}).get(skill.name, {})
+            session_cfg = session.skill_config.get(skill.name, {})
+            skill_cfg = {**global_cfg, **session_cfg}
             agent_overrides = self.memory.effective_agent_overrides(session, thread_id)
             agent_type = f"skill.{skill.name}"
             model_name = self.llm.default_model_name(agent_type, agent_overrides=agent_overrides)

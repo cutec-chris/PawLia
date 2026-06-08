@@ -147,6 +147,9 @@ class Session:
         # Skills disabled for this session
         self.disabled_skills: List[str] = []
 
+        # Per-session skill-config overrides (merged over global skill-config)
+        self.skill_config: Dict[str, Any] = {}
+
         # Per-thread exchange lists (loaded/seeded lazily by get_thread_context)
         self.thread_contexts: Dict[str, List[Tuple[str, str]]] = {}
 
@@ -869,6 +872,7 @@ class MemoryManager:
             str(s) for s in (session_cfg.get("disabled_skills") or []) if s
         ]
         session.timezone = (session_cfg.get("user") or {}).get("timezone") or None
+        session.skill_config = session_cfg.get("skill-config") or {}
         session.private = os.path.isfile(self._private_session_path(user_id))
 
         self._sessions[user_id] = session
