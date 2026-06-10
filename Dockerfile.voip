@@ -53,8 +53,15 @@ RUN apk add --no-cache \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
-# Node.js v20 pinned from Alpine 3.20 (Akamai blockt v22+ TLS-Fingerprint auf musl)
-RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main nodejs npm
+# Node.js v20 from Alpine 3.20 (Akamai blockt v22+ TLS-Fingerprint auf musl).
+# Temporär auf 3.20-Repo wechseln, da edge nur nodejs≥24 hat.
+RUN cp /etc/apk/repositories /etc/apk/repositories.orig && \
+    printf "%s\n" \
+        "https://dl-cdn.alpinelinux.org/alpine/v3.20/main" \
+        "https://dl-cdn.alpinelinux.org/alpine/v3.20/community" \
+        > /etc/apk/repositories && \
+    apk update && apk add --no-cache nodejs npm && \
+    mv /etc/apk/repositories.orig /etc/apk/repositories
 
 WORKDIR /app
 COPY constraints.txt constraints.txt
