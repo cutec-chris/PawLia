@@ -53,9 +53,8 @@ RUN apk add --no-cache \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
-# Node.js v20 pinned (Akamai blockt v22+ TLS-Fingerprint auf Alpine/musl)
-RUN wget -qO- https://unofficial-builds.nodejs.org/download/release/v20.18.3/node-v20.18.3-linux-x64-musl.tar.gz \
-    | tar xz -C /usr/local --strip=1
+# Node.js v20 pinned from Alpine 3.20 (Akamai blockt v22+ TLS-Fingerprint auf musl)
+RUN apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main nodejs npm
 
 WORKDIR /app
 COPY constraints.txt constraints.txt
