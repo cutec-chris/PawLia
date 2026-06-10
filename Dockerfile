@@ -34,7 +34,7 @@ FROM alpine:edge
 RUN apk add --no-cache \
         python3 \
         py3-olm \
-        nodejs \
+        nodejs-lts \
         npm \
         py3-numpy \
         openssl \
