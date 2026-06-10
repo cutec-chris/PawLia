@@ -1,5 +1,5 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────
-FROM alpine:edge AS builder
+FROM alpine:3.20 AS builder
 
 # System deps:
 #   python3 / py3-pip — runtime
@@ -25,7 +25,7 @@ RUN /venv/bin/pip install --no-cache-dir -r requirements.txt -r requirements-e2e
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
-FROM alpine:edge
+FROM alpine:3.20
 
 # Runtime system deps:
 #   python3   — interpreter
@@ -34,7 +34,7 @@ FROM alpine:edge
 RUN apk add --no-cache \
         python3 \
         py3-olm \
-        nodejs-lts \
+        nodejs \
         npm \
         py3-numpy \
         openssl \
