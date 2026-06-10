@@ -1,12 +1,10 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────
 FROM alpine:edge AS builder
 
-# Wir installieren alles direkt ins System
 RUN apk add --no-cache \
         python3 \
         py3-pip \
         py3-olm \
-        py3-numpy \
         gcc \
         g++ \
         musl-dev \
@@ -30,7 +28,6 @@ RUN pip install --break-system-packages --no-cache-dir \
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
 FROM alpine:edge
 
-# System-Abhängigkeiten
 RUN apk add --no-cache \
         python3 \
         py3-pip \
@@ -39,8 +36,6 @@ RUN apk add --no-cache \
         ffmpeg \
         flac \
         wget \
-        py3-numpy \
-        py3-onnxruntime \
         openssl \
         openssh-client \
         git \
@@ -53,11 +48,13 @@ RUN apk add --no-cache \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
-# Node.js v20 gepinnt (Akamai blockt v22+ TLS-Fingerprint auf musl).
-# Offizieller musl-tarball, enthält node + npm.
-RUN wget -qO- "https://unofficial-builds.nodejs.org/download/release/v20.18.3/node-v20.18.3-linux-x64-musl.tar.gz" \
-    | tar xz -C /usr/local --strip=1 && \
-    node --version
+# Node.js v20 aus Alpine 3.20 (Akamai blockt v22+ auf musl).
+RUN apk add --no-cache \
+        --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
+        nodejs=20.15.1-r0 \
+    && apk add --no-cache \
+        --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
+        npm=10.9.1-r0
 
 WORKDIR /app
 COPY constraints.txt constraints.txt
@@ -72,7 +69,8 @@ COPY pawlia/ pawlia/
 COPY skills/ skills/
 RUN mkdir -p skills/user
 
-# Da wir kein venv haben, nutzen wir einfach das System-Python
+RUN node --version && npm --version
+
 RUN python3 -m pawlia.install_skill_deps --no-compile
 
 # Stimmen-Download
