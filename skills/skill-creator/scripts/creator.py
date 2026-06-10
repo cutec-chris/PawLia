@@ -489,7 +489,7 @@ def cmd_list(args):
     """List all discoverable skills (workspace + bundled)."""
     skills = []
 
-    def scan(directory: Path, source: str):
+    def scan(directory: Path, source: str, rel_base: Path = None):
         if not directory.is_dir():
             return
         for child in sorted(directory.iterdir()):
@@ -501,30 +501,43 @@ def cmd_list(args):
             try:
                 meta, body, _ = _parse_frontmatter(skill_md)
                 desc = (meta.get("description") or "").strip().split("\n")[0][:120] if meta else "(parse error)"
+                if rel_base:
+                    try:
+                        rel_path = str(child.relative_to(rel_base))
+                    except ValueError:
+                        rel_path = str(child)
+                else:
+                    rel_path = str(child)
                 skills.append({
                     "name": meta.get("name", child.name) if meta else child.name,
                     "description": desc,
                     "version": (meta.get("metadata") or {}).get("version", "?") if meta else "?",
                     "source": source,
-                    "path": str(child),
+                    "path": rel_path,
                     "has_scripts": (child / "scripts").is_dir(),
                     "has_references": (child / "references").is_dir(),
                     "has_assets": (child / "assets").is_dir(),
                 })
             except Exception:
+                try:
+                    rel_path = str(child.relative_to(rel_base)) if rel_base else str(child)
+                except (ValueError, AttributeError):
+                    rel_path = str(child)
                 skills.append({
                     "name": child.name, "description": "(parse error)",
-                    "version": "?", "source": source, "path": str(child),
+                    "version": "?", "source": source, "path": rel_path,
                     "has_scripts": False, "has_references": False, "has_assets": False,
                 })
 
-    # Workspace skills first
+    # Workspace skills first — relative to session root so we don't expose /app/ paths
     ws = _workspace_skills_dir()
     if ws:
-        scan(ws, "workspace")
+        # Walk up to the session dir for a clean relative root
+        ws_rel_base = ws.parent.parent if ws.parent and ws.parent.parent else ws.parent
+        scan(ws, "workspace", rel_base=ws_rel_base)
 
-    # Bundled skills
-    scan(BUNDLED_DIR, "bundled")
+    # Bundled skills — relative to /app/ so paths look like "skills/bahn/"
+    scan(BUNDLED_DIR, "bundled", rel_base=BUNDLED_DIR.parent)
 
     print(json.dumps({"success": True, "skills": skills}, ensure_ascii=False))
 

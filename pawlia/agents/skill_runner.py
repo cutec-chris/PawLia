@@ -98,7 +98,22 @@ class SkillRunnerAgent(BaseAgent):
         self.skill = skill
         self.tool_registry = tool_registry
         self.context = context or {}
-        self.context["cwd"] = skill.base_dir
+        # Admin skills (skill-creator) operate in the user's workspace, not the
+        # bundled skills directory, so the sub-agent never sees /app/skills/ paths.
+        ws_cwd = None
+        if skill.name == "skill-creator":
+            session_dir = (context or {}).get("session_dir", "")
+            user_id = (context or {}).get("user_id", "")
+            if session_dir and user_id:
+                ws_cwd = os.path.join(
+                    session_dir, user_id, "workspace", "skills", "skill-creator"
+                )
+                try:
+                    os.makedirs(ws_cwd, exist_ok=True)
+                except OSError:
+                    ws_cwd = None
+
+        self.context["cwd"] = ws_cwd or skill.base_dir
         self.context["skills_root"] = os.path.dirname(skill.base_dir)
         self.command_fallback = command_fallback
         self.max_tool_turns = max_tool_turns if (isinstance(max_tool_turns, int) and max_tool_turns > 0) else self.MAX_TOOL_TURNS
@@ -629,8 +644,9 @@ class SkillRunnerAgent(BaseAgent):
 
     def _append_skill_context(self, parts: List[str]) -> None:
         """Append working directory, scripts, config, and instructions."""
+        cwd = self.context.get("cwd") or os.path.abspath(self.skill.skill_path)
         parts.append(
-            f"\nWorking directory: {os.path.abspath(self.skill.skill_path)}"
+            f"\nWorking directory: {cwd}"
             "\nUse relative paths (e.g. scripts/route.py, scripts/bahn.mjs)."
         )
 

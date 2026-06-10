@@ -252,6 +252,29 @@ matches what you intended.
 
 ---
 
+## Installing a Skill from a Zip
+
+When the user sends a `.skill` zip or any zip containing a skill:
+
+1. **Extract to `/tmp/`** — never extract directly into any skill directory.
+2. **Read the SKILL.md** from the extracted zip to determine `name`.
+3. **Create the target directory** in the user's workspace:
+   ```
+   python <scripts_dir>/creator.py init --name "<name>" --resources scripts
+   ```
+   This creates the skill under `workspace/skills/<name>/`.
+4. **Copy files** from `/tmp/<extracted>/` into `workspace/skills/<name>/`,
+   overwriting the scaffold files from `init` with the real ones from the zip.
+5. **Adapt the SKILL.md** for PawLia (ensure `<scripts_dir>` placeholders,
+   `## Example output` section, PawLia-compatible frontmatter).
+6. **Remove the `/tmp/` extraction** when done.
+7. **Validate:** `creator.py validate --name "<name>"`.
+
+If `creator.py init` fails with a "refusing to overwrite" error, pass `--force`
+(the existing directory is from a previous failed install, not user work).
+
+---
+
 ## Fixing / Auditing an Existing Skill
 
 Three phases with hard stop-gates. Do not blur them.

@@ -217,6 +217,7 @@ class BashTool(Tool):
             and context.get("session_dir")
             and context.get("sandbox", True)
         )
+        stray_guard = None  # (before, scan_roots, writable) for fallback scan
         if sandbox_on:
             from pawlia.sandbox import bwrap_available, wrap_argv, writable_roots
 
@@ -233,15 +234,32 @@ class BashTool(Tool):
                     _sandbox_warned = True
                     logger.warning(
                         "Filesystem sandbox unavailable (bubblewrap missing or "
-                        "user namespaces disabled) — skill commands run "
-                        "without write isolation."
+                        "user namespaces disabled) — falling back to "
+                        "post-execution stray-write scan."
+                    )
+
+                from pawlia.sandbox import snapshot_mtimes
+                writable = writable_roots(
+                    context.get("session_dir"), context.get("user_id")
+                )
+                scan_roots = [
+                    p for p in ["/app/skills", "/app/pawlia"]
+                    if os.path.isdir(p)
+                ]
+                if scan_roots:
+                    stray_guard = (
+                        snapshot_mtimes(scan_roots, writable),
+                        scan_roots,
+                        writable,
                     )
 
         for shell in shells:
             try:
                 if shell is None:
-                    return _fmt(subprocess.run(cmd, shell=True, **run_kwargs))
-                return _fmt(subprocess.run(shell, **run_kwargs))
+                    proc = subprocess.run(cmd, shell=True, **run_kwargs)
+                else:
+                    proc = subprocess.run(shell, **run_kwargs)
+                break
             except FileNotFoundError as e:
                 # A missing executable: try the next shell alternative.
                 # A missing cwd that passed validation: report clearly.
@@ -252,5 +270,29 @@ class BashTool(Tool):
                 return f"Error: Command timed out ({timeout}s)"
             except Exception as e:
                 return f"Error: {e}"
+        else:
+            return "Error: No shell available."
 
-        return "Error: No shell available."
+        output = _fmt(proc)
+
+        # Fallback stray-write check (when bubblewrap isn't available)
+        if stray_guard:
+            from pawlia.sandbox import diff_stray_writes
+            before, scan_roots, writable = stray_guard
+            stray = diff_stray_writes(before, scan_roots, writable)
+            if stray:
+                directive = json.dumps({
+                    "__directive__": "stray_write",
+                    "paths": stray[:20],
+                })
+                return (
+                    directive + "\n"
+                    "Write outside the allowed workspace detected.\n"
+                    f"The command wrote to {len(stray)} file(s) in protected "
+                    f"directories:\n" + "\n".join(stray[:20]) + "\n\n"
+                    "Skills may only write under $PAWLIA_SESSION_DIR or /tmp/.\n"
+                    "Retry with paths restricted to those roots.\n\n"
+                    + output
+                )
+
+        return output
