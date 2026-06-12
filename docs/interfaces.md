@@ -145,6 +145,71 @@ LLM responses are streamed token-by-token. As soon as a complete sentence is det
 
 While the agent is processing (thinking / skill execution), a hold audio loop is played to the caller so they don't sit in silence. The default is `assets/keyboard.m4a`. Override it via `tts.hold_audio` in the config, or remove the file to disable it. A Matrix typing indicator is also kept alive during processing.
 
+## Discord
+
+Requires a bot token (Discord Developer Portal) in `config.yaml`:
+
+```yaml
+interfaces:
+  discord:
+    token: YOUR_BOT_TOKEN
+    # allowed_users:            # optional — restrict to these Discord user IDs
+    #   - "123456789012345678"
+    # allowed_channels:         # optional — restrict to these channel IDs
+    #   - "987654321098765432"
+    # require_mention: false    # only respond to @mention (default: false)
+    # slash_commands: true      # register slash commands (default: true)
+    # voice:                    # voice channel support (default: enabled)
+    #   enabled: true
+    #   silence_threshold: 1.5      # seconds of silence to end utterance
+    #   min_speech_duration: 0.5    # minimum seconds of speech to process
+    #   timeout: 300                # auto-disconnect after inactivity (seconds)
+```
+
+Sessions are keyed per guild + channel (`dc_{guild_id}_{channel_id}`). With `allowed_channels`, messages in threads are also accepted when the thread's parent channel is allowed.
+
+### Supported input types
+
+| Type | Notes |
+|------|-------|
+| Text | Plain messages and `//`-prefixed commands (a single `/` also works) |
+| Images | Up to 4 per message, sent to the vision agent; the message text is used as caption |
+| Voice messages | Transcribed via the configured STT provider (or consumed natively if the model has `audio_input: true`); the transcription is echoed back before the agent replies |
+| Text files | Inlined into the prompt (first 128 KB, `.txt`, `.md`, `.json`, code files, …) |
+| Office documents | Converted to Markdown via MarkItDown (`.pdf`, `.docx`, `.xlsx`, …) |
+| Other files | Saved with a note; not read content-wise |
+
+All incoming attachments are additionally persisted to the user's `workspace/Downloads/` (with a markdown sidecar) so the agent can re-send them later via the `attach_file` tool. Size limit: `attachments.max_incoming_bytes` (default 25 MB).
+
+### Threads
+
+Discord channel threads get their own isolated context window, same as Telegram forum topics and Matrix threads. Use `//thread <msg>` in a server text channel to start a new thread; model and agent overrides apply per-thread independently.
+
+### Commands
+
+Text commands accept both `//` and `/` prefixes:
+
+| Command | Effect |
+|---------|--------|
+| `//thread <msg>` | Create a channel thread and answer the message inside it |
+| `//model [name]` | Show or switch the active session chat model |
+| `//model <path> <name>` | Override a specific session agent role |
+| `//status` | Show session status |
+| `//private` | Toggle private mode (threads only) |
+| `//reload` | Reload config, models, bundled skills, and scheduler settings |
+| `//background <msg>` | Queue a message for deferred background processing |
+| `//clear` | Delete the bot's messages in the current thread (threads only) |
+
+With `slash_commands: true` (default), the equivalents are also registered as native Discord slash commands: `/status`, `/model`, `/background`, `/reload`, `/clear`, plus `/voice join` / `/voice leave` for voice channels.
+
+### Skill status messages
+
+Like Telegram: a live status message is edited in-place while a skill runs (step counter, current action) and replaced with a ✓ summary on completion.
+
+### Voice channels (optional)
+
+With `/voice join`, the bot joins the caller's voice channel (requires the Opus codec library; voice support is disabled with a warning if it can't be loaded). It captures per-user audio, detects end of utterance via silence detection (`silence_threshold`, default 1.5 s), transcribes it, routes it through the agent, and plays the response back via TTS. After `timeout` seconds of inactivity (default 300) the bot disconnects automatically.
+
 ## Web Interface
 
 A browser-based UI with chat, provider/model management, skill administration, and a memory graph viewer. Always launched when no models are configured (first-run setup wizard); otherwise opt-in via `interfaces.web`.

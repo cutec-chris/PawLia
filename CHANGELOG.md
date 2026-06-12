@@ -52,10 +52,24 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   received images into live (voice) calls.
 - Index-free recall of recent threads in memory search — recent conversation
   context is surfaced even before the memory index has been built.
+- Matrix: `//stop` and `//stop all` cancel running skill turns.
+- Per-session skill-config overrides: the session-level `workspace/config.yaml`
+  can override `skill-config:` entries per skill; merged over the global config.
+- Real context windows are probed from the provider API (Ollama `/api/show`,
+  OpenAI-style `/models`) before falling back to the name heuristic.
 
 ### Changed
 - Incoming attachments are unified into a single link + description note
   instead of separate handling per type.
+- Credential store moved to `session/.credentials/<user_id>.json` — outside the
+  sandbox-writable per-user dir, so skill code can no longer read or tamper
+  with it via bash; the legacy `session/<user_id>/.credentials.json` is
+  migrated automatically.
+- skill-creator writes are redirected into the user's workspace (skill dirs are
+  read-only under the write sandbox), with a fallback stray-write guard.
+- `Dockerfile.voip`: Node.js v20 installed via apk from the Alpine 3.20 repos
+  (works on aarch64; avoids the icu-libs conflict and Akamai blocking of
+  v22+ musl tarballs).
 
 ### Fixed
 - Matrix: attachments (e.g. a generated rain-radar image) are now sent into the
@@ -67,6 +81,23 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   so an errored turn is no longer lost.
 - Skill runner: oversized tool outputs are truncated to 4 kB to keep them from
   blowing up the context window.
+- Filenames: characters that break cross-platform sync (`<>` etc.) are
+  rejected/cleaned on write, existing workspace files are sanitized at startup,
+  and mistyped slugs get did-you-mean suggestions.
+- Context compaction: real LLM summarization of overflowing context (instead of
+  blind truncation) plus skill-runner runaway guards; compression markers are
+  persisted in `session.exchanges` and surfaced to the user via `on_interim`.
+- VoIP: hold tone is stopped when STT returns empty or a hallucination in the
+  normal path.
+- skill-creator: safe string formatting, atomic skill init, and `--force`
+  recovery from half-created skills.
+- Router: the inner ChatAgent's `pending_attachments` are exposed so
+  `attach_file` deliveries work through the RouterAgent.
+- Blocking bash commands run off the event loop via `asyncio.to_thread`, so
+  long-running skill commands no longer stall interfaces and the scheduler.
+- Model blacklist is reason-aware — a model that fails for one capability
+  (e.g. vision) is no longer blocked for unrelated uses.
+- Context-size heuristic knows the glm model family (128K).
 
 ## [0.1.0] - 2026-06-04
 ### Added

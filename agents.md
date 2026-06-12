@@ -96,6 +96,17 @@ The SkillRunner receives **no conversation history** — it's isolated to preven
 - `strip_thinking(text)` — removes `<think>`/`<thinking>` blocks, handles unclosed tags, and strips chat-template tokens (e.g. `<|...|>`)
 - `extract_text(response)` — extracts clean text from AIMessage
 
+Supporting modules in `pawlia/agents/`:
+
+- **`error_classifier.py`** — classifies LLM exceptions into an `ErrorCategory`
+  (context_overflow, rate_limit, auth_error, timeout, server_error,
+  format_error, unknown). `BaseAgent` uses `is_retryable()` /
+  `should_compact()` to decide between retry, context compaction, or raising.
+- **`iteration_budget.py`** — `IterationBudget`, a thread-safe per-agent
+  iteration counter with one grace call after exhaustion and `refund()`
+  support. Guards against skill-runner runaway loops; the maximum is derived
+  from the model size in `app.py`.
+
 ## App (`pawlia/app.py`)
 
 Central state holder. Creates and wires everything:
@@ -119,8 +130,20 @@ All interfaces follow the same pattern: get a router via `app.make_agent(user_id
 | Telegram | `interfaces/telegram.py` | python-telegram-bot polling | Telegram user ID |
 | Matrix | `interfaces/matrix.py` | matrix-nio sync loop | Matrix sender |
 | Web | `interfaces/web.py` | aiohttp (HTML + JSON API) | Cookie-authenticated user |
+| Discord | `interfaces/discord.py` | discord.py gateway | Discord user ID (threads via channel threads) |
 | Webhook | `interfaces/webhook.py` | aiohttp `POST /chat` | `user_id` from JSON body |
 | OpenAI-compatible | `interfaces/openai_compat.py` | aiohttp `POST /v1/chat/completions` (+ Ollama-style `/api/chat`) | `user_id` from `X-User-Id` header or default |
+
+**Voice:** Matrix supports incoming WebRTC VoIP calls (`interfaces/matrix_call.py`,
+requires `aiortc` — included in the `Dockerfile.voip` image, an Alpine-based
+variant that adds aiortc, audio dependencies, and Node.js 20). Each call gets its own
+isolated thread context; LLM responses are streamed sentence-by-sentence into TTS, and
+a hold-audio loop (`tts.hold_audio`, default `assets/keyboard.m4a`) plays while the
+agent thinks. `//stop` (or `//stop all`) cancels running skill turns in Matrix.
+Discord has a voice counterpart in `interfaces/discord_voice.py`. Shared audio
+plumbing (AGC, VAD, recording) lives in `pawlia/audio/`; STT in
+`pawlia/transcription.py` (groq / openai / local Whisper), TTS in `pawlia/tts.py`
+(edge / piper).
 
 Server mode (`--mode server`) starts all configured interfaces in parallel via `asyncio.gather`.
 
@@ -155,13 +178,26 @@ skills/
 ├── searxng/              # meta-search
 ├── skill-creator/        # build new skills interactively
 ├── workspace-git/        # commit/squash/sync the workspace repo
-└── user/                 # custom user skills (gitignored)
-    └── bike-routing/
-        ├── SKILL.md
-        └── scripts/route.py
+└── user/                 # custom user skills (gitignored, created on demand)
 ```
 
 `SkillLoader.discover()` scans direct children of `skills/` plus `skills/user/` subdirectories. With `skill-install.allow_workspace: true`, also discovers skills from `session/{user_id}/workspace/skills/`. Skills with `requires_config` in metadata are skipped if config is missing.
+
+**Skill config**: Global per-skill settings live under `skill-config:` in
+`config.yaml`. The session-level `workspace/config.yaml` can override them per
+skill; `app.py` merges session over global when building the skill context.
+
+**Write access**: Skill directories are read-only at runtime (enforced by the
+bash write sandbox, see Tools). Skills that generate files — notably
+skill-creator — write into the user's workspace instead; a fallback guard
+detects and reports stray writes outside the allowed paths.
+
+**Credentials** (`pawlia/credentials.py`): Per-user credential store at
+`session/.credentials/{user_id}.json` — deliberately **outside** the
+sandbox-writable `session/{user_id}/` so skill code cannot read or tamper with
+it via bash (legacy `session/{user_id}/.credentials.json` is migrated
+automatically). Credentials are injected into skill processes as environment
+variables (`build_env_extra()`, names derived via `env_key_for()`).
 
 The ChatAgent sees skills as OpenAI function specs (name + description + query param). The SkillRunnerAgent gets the full instructions and runs in the skill's directory (`cwd = skill.skill_path`) by default. This can be overridden via `openclaw.cwd` metadata ("skill" or "workspace").
 
@@ -171,18 +207,38 @@ SKILL.md supports variable substitution: `<user_id>`, `<session_dir>`, `<scripts
 
 | Tool | Name | Purpose |
 |------|------|---------|
-| `BashTool` | `bash` | Execute shell commands. Respects `context["cwd"]` and `context["timeout"]` (default 120s). Injects `PAWLIA_USER_ID` and `PAWLIA_SESSION_DIR` as env vars. |
+| `BashTool` | `bash` | Execute shell commands. Respects `context["cwd"]` and `context["timeout"]` (default 120s). Injects `PAWLIA_USER_ID` and `PAWLIA_SESSION_DIR` as env vars. Runs inside the write sandbox (see below) unless `context["sandbox"]` is falsy. |
+| `AttachFileTool` | `attach_file` | Send a file to the user. Not in the ToolRegistry — passed to ChatAgent as `direct_tools` (`app.py`) and executed inline; queues bytes on `agent.pending_attachments`, which each interface delivers (Matrix: into the active thread). Paths resolve relative to the workspace; absolute paths are symlink-resolved and validated against allowed roots (workspace, Downloads, /tmp, `attachments.extra_allowed_roots`). Size limit `attachments.max_outgoing_bytes` (default 25 MB). |
 
-**Note**: `ReminderTool` exists in code but is not registered in the App. Reminders are managed directly by the Scheduler.
+**Write sandbox** (`pawlia/sandbox.py`): Bash commands run under a bubblewrap
+write-sandbox when unprivileged user namespaces are available — read-only root
+with only `session/<user_id>/` and `/tmp` bind-mounted writable. Without bwrap,
+a fallback takes an mtime snapshot before execution and reports stray writes
+afterwards. Skill directories are therefore read-only at runtime.
+
+**Note**: `ReminderTool` and the tools in `files_tools.py` (ReadFile/ListFiles/GrepFiles, delegating to the files skill script) exist in code but are not registered in the App. Reminders are managed directly by the Scheduler.
 
 Tools extend `Tool(ABC)` and register in `ToolRegistry`. Each tool provides `as_openai_spec()` for LLM binding and `execute(args, context)` for actual execution.
+
+## Attachments (`pawlia/attachments.py`)
+
+- **Incoming:** files received via any interface are saved to
+  `workspace/Downloads/` with a markdown sidecar (YAML frontmatter +
+  description), making them discoverable through workspace search. Images are
+  additionally bridged into live VoIP calls.
+- **Outgoing:** the `attach_file` direct tool (see Tools) lets the agent send
+  workspace files back to the user.
+- **Config** (`attachments:` in `config.yaml`): `max_outgoing_bytes`
+  (default 25 MB), `extra_allowed_roots`.
 
 ## Memory & Sessions (`pawlia/memory.py`)
 
 ```
+session/.credentials/{user_id}.json # per-user credential store (outside the sandbox)
 session/{user_id}/
 ├── session_version.txt             # on-disk log/session format version
 ├── workspace/                      # Obsidian vault
+│   ├── Downloads/                  # incoming attachments + markdown sidecars
 │   ├── memory/
 │   │   ├── 2026-03-15.md           # daily chat log (main + embedded thread sections)
 │   │   ├── memory.md                # persistent user facts
@@ -242,6 +298,12 @@ Identity files (`soul.md`, `identity.md`, `user.md`) are copied as templates fro
 The token threshold for the active chat model resolves to `summarize_at_tokens` (absolute) if set in `models:`, otherwise `summarize_at_fraction × context_size` (default fraction `0.6`). Token usage is approximated cheaply via `estimate_session_tokens()` (chars / 4) — tiktoken would dominate the scheduler tick.
 
 Summarization runs as a background `asyncio.create_task()`. The summary **replaces** (not appends to) the previous summary — the LLM receives the prior summary as context and merges everything into max 4 bullet points.
+
+When context compaction happens mid-turn (e.g. after a context-overflow error),
+a **compression marker** is persisted in `session.exchanges` so replay stays
+consistent, and the compaction is surfaced to the user via the `on_interim`
+callback. Memory search additionally recalls recently active threads
+index-free (without requiring the RAG index).
 
 ## Scheduler (`pawlia/scheduler.py`)
 
@@ -319,9 +381,19 @@ agents:
 
 **Per-model heuristics** (`pawlia/llm.py`):
 - `estimate_max_tool_turns(name)` — derives the SkillRunner tool-call budget from the model identifier; override per-model via `max_tool_turns` in `models:` or per-skill via `metadata.max_tool_turns` in `SKILL.md`.
-- `estimate_context_size(name)` — derives `num_ctx` for Ollama-backed models so prompts don't get silently truncated to Ollama's 2048 default; override via `context_size` (alias `num_ctx`).
+- `estimate_context_size(name)` — derives `num_ctx` for Ollama-backed models so prompts don't get silently truncated to Ollama's 2048 default; override via `context_size` (alias `num_ctx`). Before the heuristic applies, `pawlia/context_probe.py` tries to read the **real** context window from the provider API (Ollama `/api/show`, OpenAI-style `/models`; 4 s timeout, falls back silently).
 - `summary_threshold_tokens(name)` — derives the token threshold for auto-summarization; override via `summarize_at_tokens` (absolute) or `summarize_at_fraction` (of context_size).
 - `audio_input: true` on a model marks it as natively audio-capable; PawLia bypasses Whisper transcription for those models in the VoIP and voice-message paths.
+
+**Vision capability detection** (`pawlia/vision_probe.py`): whether a model
+accepts images is resolved at runtime — explicit config flag →
+`model_capabilities.json` cache → live probe (sends a colored-band PNG, 30 s
+timeout; inconclusive results are not cached) → name heuristic. If the chat
+model can't take images, PawLia falls back to describing the image with the
+vision model and feeding the description as text.
+
+**Model blacklist**: models that error are blacklisted *per failure reason* —
+e.g. a vision failure doesn't block the model for plain chat.
 
 ## Logs
 
@@ -345,6 +417,13 @@ PYTHONPATH=. .venv/bin/python -m pawlia
 # Start CLI with piped input (non-interactive, for scripted testing)
 printf 'Hello\nexit\n' | PYTHONPATH=. .venv/bin/python -m pawlia 2>/dev/null
 ```
+
+**Filename hygiene** (`pawlia/utils.py`): `sanitize_filename()` strips
+characters that break cross-platform sync (`<>:"|?*`, control chars), applies
+NFC normalization, and trims leading/trailing dots. `sanitize_workspace()`
+renames offending files bottom-up and runs over all workspaces at app startup.
+`find_similar_slug()` (SequenceMatcher, threshold 0.7) powers did-you-mean
+suggestions for mistyped wiki/file slugs.
 
 - Keep it simple — PawLia targets small models on local hardware
 - Skills are isolated: own directory, own config, no shared state
