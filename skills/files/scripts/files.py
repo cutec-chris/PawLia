@@ -27,7 +27,7 @@ import sys
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, project_root)
 
-from pawlia.utils import ensure_dir
+from pawlia.utils import ensure_dir, sanitize_filename
 
 
 # ---------------------------------------------------------------------------
@@ -69,19 +69,43 @@ def _ci_resolve(base: str, rel: str) -> str:
 
 def _suggest_similar_files(workdir: str, filename: str, limit: int = 5) -> list[str]:
     """Return up to *limit* files that look similar to the requested filename."""
-    base = filename.replace(".md", "").lower()
-    suggestions = []
+    from difflib import SequenceMatcher
+
+    score_map: dict[str, float] = {}
+
+    # Tokenise the requested name — split on common separators
+    query_words = set(re.split(r"[\s_\-/.]+", filename.lower().strip()))
+    query_words.discard("")
+
     for _, rel_path in _walk_files(workdir):
-        if not rel_path.endswith(".md"):
-            continue
         rel_lower = rel_path.lower()
-        # Check if any part of the requested path appears in the file
-        parts = [p.lower() for p in base.replace("/", " ").split()]
-        score = sum(1 for p in parts if p in rel_lower)
-        if score > 0:
-            suggestions.append((score, rel_path))
-    suggestions.sort(key=lambda x: -x[0])
-    return [p for _, p in suggestions[:limit]]
+
+        # Best partial-match ratio of any path component
+        rel_words = re.split(r"[\s_\-/.]+", rel_lower)
+        max_component_ratio = max(
+            (SequenceMatcher(None, qw, rw).ratio() for qw in query_words for rw in rel_words),
+            default=0.0,
+        )
+
+        # Token overlap
+        common = query_words & set(rel_words)
+        token_score = len(common) / max(len(query_words), 1)
+
+        # Filename (basename without ext) similarity
+        base = os.path.splitext(os.path.basename(rel_lower))[0]
+        base_sim = max(
+            (SequenceMatcher(None, qw, base).ratio() for qw in query_words),
+            default=0.0,
+        )
+
+        # Combined score
+        combined = max_component_ratio * 0.4 + token_score * 0.3 + base_sim * 0.3
+        if combined > 0.3:
+            score_map[rel_path] = combined
+
+    # Sort by descending score
+    sorted_paths = sorted(score_map, key=score_map.__getitem__, reverse=True)
+    return sorted_paths[:limit]
 
 
 def _file_not_found_response(workdir: str, filename: str) -> dict:
@@ -110,6 +134,11 @@ def _file_not_found_response(workdir: str, filename: str) -> dict:
 
 
 def _safe_path(workdir: str, filename: str) -> str:
+    if sanitize_filename(filename) != filename:
+        raise ValueError(
+            f"Filename '{filename}' contains invalid characters "
+            f"(<> : \" / \\ | ? *). Suggested: '{sanitize_filename(filename)}'."
+        )
     resolved = os.path.realpath(_ci_resolve(workdir, filename))
     root = os.path.realpath(workdir)
     if not resolved.startswith(root + os.sep) and resolved != root:
@@ -576,8 +605,23 @@ def cmd_delete(args) -> None:
     _out({"success": True, "message": f"File '{args.filename}' deleted."})
 
 
+def _validate_filename(filename: str) -> str | None:
+    """Check filename for problematic characters. Returns cleaned name or None if fatal."""
+    cleaned = sanitize_filename(filename)
+    if cleaned != filename:
+        msg = (
+            f"Filename contains invalid characters (<> : \" / \\ | ? *). "
+            f"Use '{cleaned}' instead."
+        )
+        _out({"success": False, "error": msg, "suggested_filename": cleaned})
+        return None
+    return filename
+
+
 def cmd_write(args) -> None:
     workdir = _workdir(args.user_id, args.session_dir)
+    if _validate_filename(args.filename) is None:
+        return
     filepath = _resolve_filepath(workdir, args.filename)
     if filepath is None:
         return

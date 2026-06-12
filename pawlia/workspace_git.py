@@ -10,6 +10,7 @@ Weekly squash: all commits from this week → one "Week: YYYY-Www" commit.
 
 import logging
 import os
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -56,6 +57,21 @@ def _config_get(workspace: str, key: str) -> str:
         return ""
 
 
+_INVALID_PATH_CHARS = re.compile(r'[<>:"|?*]')
+
+
+def _scan_problematic_paths(workspace: str) -> list[str]:
+    """Return all tracked or untracked paths with invalid filename characters."""
+    bad: list[str] = []
+    rc, out = _git(workspace, "ls-files", "--cached", "--others", "--modified",
+                   quiet=True)
+    if rc == 0 and out:
+        for path in out.splitlines():
+            if _INVALID_PATH_CHARS.search(path):
+                bad.append(path)
+    return bad
+
+
 def _ensure_identity(workspace: str) -> None:
     """Ensure repo-local user.name/user.email are set so commits don't fail."""
     if not _config_get(workspace, "user.name"):
@@ -91,17 +107,31 @@ def _ensure_gitignore(workspace: str) -> None:
             _git(workspace, "rm", "--cached", "--ignore-unmatch", "-q", p)
 
 
+def _ensure_protect_config(workspace: str) -> None:
+    """Enable NTFS-protection and advise about problematic pathnames."""
+    _git(workspace, "config", "core.protectNTFS", "true")
+    bad = _scan_problematic_paths(workspace)
+    if bad:
+        logger.warning(
+            "Workspace has %d file(s) with characters invalid on Android "
+            "(<> : \" | ? *). These will fail on checkout. Renaming suggested: %s",
+            len(bad), bad[:5],
+        )
+
+
 def ensure_repo(workspace: str) -> bool:
     """Initialize a git repo in workspace if not already one. Returns True if repo exists."""
     if os.path.isdir(os.path.join(workspace, ".git")):
         _ensure_identity(workspace)
         _ensure_gitignore(workspace)
+        _ensure_protect_config(workspace)
         return True
     rc, _ = _git(workspace, "init")
     if rc != 0:
         return False
     _ensure_identity(workspace)
     _ensure_gitignore(workspace)
+    _ensure_protect_config(workspace)
     _git(workspace, "add", "-A")
     _git(workspace, "commit", "-m", "Initial commit")
     logger.info("Initialized git repo in %s", workspace)
@@ -129,6 +159,16 @@ def auto_commit(workspace: str) -> bool:
     # Check for changes
     rc, status = _git(workspace, "status", "--porcelain")
     if rc != 0 or not status:
+        return False
+
+    # Refuse commit if files with invalid chars are staged
+    bad = _scan_problematic_paths(workspace)
+    if bad:
+        logger.warning(
+            "Skipping auto-commit: %d file(s) with invalid characters "
+            "(<> : \" | ? *). Rename them first: %s",
+            len(bad), bad[:5],
+        )
         return False
 
     _git(workspace, "add", "-A")

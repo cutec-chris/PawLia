@@ -14,6 +14,7 @@ from pawlia.config import load_config
 from pawlia.llm import LLMFactory
 from pawlia.memory import MemoryManager
 from pawlia.tools import AttachFileTool
+from pawlia.utils import sanitize_workspace
 from pawlia.tools.base import ToolRegistry
 from pawlia.tools.bash import BashTool
 from pawlia.skills.loader import AgentSkill, SkillLoader
@@ -51,8 +52,22 @@ class App:
         self.scheduler = Scheduler(self.session_dir, config=self.config)
         self.scheduler.set_app(self)
 
+    def _cleanup_all_workspaces(self) -> None:
+        """Scan all user workspaces and rename files with invalid chars."""
+        if not os.path.isdir(self.session_dir):
+            return
+        for user_id in os.listdir(self.session_dir):
+            workspace = os.path.join(
+                self.session_dir, user_id, "workspace"
+            )
+            if os.path.isdir(workspace):
+                sanitize_workspace(workspace)
+
     def _initialize_runtime(self) -> None:
         """Initialize config-driven runtime components."""
+        # Clean up files with problematic characters (<>) in all workspaces
+        self._cleanup_all_workspaces()
+
         # LLM factory — instances are created lazily and cached
         self.llm = LLMFactory(self.config)
 

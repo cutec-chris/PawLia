@@ -7,6 +7,7 @@ import os
 import re
 import threading
 import unicodedata
+import uuid
 from difflib import SequenceMatcher
 from typing import Any, Callable, Dict, List, Optional, TypeVar
 
@@ -238,6 +239,63 @@ _STOP_WORDS = frozenset(
     "who where when why i you we they he she it with from to for on at "
     "by about do did not also".split()
 )
+
+
+SANITIZE_RE = re.compile(r'[<>:"|?*]')
+
+# Characters that are *invalid* in a filename — used for detection
+_INVALID_FILENAME_RE = re.compile(r'[<>:"|?*]')
+
+
+def sanitize_filename(name: str) -> str:
+    """Remove characters that are invalid on Windows/Android filesystems.
+
+    ``<> : " | ? *`` are forbidden on FAT32/NTFS/exFAT (Android's emulated
+    storage/sdcard) and cause ``git checkout`` to fail silently.
+    Only the *basename* is sanitised — path separators (``/``) are preserved.
+    """
+    parent, leaf = os.path.split(name)
+    leaf = unicodedata.normalize("NFC", leaf)
+    leaf = SANITIZE_RE.sub("", leaf)
+    leaf = leaf.strip(". ")
+    clean = os.path.join(parent, leaf) if parent else leaf
+    return clean or f"file-{uuid.uuid4().hex[:8]}"
+
+
+def sanitize_workspace(workspace_dir: str) -> None:
+    """Rename files/dirs with invalid characters (``<>:"|?*``) to safe names.
+
+    Walks the workspace bottom-up so directories are processed after their
+    children, avoiding stale parent references during rename.
+    """
+    if not os.path.isdir(workspace_dir):
+        return
+    entries: list[str] = []
+    for root, dirs, files in os.walk(workspace_dir, topdown=False):
+        for name in files + dirs:
+            if _INVALID_FILENAME_RE.search(name):
+                entries.append(os.path.join(root, name))
+    if not entries:
+        return
+    logger = logging.getLogger("pawlia.utils")
+    for path in sorted(entries, key=len, reverse=True):
+        parent = os.path.dirname(path)
+        name = os.path.basename(path)
+        safe = sanitize_filename(name)
+        if safe == name:
+            continue
+        safe_path = os.path.join(parent, safe)
+        # Collision: append uuid suffix
+        if os.path.exists(safe_path):
+            base, ext = os.path.splitext(safe)
+            safe_path = os.path.join(
+                parent, f"{base}-{uuid.uuid4().hex[:6]}{ext}"
+            )
+        try:
+            os.rename(path, safe_path)
+            logger.warning("Renamed problematic file: %s -> %s", path, safe_path)
+        except OSError as e:
+            logger.error("Failed to rename %s: %s", path, e)
 
 
 def slugify(name: str) -> str:

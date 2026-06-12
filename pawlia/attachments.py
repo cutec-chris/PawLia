@@ -69,6 +69,8 @@ def _safe_filename(name: str) -> str:
     name = os.path.basename((name or "").strip())
     if not name or name in (".", ".."):
         name = f"file-{uuid.uuid4().hex[:8]}"
+    from pawlia.utils import sanitize_filename
+    name = sanitize_filename(name)
     name = name.replace("..", "_")
     return name[:200]
 
