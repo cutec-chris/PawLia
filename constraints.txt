@@ -4,6 +4,12 @@
 # file with `pip install -c constraints.txt ...` when reproducible, fast
 # dependency resolution matters.
 aiodns==4.0.0
+livekit==1.1.10
+livekit-api==1.1.0
+livekit-protocol==1.1.15
+pyjwt==2.13.0
+piper-tts==1.4.2
+onnxruntime==1.26.0
 aiofiles==24.1.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3

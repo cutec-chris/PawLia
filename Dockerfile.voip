@@ -1,69 +1,59 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────
-FROM alpine:edge AS builder
+FROM python:3.14-slim-bookworm AS builder
 
-RUN apk add --no-cache \
-        python3 \
-        py3-pip \
-        py3-olm \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        python3-dev \
+        libffi-dev \
+        libssl-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        libolm-dev \
         gcc \
         g++ \
-        musl-dev \
-        python3-dev \
-        openssl-dev \
-        libffi-dev \
-        crc32c-dev \
-        libxml2-dev \
-        libxslt-dev
+    && rm -rf /var/lib/apt/lists/*
 
 COPY constraints.txt requirements.txt requirements-e2e.txt requirements-voip.txt ./
 
-# Installation direkt in die System-Packages
-# --break-system-packages ist in neuen Python-Versionen Pflicht
-RUN pip install --break-system-packages --no-cache-dir \
+RUN pip install --no-cache-dir \
         -c constraints.txt \
         -r requirements.txt \
         -r requirements-e2e.txt \
         -r requirements-voip.txt
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────
-FROM alpine:edge
+FROM python:3.14-slim-bookworm
 
-RUN apk add --no-cache \
-        python3 \
-        py3-pip \
-        py3-olm \
+RUN apt-get update && apt-get install -y --no-install-recommends \
         espeak-ng \
+        espeak-ng-data \
         ffmpeg \
         flac \
         wget \
-        py3-numpy \
-        py3-onnxruntime \
+        ca-certificates \
         openssl \
         openssh-client \
         git \
         bubblewrap \
-        libffi \
-        libstdc++ \
-        crc32c \
-        libxml2 \
-        libxslt \
-    && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
-        piper-tts
+        libffi8 \
+        libstdc++6 \
+        libolm3 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Node.js/npm aus edge. KEIN v20-Pinning aus Alpine 3.20: dessen nodejs
-# braucht icu-libs-74, was mit dem icu-libs-78 von py3-onnxruntime (via re2)
-# kollidiert und Piper-TTS kaputtmacht. edge-nodejs nutzt icu-78 → konfliktfrei.
-# (Das alte v20-Pinning kam nur vom Tarball-Download-Workaround, nicht von
-#  einer echten Versionsanforderung — über apk entfällt das.)
-RUN apk add --no-cache nodejs npm
+# Node.js LTS via NodeSource (kein Alpine-icu-Konflikt mehr — war musl-spezifisch)
+RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY constraints.txt constraints.txt
 ENV PIP_CONSTRAINT=/app/constraints.txt
 
-# Wir kopieren nur die installierten Python-Packages aus dem Builder
-# Anstatt des ganzen venv kopieren wir den site-packages Ordner
-COPY --from=builder /usr/lib/python3.14/site-packages /usr/lib/python3.14/site-packages
+# Python-Packages aus Builder kopieren
+COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
+# piper-Console-Script liegt in /usr/local/bin, nicht in site-packages
+COPY --from=builder /usr/local/bin/piper /usr/local/bin/piper
 
 # Application code
 COPY pawlia/ pawlia/
@@ -88,5 +78,4 @@ RUN mkdir -p /app/piper && \
 VOLUME ["/app/session"]
 ENV PYTHONUNBUFFERED=1
 
-# Kein PATH-Hacking mehr nötig
 CMD ["python3", "-m", "pawlia", "--mode", "server"]
