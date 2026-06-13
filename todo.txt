@@ -8,14 +8,24 @@
       test_probe_disabled_falls_back_to_heuristic. Betreffen context_probe;
       auf sauberem develop-Stand ebenfalls rot. Prüfen/fixen.
 
-- [ ] config.openai-eval.yaml: enthält API-Keys. Auf develop bereits UNTRACKED
-      (Commit 0115805) + gitignored — also nicht mehr im HEAD. ABER: die Keys
-      stecken noch in der History (2aefc1e, 4a89b3e, eb330b9, 6e45752), und die
-      ist auf origin. "Vollständig raus" = History-Rewrite (git filter-repo) +
-      Force-Push + Key-Rotation. Destruktiv → wartet auf explizite Freigabe.
+- [ ] NACHARBEIT zum History-Rewrite (config.openai-eval.yaml):
+      1. GROQ-KEY ROTIEREN (gsk_…) — Pflicht, war öffentlich; Rewrite un-leakt
+         nicht, was schon geklont/gepullt wurde.
+      2. Server-GC auf Forgejo (192.168.177.105) anstoßen — lose Alt-Objekte mit
+         dem Key bleiben sonst bis zur GC erreichbar (admin → maintenance / gc).
+      3. Offene PRs/refs prüfen: refs/pull/* können Alt-Commits pinnen und den
+         Key wieder erreichbar machen → ggf. PRs schließen/neu erstellen.
+      4. Backup-Mirror mit dem Leak löschen, wenn alles passt:
+         ../pawlia-backup-before-history-rewrite.git
+      5. Mitarbeiter/andere Klone: müssen neu klonen oder hart resetten
+         (alle SHAs ab Secret-Einführung haben sich geändert).
 
 ## DONE
 
+- [x] 2026-06-13: config.openai-eval.yaml + Groq-Key per git-filter-repo aus der
+      KOMPLETTEN History getilgt; develop/main/feature-discord-interface/
+      fix-duplicate-code + Tag v0.1.0 rewritten und force-gepusht. Lokal verifiziert
+      (Datei + Key in keinem Objekt mehr). Nacharbeit siehe oben unter Offen.
 - [x] 2026-06-13: Discord `always_thread` implementiert — konversationelle
       Nachrichten in Server-Textkanälen starten automatisch einen Thread (wie
       Matrix); Befehle/DMs bleiben im Kanal. Text-, Bild-, Voice-, Datei-Pfad
