@@ -1,3 +1,4 @@
+from collections import deque
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
@@ -10,8 +11,9 @@ import pytest
 
 import pawlia.audio.vad as audio_vad
 from pawlia.audio.vad import SpeechDetector
+import pawlia.interfaces.call_core as call_core
 import pawlia.interfaces.matrix_call as matrix_call
-from pawlia.interfaces.matrix_call import CallSession
+from pawlia.interfaces.matrix_call import AiortcTransport, CallSession
 
 
 def _make_pcm_from_frame_levels(levels, frame_size=960):
@@ -122,7 +124,7 @@ async def test_process_speech_ignores_standalone_stt_hallucination():
         send_cb=send_cb,
     )
 
-    session._tts_track = SimpleNamespace(
+    session._transport = SimpleNamespace(
         start_hold=MagicMock(),
         stop_hold=MagicMock(),
         enqueue_pcm_float32=MagicMock(),
@@ -136,8 +138,8 @@ async def test_process_speech_ignores_standalone_stt_hallucination():
     agent.run_streamed.assert_not_called()
     # The audio pipeline calls start_hold() eagerly before dispatching, so
     # _process_speech must call stop_hold() when it discards the transcript.
-    session._tts_track.start_hold.assert_not_called()
-    session._tts_track.stop_hold.assert_called_once()
+    session._transport.start_hold.assert_not_called()
+    session._transport.stop_hold.assert_called_once()
 
 
 def test_standalone_stt_hallucination_filter_keeps_real_sentences():
@@ -240,10 +242,19 @@ def _install_fake_jitterbuffer(monkeypatch):
     monkeypatch.setitem(sys.modules, "aiortc.jitterbuffer", jb_mod)
 
 
+def _make_transport(call_id="call-jb"):
+    return AiortcTransport(
+        call_id=call_id,
+        client=SimpleNamespace(),
+        cfg={},
+        recorder=None,
+    )
+
+
 def test_widen_jitter_buffers_replaces_audio_buffer(monkeypatch):
     _install_fake_jitterbuffer(monkeypatch)
-    session = _make_call_session("call-jb")
-    session.JITTER_BUFFER_CAPACITY = 32
+    transport = _make_transport("call-jb")
+    transport._jitter_buffer_capacity = 32
     audio_recv = SimpleNamespace(
         track=SimpleNamespace(kind="audio"),
         _RTCRtpReceiver__jitter_buffer=_FakeJitterBuffer(16, prefetch=4),
@@ -252,9 +263,9 @@ def test_widen_jitter_buffers_replaces_audio_buffer(monkeypatch):
         track=SimpleNamespace(kind="video"),
         _RTCRtpReceiver__jitter_buffer=_FakeJitterBuffer(128, is_video=True),
     )
-    session._pc = SimpleNamespace(getReceivers=lambda: [audio_recv, video_recv])
+    transport._pc = SimpleNamespace(getReceivers=lambda: [audio_recv, video_recv])
 
-    session._widen_jitter_buffers()
+    transport._widen_jitter_buffers()
 
     new_buf = getattr(audio_recv, "_RTCRtpReceiver__jitter_buffer")
     assert new_buf.capacity == 32
@@ -265,30 +276,30 @@ def test_widen_jitter_buffers_replaces_audio_buffer(monkeypatch):
 
 def test_widen_jitter_buffers_noop_when_not_widening(monkeypatch):
     _install_fake_jitterbuffer(monkeypatch)
-    session = _make_call_session("call-jb-default")
-    session.JITTER_BUFFER_CAPACITY = 16  # == aiortc default → leave it alone
+    transport = _make_transport("call-jb-default")
+    transport._jitter_buffer_capacity = 16  # == aiortc default → leave it alone
     audio_recv = SimpleNamespace(
         track=SimpleNamespace(kind="audio"),
         _RTCRtpReceiver__jitter_buffer=_FakeJitterBuffer(16, prefetch=4),
     )
-    session._pc = SimpleNamespace(getReceivers=lambda: [audio_recv])
+    transport._pc = SimpleNamespace(getReceivers=lambda: [audio_recv])
 
-    session._widen_jitter_buffers()
+    transport._widen_jitter_buffers()
 
     assert getattr(audio_recv, "_RTCRtpReceiver__jitter_buffer").capacity == 16
 
 
 def test_widen_jitter_buffers_rejects_non_power_of_two(monkeypatch):
     _install_fake_jitterbuffer(monkeypatch)
-    session = _make_call_session("call-jb-odd")
-    session.JITTER_BUFFER_CAPACITY = 48  # not a power of two → aiortc would assert
+    transport = _make_transport("call-jb-odd")
+    transport._jitter_buffer_capacity = 48  # not a power of two → aiortc would assert
     audio_recv = SimpleNamespace(
         track=SimpleNamespace(kind="audio"),
         _RTCRtpReceiver__jitter_buffer=_FakeJitterBuffer(16, prefetch=4),
     )
-    session._pc = SimpleNamespace(getReceivers=lambda: [audio_recv])
+    transport._pc = SimpleNamespace(getReceivers=lambda: [audio_recv])
 
-    session._widen_jitter_buffers()
+    transport._widen_jitter_buffers()
 
     assert getattr(audio_recv, "_RTCRtpReceiver__jitter_buffer").capacity == 16
 
@@ -392,19 +403,19 @@ async def test_process_speech_writes_debug_wav(tmp_path):
     )
 
     pcm = np.linspace(-0.25, 0.25, 4800, dtype=np.float32)
-    fake_file = tmp_path / "pawlia" / "interfaces" / "matrix_call.py"
+    fake_file = tmp_path / "pawlia" / "interfaces" / "call_core.py"
     fake_file.parent.mkdir(parents=True, exist_ok=True)
     fake_file.write_text("# test stub\n", encoding="utf-8")
 
-    old_level = matrix_call.logger.level
-    matrix_call.logger.setLevel(logging.DEBUG)
+    old_level = call_core.logger.level
+    call_core.logger.setLevel(logging.DEBUG)
     try:
-        with patch.object(matrix_call, "__file__", str(fake_file)), patch(
+        with patch.object(call_core, "__file__", str(fake_file)), patch(
             "pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value=None)
         ), patch("pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=[])):
             await session._process_speech(pcm, 48000)
     finally:
-        matrix_call.logger.setLevel(old_level)
+        call_core.logger.setLevel(old_level)
 
     import shutil
     debug_dir = tmp_path / "log" / "debug_audio"
@@ -587,7 +598,7 @@ def test_start_speech_buffer_includes_pre_speech_frames():
         send_cb=AsyncMock(),
     )
 
-    pre = matrix_call.deque(
+    pre = deque(
         [
             np.array([0.1, 0.2], dtype=np.float32),
             np.array([0.3, 0.4], dtype=np.float32),
@@ -657,7 +668,7 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
         send_cb=send_cb,
     )
 
-    session._tts_track = SimpleNamespace(
+    session._transport = SimpleNamespace(
         interrupt=MagicMock(),
         stop_after_current_sentence=MagicMock(),
         stop_hold=MagicMock(),
@@ -670,8 +681,8 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
     with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="hm")):
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
 
-    session._tts_track.interrupt.assert_not_called()
-    session._tts_track.stop_after_current_sentence.assert_not_called()
+    session._transport.interrupt.assert_not_called()
+    session._transport.stop_after_current_sentence.assert_not_called()
     session._cancel_active_response.assert_not_awaited()
     session._respond_to_transcript.assert_not_awaited()
     send_cb.assert_awaited_once_with("~~🎙️ *hm*~~ *(verworfen)*")
@@ -693,7 +704,7 @@ async def test_process_speech_starts_hold_before_queueing_response():
         send_cb=AsyncMock(),
     )
 
-    session._tts_track = SimpleNamespace(
+    session._transport = SimpleNamespace(
         start_hold=MagicMock(),
         stop_hold=MagicMock(),
         is_playing=False,
@@ -703,9 +714,9 @@ async def test_process_speech_starts_hold_before_queueing_response():
     with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="Hallo da")):
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000)
 
-    session._tts_track.start_hold.assert_called_once()
+    session._transport.start_hold.assert_called_once()
     session._queue_transcript_response.assert_awaited_once_with("Hallo da")
-    session._tts_track.stop_hold.assert_not_called()
+    session._transport.stop_hold.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -724,7 +735,7 @@ async def test_process_speech_does_not_start_hold_when_transcription_is_empty():
         send_cb=AsyncMock(),
     )
 
-    session._tts_track = SimpleNamespace(
+    session._transport = SimpleNamespace(
         start_hold=MagicMock(),
         stop_hold=MagicMock(),
         is_playing=False,
@@ -736,8 +747,8 @@ async def test_process_speech_does_not_start_hold_when_transcription_is_empty():
 
     # Empty transcription: audio pipeline already called start_hold() eagerly,
     # so _process_speech must stop it to avoid a stuck hold tone.
-    session._tts_track.start_hold.assert_not_called()
-    session._tts_track.stop_hold.assert_called_once()
+    session._transport.start_hold.assert_not_called()
+    session._transport.stop_hold.assert_called_once()
     session._queue_transcript_response.assert_not_awaited()
 
 
@@ -756,7 +767,7 @@ async def test_delayed_pending_response_ignores_hold_audio_only_playback():
         send_cb=AsyncMock(),
     )
 
-    session._tts_track = SimpleNamespace(is_tts_playing=False, is_playing=True)
+    session._transport = SimpleNamespace(is_tts_playing=False, is_playing=True)
     session._respond_to_transcript = AsyncMock()
     session._pending_transcripts = ["Hallo da"]
     session._last_user_speech_at = 0.0
@@ -788,11 +799,12 @@ async def test_process_speech_interrupts_for_meaningful_barge_in():
         send_cb=send_cb,
     )
 
-    session._tts_track = SimpleNamespace(
+    session._transport = SimpleNamespace(
         interrupt=MagicMock(),
         stop_after_current_sentence=MagicMock(),
         stop_hold=MagicMock(),
         is_playing=False,
+        is_tts_playing=False,
     )
     session._cancel_active_response = AsyncMock()
     session._respond_to_transcript = AsyncMock()
@@ -802,8 +814,8 @@ async def test_process_speech_interrupts_for_meaningful_barge_in():
         await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
         await session._pending_response_task
 
-    session._tts_track.interrupt.assert_not_called()
-    session._tts_track.stop_after_current_sentence.assert_called_once()
+    session._transport.interrupt.assert_not_called()
+    session._transport.stop_after_current_sentence.assert_called_once()
     session._cancel_active_response.assert_awaited_once()
     session._respond_to_transcript.assert_awaited_once_with("warte kurz", announce_transcript=False)
 
@@ -826,10 +838,11 @@ async def test_meaningful_barge_in_cancels_previous_response_task():
 
     previous_response = asyncio.create_task(asyncio.sleep(30))
     session._track_response_task(previous_response)
-    session._tts_track = SimpleNamespace(
+    session._transport = SimpleNamespace(
         stop_after_current_sentence=MagicMock(),
         stop_hold=MagicMock(),
         is_playing=False,
+        is_tts_playing=False,
     )
     session._respond_to_transcript = AsyncMock()
     session.RESPONSE_DELAY_SECONDS = 0.0
@@ -843,7 +856,7 @@ async def test_meaningful_barge_in_cancels_previous_response_task():
             previous_response.cancel()
 
     assert previous_response.cancelled()
-    session._tts_track.stop_after_current_sentence.assert_called_once()
+    session._transport.stop_after_current_sentence.assert_called_once()
     session._respond_to_transcript.assert_awaited_once_with("warte kurz", announce_transcript=False)
 
 
@@ -1075,6 +1088,13 @@ async def test_connect_timeout_watchdog_hangs_up_stale_call():
         iceConnectionState="checking",
         close=AsyncMock(),
     )
+    # The watchdog awaits self._transport.media_connected.wait(); a never-set
+    # event makes the connect timeout fire. hangup() then closes the transport.
+    session._transport = SimpleNamespace(
+        media_connected=asyncio.Event(),
+        is_transport_finished=False,
+        close=session._pc.close,
+    )
     session._answer_sent.set()
 
     await session._connect_timeout_watchdog()
@@ -1091,7 +1111,15 @@ async def test_preanswer_warmup_prepares_greeting_without_playing_it():
     client = SimpleNamespace(room_typing=AsyncMock())
     agent = MagicMock()
     agent.build_system_prompt.return_value = "CALL PROMPT"
-    agent.run_streamed = AsyncMock(return_value="Hallo")
+
+    async def _fake_run_streamed(*args, on_sentence=None, **kwargs):
+        # First sentence synthesized → unblocks the pre-answer wait via the
+        # _greeting_first_sentence_ready event.
+        if on_sentence:
+            await on_sentence("Hallo, ich bin da.")
+        return "Hallo, ich bin da."
+
+    agent.run_streamed = AsyncMock(side_effect=_fake_run_streamed)
     send_cb = AsyncMock()
     session = CallSession(
         call_id="call-warmup",
@@ -1104,16 +1132,19 @@ async def test_preanswer_warmup_prepares_greeting_without_playing_it():
         agent=agent,
         send_cb=send_cb,
     )
-    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+    session._transport = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
 
-    with patch("pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value=None)) as transcribe_pcm, \
+    with patch("pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value=None)), \
          patch("pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=np.ones(480, dtype=np.float32))):
         await session._run_preanswer_warmup()
+        # Let the (now-completed) greeting-prep task settle.
+        if session._prepare_greeting_task is not None:
+            await session._prepare_greeting_task
 
-    transcribe_pcm.assert_awaited_once()
     agent.run_streamed.assert_awaited_once()
+    # Greeting is only prepared, never played or posted during warmup.
     send_cb.assert_not_awaited()
-    session._tts_track.enqueue_pcm_float32.assert_not_called()
+    session._transport.enqueue_pcm_float32.assert_not_called()
     assert session._greeting_sent is False
     assert session._prepared_greeting is not None
 
@@ -1146,7 +1177,7 @@ async def test_preanswer_warmup_timeout_keeps_greeting_warmup_running():
         send_cb=send_cb,
     )
     session.PREANSWER_WARMUP_TIMEOUT_SECONDS = 0.01
-    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+    session._transport = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
 
     with patch("pawlia.transcription.transcribe_pcm", new=AsyncMock(return_value=None)), patch(
         "pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=np.ones(480, dtype=np.float32))
@@ -1187,7 +1218,11 @@ async def test_deferred_greeting_waits_for_answer_and_media_ready():
         agent=agent,
         send_cb=send_cb,
     )
-    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+    session._transport = SimpleNamespace(
+        enqueue_pcm_float32=MagicMock(),
+        stop_hold=MagicMock(),
+        media_connected=asyncio.Event(),
+    )
 
     with patch("pawlia.tts.synthesize_pcm", new=AsyncMock(return_value=np.ones(480, dtype=np.float32))):
         task = asyncio.create_task(session._send_greeting_when_ready())
@@ -1198,12 +1233,12 @@ async def test_deferred_greeting_waits_for_answer_and_media_ready():
         await asyncio.sleep(0)
         agent.run_streamed.assert_not_awaited()
 
-        session._media_connected.set()
+        session._transport.media_connected.set()
         await task
 
     agent.run_streamed.assert_awaited_once()
     send_cb.assert_any_call("Hallo, ich bin da.")
-    session._tts_track.enqueue_pcm_float32.assert_called_once()
+    session._transport.enqueue_pcm_float32.assert_called_once()
     assert session._greeting_sent is True
 
 
@@ -1222,7 +1257,7 @@ async def test_send_greeting_waits_for_existing_prepare_task():
         send_cb=send_cb,
     )
     pcm = np.ones(480, dtype=np.float32)
-    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+    session._transport = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
 
     async def _prepare_later():
         await asyncio.sleep(0)
@@ -1232,8 +1267,8 @@ async def test_send_greeting_waits_for_existing_prepare_task():
 
     await session._send_greeting()
 
-    session._tts_track.enqueue_pcm_float32.assert_called_once_with(pcm)
-    session._tts_track.stop_hold.assert_called_once()
+    session._transport.enqueue_pcm_float32.assert_called_once_with(pcm)
+    session._transport.stop_hold.assert_called_once()
     send_cb.assert_any_call("Hallo, ich bin da.")
     assert session._greeting_sent is True
 
@@ -1254,18 +1289,22 @@ async def test_deferred_greeting_plays_prepared_audio_when_ready():
     )
     pcm = np.ones(480, dtype=np.float32)
     session._prepared_greeting = ("Hallo, ich bin da.", [pcm])
-    session._tts_track = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+    session._transport = SimpleNamespace(
+        enqueue_pcm_float32=MagicMock(),
+        stop_hold=MagicMock(),
+        media_connected=asyncio.Event(),
+    )
 
     task = asyncio.create_task(session._send_greeting_when_ready())
     await asyncio.sleep(0)
-    session._tts_track.enqueue_pcm_float32.assert_not_called()
+    session._transport.enqueue_pcm_float32.assert_not_called()
 
     await session.mark_answer_sent()
-    session._media_connected.set()
+    session._transport.media_connected.set()
     await task
 
-    session._tts_track.enqueue_pcm_float32.assert_called_once_with(pcm)
-    session._tts_track.stop_hold.assert_called_once()
+    session._transport.enqueue_pcm_float32.assert_called_once_with(pcm)
+    session._transport.stop_hold.assert_called_once()
     send_cb.assert_any_call("Hallo, ich bin da.")
     assert session._greeting_sent is True
 
@@ -1316,7 +1355,7 @@ async def test_send_greeting_drops_tts_after_hangup():
         agent=agent,
         send_cb=send_cb,
     )
-    session._tts_track = SimpleNamespace(enqueue_pcm_float32=enqueue, stop_hold=stop_hold)
+    session._transport = SimpleNamespace(enqueue_pcm_float32=enqueue, stop_hold=stop_hold)
 
     async def _fake_run_streamed(*args, on_sentence=None, **kwargs):
         # Simulate the call hanging up *during* greeting generation, before
