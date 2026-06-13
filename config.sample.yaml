@@ -115,7 +115,7 @@ interfaces:
   #   # stun_servers:                        # STUN for VoIP (optional)
   #   #   - stun:stun.l.google.com:19302
   #   # matrixrtc:                           # Element X / MatrixRTC calls (LiveKit SFU)
-  #   #   enabled: true                      # join Element X calls (default: false)
+  #   #   enabled: true                      # join Element X calls (default: true)
   #   #   focus_url: https://rtc.example.org # optional override; else from .well-known rtc_foci
   #   #   e2ee: true                         # end-to-end encrypt media (Phase 2)
 

@@ -508,7 +508,7 @@ class MatrixRTCManager:
         self._sessions: Dict[str, MatrixRTCSession] = {}  # room_id -> session
         self._joining: set = set()  # room_ids with a join in flight
         rtc_cfg = cfg.get("matrixrtc", {}) if isinstance(cfg, dict) else {}
-        self._enabled = bool(rtc_cfg.get("enabled", False))
+        self._enabled = bool(rtc_cfg.get("enabled", True))
         self._focus_url_override: Optional[str] = rtc_cfg.get("focus_url")
         self._wellknown_focus: Optional[str] = None
 
