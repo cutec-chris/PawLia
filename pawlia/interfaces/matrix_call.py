@@ -769,7 +769,13 @@ class CallSession:
             logger.info("call %s: hold audio loaded (%d samples, %.1fs)",
                         self.call_id[:8], len(hold_pcm), len(hold_pcm) / self._tts_track.SAMPLE_RATE)
 
-        await self._run_preanswer_warmup()
+        # Run warmup concurrently so the SDP answer is returned immediately.
+        # On ARM/slow hardware warmup (LLM + TTS pre-synthesis) takes 10-15 s,
+        # which delayed the answer so long that the caller's ICE timeout fired
+        # before DTLS could start (0 packets, dtlsState 'new' throughout).
+        # The greeting is gated on _media_connected so it plays correctly once
+        # the connection establishes regardless of when warmup finishes.
+        asyncio.create_task(self._run_preanswer_warmup())
 
         # Auto-hangup watchdog
         asyncio.create_task(self._watchdog())
