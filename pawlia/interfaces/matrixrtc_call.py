@@ -455,22 +455,38 @@ class MatrixRTCSession(CallCore):
         return True
 
     async def _get_openid_token(self) -> Optional[Dict[str, Any]]:
-        """Request a homeserver OpenID token (to auth to the lk-jwt-service)."""
-        try:
-            resp = await self._client.get_openid_token(self._client.user_id)
-        except Exception as e:
-            logger.error("call %s: get_openid_token failed: %s", self.call_id[:8], e)
+        """Request a homeserver OpenID token (to auth to the lk-jwt-service).
+
+        matrix-nio's get_openid_token omits the required JSON body, causing
+        Synapse to return 400 M_NOT_JSON.  We use httpx directly instead.
+        """
+        if not _HTTPX_AVAILABLE:
+            logger.error("call %s: httpx unavailable, cannot get OpenID token", self.call_id[:8])
             return None
-        access = getattr(resp, "access_token", None)
-        if not access:
-            logger.error("call %s: homeserver returned no OpenID token: %s",
-                         self.call_id[:8], resp)
+        hs = self._client.homeserver.rstrip("/")
+        uid = self._client.user_id
+        token = self._client.access_token
+        url = f"{hs}/_matrix/client/v3/user/{uid}/openid/request_token"
+        try:
+            async with httpx.AsyncClient(timeout=10) as hc:
+                r = await hc.post(url, json={}, headers={"Authorization": f"Bearer {token}"})
+            if r.status_code != 200:
+                logger.error("call %s: OpenID token request failed %s: %s",
+                             self.call_id[:8], r.status_code, r.text[:200])
+                return None
+            data = r.json()
+        except Exception as e:
+            logger.error("call %s: OpenID token request error: %s", self.call_id[:8], e)
+            return None
+        if not data.get("access_token"):
+            logger.error("call %s: OpenID response missing access_token: %s",
+                         self.call_id[:8], data)
             return None
         return {
-            "access_token": access,
-            "token_type": getattr(resp, "token_type", "Bearer"),
-            "matrix_server_name": getattr(resp, "matrix_server_name", None),
-            "expires_in": getattr(resp, "expires_in", 3600),
+            "access_token": data["access_token"],
+            "token_type": data.get("token_type", "Bearer"),
+            "matrix_server_name": data.get("matrix_server_name", uid.split(":", 1)[-1]),
+            "expires_in": data.get("expires_in", 3600),
         }
 
     async def _send_hangup_event(self) -> None:
