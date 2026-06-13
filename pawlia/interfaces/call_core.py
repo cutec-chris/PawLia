@@ -325,6 +325,10 @@ class CallCore:
         self._answer_sent = asyncio.Event()
         self._prepared_greeting: Optional[tuple] = None
         self._prepare_greeting_task: Optional[asyncio.Task] = None
+        # Set once the first greeting sentence has been synthesized to PCM.  The
+        # transport waits on this before sending the SDP answer, so there is audio
+        # ready to play the moment media connects (no silence after pickup).
+        self._greeting_first_sentence_ready = asyncio.Event()
         self._greeting_task: Optional[asyncio.Task] = None
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
@@ -508,31 +512,44 @@ class CallCore:
     # ------------------------------------------------------------------
 
     async def _run_preanswer_warmup(self) -> None:
+        """Block until the first greeting sentence is ready, then return.
+
+        Answering only when the first sentence's TTS audio is prepared avoids the
+        awkward silence after pickup (the greeting plays immediately once media
+        connects), while keeping the answer fast enough that the caller's ICE
+        timeout does not fire: we wait for the *first* sentence, not the whole
+        greeting, and STT warmup + the remaining sentences continue in the
+        background.  On timeout we answer anyway rather than dropping the call.
+        """
         if not self.PREANSWER_WARMUP_ENABLED:
             return
         started = time.monotonic()
-        stt_task = asyncio.create_task(self._warm_stt_with_silence())
-        greeting_task = self._ensure_prepare_greeting_task()
-        task = asyncio.gather(stt_task, asyncio.shield(greeting_task))
+        # STT is only needed once the caller speaks (after the greeting), so warm
+        # it in the background without blocking the answer.
+        asyncio.create_task(self._warm_stt_with_silence())
+        self._ensure_prepare_greeting_task()
         try:
-            await asyncio.wait_for(task, timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS)
-            logger.info("call %s: pre-answer warmup finished in %.1fs",
+            await asyncio.wait_for(
+                self._greeting_first_sentence_ready.wait(),
+                timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+            )
+            logger.info("call %s: first greeting sentence ready in %.1fs, answering",
                         self.call_id[:8], time.monotonic() - started)
         except asyncio.TimeoutError:
-            stt_task.cancel()
-            logger.warning("call %s: pre-answer warmup timed out after %.1fs; answering anyway",
+            logger.warning("call %s: greeting not ready after %.1fs; answering anyway"
+                           " (greeting continues in background)",
                            self.call_id[:8], self.PREANSWER_WARMUP_TIMEOUT_SECONDS)
-        finally:
-            if stt_task.done():
-                try:
-                    await stt_task
-                except (asyncio.CancelledError, Exception):
-                    pass
 
     def _ensure_prepare_greeting_task(self) -> asyncio.Task:
         task = self._prepare_greeting_task
         if task is None or task.done():
             task = asyncio.create_task(self._prepare_greeting())
+            # Guarantee the pre-answer wait is released even if greeting prep
+            # produced no audio (TTS unavailable, LLM error, empty response):
+            # answer anyway rather than eating the full warmup timeout.
+            task.add_done_callback(
+                lambda _t: self._greeting_first_sentence_ready.set()
+            )
             self._prepare_greeting_task = task
         return task
 
@@ -599,6 +616,9 @@ class CallCore:
                         logger.info("call %s: prepared greeting TTS (%d samples): %s",
                                     self.call_id[:8], len(tts_pcm), sentence[:60])
                         prepared_pcm.append(tts_pcm)
+                        # Unblock the pre-answer wait as soon as the first sentence
+                        # has audio: the answer can go out now and play without gaps.
+                        self._greeting_first_sentence_ready.set()
                 except Exception as e:
                     logger.warning("call %s: greeting TTS warmup failed: %s", self.call_id[:8], e)
 
