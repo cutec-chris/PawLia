@@ -64,6 +64,25 @@ def _cmd(text: str, command: str) -> Optional[str]:
     return None
 
 
+# Text commands recognised by _handle_agent_message. Used to keep auto-thread
+# mode from wrapping a command (e.g. //status) in its own thread.
+_TEXT_COMMANDS = ("status", "private", "reload", "model", "clear", "background", "thread")
+
+
+def _looks_like_command(text: str) -> bool:
+    return any(_cmd(text, c) is not None for c in _TEXT_COMMANDS)
+
+
+def _thread_name_for(text: str, attachments: list) -> str:
+    """Derive a Discord thread name (≤80 chars) from the opening message."""
+    text = (text or "").strip()
+    if text:
+        return text[:80]
+    if attachments:
+        return (attachments[0].filename or "Anhang")[:80]
+    return "💬 Gespräch"
+
+
 async def start_discord(app: "App", cfg: Dict) -> None:
     """Connect to Discord and start handling messages.
 
@@ -290,21 +309,21 @@ async def start_discord(app: "App", cfg: Dict) -> None:
     async def _handle_voice_message(
         message: discord.Message,
         attachment: discord.Attachment,
+        dest_thread: Optional[discord.Thread] = None,
     ) -> None:
         data = await _download_attachment(attachment)
         if not data:
             return
 
-        await bot_typing_indicator(message.channel)
+        dest = dest_thread or message.channel
+        await bot_typing_indicator(dest)
 
         from pawlia.transcription import transcribe
 
-        session_id = _session_id(
-            message.guild.id if message.guild else 0,
-            message.channel.id,
-        )
+        eff_channel_id = dest_thread.id if dest_thread is not None else message.channel.id
+        session_id = _session_id(message.guild.id if message.guild else 0, eff_channel_id)
         session = app.memory.load_session(session_id)
-        thread_id = _resolve_thread_id(message)
+        thread_id = dest_thread.id if dest_thread is not None else _resolve_thread_id(message)
         active_model = app.llm.default_model_name(
             "chat",
             agent_overrides=app.memory.effective_agent_overrides(session, thread_id),
@@ -319,14 +338,19 @@ async def start_discord(app: "App", cfg: Dict) -> None:
             mime = attachment.content_type or "audio/ogg"
             text = await transcribe(data, app.config, mime=mime)
 
+        async def _echo(out: str):
+            if dest_thread is not None:
+                return await _send(dest_thread, out)
+            return await _reply(message, out)
+
         if not text:
-            await _reply(message, "*(Sprachnachricht konnte nicht transkribiert werden)*")
+            await _echo("*(Sprachnachricht konnte nicht transkribiert werden)*")
             return
 
         logger.info("Discord: voice message transcribed: %s", text[:120])
         # Show transcription and route to agent
-        await _reply(message, f":microphone2: *{text}*")
-        await _handle_agent_message(message, f"[Sprachnachricht]: {text}")
+        await _echo(f":microphone2: *{text}*")
+        await _handle_agent_message(message, f"[Sprachnachricht]: {text}", dest_thread=dest_thread)
 
     # ------------------------------------------------------------------
     # Image handling
@@ -335,10 +359,11 @@ async def start_discord(app: "App", cfg: Dict) -> None:
     async def _handle_image_message(
         message: discord.Message,
         images: List[discord.Attachment],
+        dest_thread: Optional[discord.Thread] = None,
     ) -> None:
         data_uris = []
         guild_id = message.guild.id if message.guild else 0
-        channel_id = message.channel.id
+        channel_id = dest_thread.id if dest_thread is not None else message.channel.id
         user_id = _session_id(guild_id, channel_id)
         for att in images[:4]:  # max 4 images per message
             data = await _download_attachment(att)
@@ -357,7 +382,7 @@ async def start_discord(app: "App", cfg: Dict) -> None:
             return
 
         caption = message.content.strip() if message.content else ""
-        await _handle_agent_message(message, caption, images=data_uris)
+        await _handle_agent_message(message, caption, images=data_uris, dest_thread=dest_thread)
 
     # ------------------------------------------------------------------
     # File handling
@@ -366,6 +391,7 @@ async def start_discord(app: "App", cfg: Dict) -> None:
     async def _handle_file_message(
         message: discord.Message,
         attachment: discord.Attachment,
+        dest_thread: Optional[discord.Thread] = None,
     ) -> None:
         data = await _download_attachment(attachment)
         if not data:
@@ -378,7 +404,7 @@ async def start_discord(app: "App", cfg: Dict) -> None:
         # Persist a copy under the user's Downloads/ folder so the user can
         # later ask the bot to re-send the file via the attach_file tool.
         guild_id = message.guild.id if message.guild else 0
-        channel_id = message.channel.id
+        channel_id = dest_thread.id if dest_thread is not None else message.channel.id
         _save_discord_bytes(_session_id(guild_id, channel_id), data, filename, mimetype)
 
         if ext in _TEXT_FILE_EXTENSIONS:
@@ -394,7 +420,8 @@ async def start_discord(app: "App", cfg: Dict) -> None:
             suffix = "\n\n[Hinweis: Dateiinhalt wurde wegen Groesse gekuerzt.]" if truncated else ""
             await _handle_agent_message(
                 message,
-                f"[Datei empfangen]\nName: {filename}\n\nInhalt:\n```\n{text}\n```{suffix}"
+                f"[Datei empfangen]\nName: {filename}\n\nInhalt:\n```\n{text}\n```{suffix}",
+                dest_thread=dest_thread,
             )
             return
 
@@ -414,7 +441,8 @@ async def start_discord(app: "App", cfg: Dict) -> None:
                     if md_text:
                         await _handle_agent_message(
                             message,
-                            f"[Datei empfangen]\nName: {filename}\n\nInhalt:\n```markdown\n{md_text[:30000]}\n```"
+                            f"[Datei empfangen]\nName: {filename}\n\nInhalt:\n```markdown\n{md_text[:30000]}\n```",
+                            dest_thread=dest_thread,
                         )
                         return
                 finally:
@@ -427,7 +455,8 @@ async def start_discord(app: "App", cfg: Dict) -> None:
 
         await _handle_agent_message(
             message,
-            f"[Datei empfangen]\nName: {filename}\nTyp: {attachment.content_type or 'unbekannt'}\nDie Datei wurde nicht inhaltlich gelesen."
+            f"[Datei empfangen]\nName: {filename}\nTyp: {attachment.content_type or 'unbekannt'}\nDie Datei wurde nicht inhaltlich gelesen.",
+            dest_thread=dest_thread,
         )
 
     # ------------------------------------------------------------------
@@ -445,14 +474,28 @@ async def start_discord(app: "App", cfg: Dict) -> None:
         message: discord.Message,
         text: str,
         images: Optional[List[str]] = None,
+        dest_thread: Optional[discord.Thread] = None,
     ) -> None:
         if not text.strip() and not images:
             return
 
         guild_id = message.guild.id if message.guild else 0
-        channel_id = message.channel.id
-        thread_id = _resolve_thread_id(message)
+        # In auto-thread mode the conversation lives in a freshly created thread:
+        # key the session and isolated context by the thread id (matching how
+        # follow-up messages posted inside the thread resolve) and send all
+        # replies into the thread instead of the parent channel.
+        if dest_thread is not None:
+            channel_id = dest_thread.id
+            thread_id = dest_thread.id
+        else:
+            channel_id = message.channel.id
+            thread_id = _resolve_thread_id(message)
         session_id = _session_id(guild_id, channel_id)
+
+        async def say(out: str) -> Optional[discord.Message]:
+            if dest_thread is not None:
+                return await _send(dest_thread, out)
+            return await _reply(message, out)
 
         app.scheduler.touch_activity(session_id)
 
@@ -582,7 +625,7 @@ async def start_discord(app: "App", cfg: Dict) -> None:
             guild_id, channel_id, ctx, text[:80], len(images or []),
         )
 
-        await bot_typing_indicator(message.channel)
+        await bot_typing_indicator(dest_thread or message.channel)
 
         agent = get_agent(guild_id, channel_id, thread_id)
 
@@ -592,7 +635,7 @@ async def start_discord(app: "App", cfg: Dict) -> None:
         initial_query: Optional[str] = None
 
         async def _on_interim(interim_text: str) -> None:
-            await _reply(message, interim_text)
+            await say(interim_text)
 
         async def _on_skill_start(skill_name: str, query: str) -> None:
             nonlocal status_msg, step_count, current_skill, initial_query
@@ -600,7 +643,7 @@ async def start_discord(app: "App", cfg: Dict) -> None:
             initial_query = query
             step_count = 0
             short_q = (query[:60] + "…") if len(query) > 60 else query
-            status_msg = await _reply(message, f"⚙ **{skill_name}**: {short_q}")
+            status_msg = await say(f"⚙ **{skill_name}**: {short_q}")
 
         async def _on_skill_step(step_text: str) -> None:
             nonlocal step_count
@@ -655,15 +698,15 @@ async def start_discord(app: "App", cfg: Dict) -> None:
                     f"Wechseln mit `//model chat <modell>` oder löschen mit `//model chat off`._"
                     + (f"\n_Verfügbar: {avail}_" if avail else "")
                 )
-            await _reply(message, f"Fehler: {e}{hint}")
+            await say(f"Fehler: {e}{hint}")
             return
 
         logger.info("Discord: response in %s/%s%s: %s", guild_id, channel_id, ctx, preview_text(response))
-        await _reply(message, response)
+        await say(response)
         # Drain any attachments queued by direct tools (e.g. attach_file)
         # and ship them as separate Discord messages after the text reply.
         for att in getattr(agent, "pending_attachments", []) or []:
-            await _send_attachment(message.channel, att)
+            await _send_attachment(dest_thread or message.channel, att)
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -692,6 +735,25 @@ async def start_discord(app: "App", cfg: Dict) -> None:
             elif bot.user not in message.mentions and message.guild:
                 return
 
+        # Auto-thread: when always_thread is on, a conversational message in a
+        # plain server text channel starts its own thread (rooted at the user's
+        # message) so each conversation gets an isolated context — mirroring the
+        # Matrix always_thread behaviour. Commands and DMs stay in-channel;
+        # messages already inside a thread are left as-is.
+        dest_thread: Optional[discord.Thread] = None
+        if (
+            always_thread
+            and isinstance(message.channel, discord.TextChannel)
+            and not _looks_like_command(message.content.strip())
+        ):
+            try:
+                dest_thread = await message.create_thread(
+                    name=_thread_name_for(message.content, message.attachments)
+                )
+            except (discord.HTTPException, discord.Forbidden) as e:
+                logger.warning("Discord: auto-thread creation failed, replying in channel: %s", e)
+                dest_thread = None
+
         # Handle attachments
         if message.attachments:
             for att in message.attachments:
@@ -700,7 +762,7 @@ async def start_discord(app: "App", cfg: Dict) -> None:
                 is_voice = getattr(att, "is_voice_message", False)
 
                 if is_voice or (ext in _AUDIO_FILE_EXTENSIONS and "audio" in content_type):
-                    await _handle_voice_message(message, att)
+                    await _handle_voice_message(message, att, dest_thread=dest_thread)
                     return
                 elif "image" in content_type or ext in _IMAGE_FILE_EXTENSIONS:
                     image_atts = [
@@ -708,14 +770,14 @@ async def start_discord(app: "App", cfg: Dict) -> None:
                         if ("image" in (a.content_type or "")) or _file_ext(a.filename) in _IMAGE_FILE_EXTENSIONS
                     ]
                     if image_atts:
-                        await _handle_image_message(message, image_atts)
+                        await _handle_image_message(message, image_atts, dest_thread=dest_thread)
                     non_image_atts = [a for a in message.attachments if a not in image_atts]
                     for a in non_image_atts:
                         if not ("audio" in (a.content_type or "") or _file_ext(a.filename) in _AUDIO_FILE_EXTENSIONS):
-                            await _handle_file_message(message, a)
+                            await _handle_file_message(message, a, dest_thread=dest_thread)
                     return
                 else:
-                    await _handle_file_message(message, att)
+                    await _handle_file_message(message, att, dest_thread=dest_thread)
                     return
 
         # Text message
@@ -723,7 +785,7 @@ async def start_discord(app: "App", cfg: Dict) -> None:
         if not text:
             return
 
-        await _handle_agent_message(message, text)
+        await _handle_agent_message(message, text, dest_thread=dest_thread)
 
     @bot.event
     async def on_voice_state_update(

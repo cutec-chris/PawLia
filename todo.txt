@@ -8,21 +8,20 @@
       test_probe_disabled_falls_back_to_heuristic. Betreffen context_probe;
       auf sauberem develop-Stand ebenfalls rot. Prüfen/fixen.
 
-- [ ] Discord: `always_thread` ist tote Config — wird in discord.py:79 gelesen,
-      aber nie verwendet. In config.sample.yaml + Modul-Docstring als
-      "default: true" dokumentiert. Entweder Auto-Threading implementieren
-      (wie Matrix always_thread) oder Option aus Doku/Sample entfernen.
-
-- [ ] pawlia/tools/files_tools.py: ReadFile/ListFiles/GrepFiles vollständig
-      implementiert, aber nirgends registriert (weder ToolRegistry noch
-      direct_tools). Entscheiden: anbinden oder löschen.
-
-- [ ] config.openai-eval.yaml steht in .gitignore, ist aber getrackt
-      (gitignore wirkt nicht auf bereits getrackte Dateien).
-      Falls unbeabsichtigt: git rm --cached config.openai-eval.yaml
+- [ ] config.openai-eval.yaml: enthält API-Keys. Auf develop bereits UNTRACKED
+      (Commit 0115805) + gitignored — also nicht mehr im HEAD. ABER: die Keys
+      stecken noch in der History (2aefc1e, 4a89b3e, eb330b9, 6e45752), und die
+      ist auf origin. "Vollständig raus" = History-Rewrite (git filter-repo) +
+      Force-Push + Key-Rotation. Destruktiv → wartet auf explizite Freigabe.
 
 ## DONE
 
+- [x] 2026-06-13: Discord `always_thread` implementiert — konversationelle
+      Nachrichten in Server-Textkanälen starten automatisch einen Thread (wie
+      Matrix); Befehle/DMs bleiben im Kanal. Text-, Bild-, Voice-, Datei-Pfad
+      thread-aware. Doku in docs/interfaces.md ergänzt.
+- [x] 2026-06-13: pawlia/tools/files_tools.py gelöscht (toter Code, nie
+      registriert) + zugehörige Tests (test_files_tools.py, 2 e2e-Skripte).
 - [x] 2026-06-13: memory-Skill `search` durchsucht jetzt die VOLLE Log-Historie
       (search_logs in memory.py), nicht nur 2 Tage → auch alte, nicht gedreamte
       Gespräche recallbar; bei null Treffern kein Dump. Bewusster Aufruf, keine

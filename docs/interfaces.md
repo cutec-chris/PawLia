@@ -185,6 +185,8 @@ All incoming attachments are additionally persisted to the user's `workspace/Dow
 
 Discord channel threads get their own isolated context window, same as Telegram forum topics and Matrix threads. Use `//thread <msg>` in a server text channel to start a new thread; model and agent overrides apply per-thread independently.
 
+With `always_thread: true` (the default), every conversational message posted in a plain server text channel automatically opens its own thread rooted at that message, and the bot replies inside it — mirroring the Matrix always-thread behaviour. Commands (`//status`, `//model`, …) and DMs stay in-channel, and messages already inside a thread are left where they are. Set `always_thread: false` to make the bot reply directly in the channel instead.
+
 ### Commands
 
 Text commands accept both `//` and `/` prefixes:
