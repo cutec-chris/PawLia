@@ -66,8 +66,8 @@ python <scripts_dir>/memory.py status
 
 ## Important
 
-- The `index` command is also run automatically on every `search` to pick up new logs.
-- Every `search` also returns the most recent threads read straight from the daily logs (no index needed), so recent conversations — including today's and a call/file from minutes ago — are always recallable even before the background indexer has processed them.
+- Every `search` keyword-scans the **full** daily-log history straight from the chat logs (no index needed), so any past conversation is recallable — today's, a call/file from minutes ago, and threads from weeks back that were never distilled into the wiki. Only threads that actually share keywords with the question are returned; if nothing matches you get a clear "nothing found" instead of unrelated context.
+- On top of that, `search` queries the distilled long-term wiki for consolidated knowledge. Background indexing/dreaming runs automatically on idle — you do not need to `index` before a `search`.
 - Search results contain relevant excerpts from past conversations — use them to answer the user's question.
 - The `dream` command processes unprocessed chat logs into a structured wiki with cross-references (Obsidian wikilinks by default, configurable via `wiki_link_format`).
 - The Dream Wiki runs automatically when the user has been idle for 30 minutes (configurable via `dream_idle_minutes`).

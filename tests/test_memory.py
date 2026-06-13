@@ -864,6 +864,66 @@ class TestRecentThreads:
             assert "huge dump" not in t["body"]
             assert "status" in t["body"]
 
+
+class TestSearchLogs:
+    def _write_log(self, mm, user_id, date_str, sections):
+        mm.load_session(user_id)
+        text = ""
+        for tid, title, body in sections:
+            text = mm._upsert_thread_section(text, tid, body, title)
+        with open(mm._daily_path(user_id, date_str), "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_finds_old_thread_beyond_recent_window(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            # An old log far outside recent_threads' 2-day window.
+            self._write_log(mm, "u", "2026-05-20", [
+                ("$old", "Segelboot", "[09:00:00] User: ich habe ein Segelboot gekauft\nAssistant: schön"),
+            ])
+            for day in ("2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13"):
+                self._write_log(mm, "u", day, [
+                    (f"${day}", "Smalltalk", "[09:00:00] User: hallo\nAssistant: hi"),
+                ])
+            # recent_threads (2-day window) can't reach it…
+            assert mm.recent_threads("u", query="segelboot") == []
+            # …but the full-history log search does.
+            hits = mm.search_logs("u", "segelboot")
+            assert [t["thread_id"] for t in hits] == ["$old"]
+            assert "Segelboot" in hits[0]["body"]
+
+    def test_no_match_returns_empty_not_recency_dump(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            self._write_log(mm, "u", "2026-06-12", [
+                ("$a", "Wetter", "[09:00:00] User: wie wird das Wetter\nAssistant: sonnig"),
+            ])
+            assert mm.search_logs("u", "börsenkurs quantenphysik") == []
+            # Empty / stopword-only query must not dump everything either.
+            assert mm.search_logs("u", "und der die das") == []
+
+    def test_ranks_by_token_overlap_then_recency(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            self._write_log(mm, "u", "2026-06-01", [
+                ("$strong", "Reise", "[09:00:00] User: Reise nach Japan und Korea geplant\nAssistant: ok"),
+            ])
+            self._write_log(mm, "u", "2026-06-12", [
+                ("$weak", "Reise", "[09:00:00] User: kurze Reise\nAssistant: ok"),
+            ])
+            # $strong matches more distinct query tokens despite being older.
+            hits = mm.search_logs("u", "Reise Japan Korea")
+            assert hits[0]["thread_id"] == "$strong"
+
+    def test_snippet_centred_on_match_in_long_body(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            filler = "\n".join(f"[09:0{i}:00] User: smalltalk {i}\nAssistant: ok" for i in range(9))
+            body = filler + "\n[10:00:00] User: das Passwort lautet Zebra42\nAssistant: notiert"
+            self._write_log(mm, "u", "2026-05-01", [("$t", "Notiz", body)])
+            hits = mm.search_logs("u", "passwort", max_chars_per_thread=120)
+            assert "Zebra42" in hits[0]["body"]
+
     def test_last_conversation_pointer(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             mm = MemoryManager(tmpdir)

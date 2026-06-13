@@ -1,0 +1,39 @@
+# PawLia TODO / Findings
+# Laufende Liste — bei neuen Funden ergänzen. Erledigtes nach unten unter DONE verschieben.
+
+## Offen
+
+- [ ] tests/test_llm_factory.py: zwei Tests rot (vorbestehend, NICHT von mir) —
+      test_context_size_uses_probe_over_heuristic,
+      test_probe_disabled_falls_back_to_heuristic. Betreffen context_probe;
+      auf sauberem develop-Stand ebenfalls rot. Prüfen/fixen.
+
+- [ ] Discord: `always_thread` ist tote Config — wird in discord.py:79 gelesen,
+      aber nie verwendet. In config.sample.yaml + Modul-Docstring als
+      "default: true" dokumentiert. Entweder Auto-Threading implementieren
+      (wie Matrix always_thread) oder Option aus Doku/Sample entfernen.
+
+- [ ] pawlia/tools/files_tools.py: ReadFile/ListFiles/GrepFiles vollständig
+      implementiert, aber nirgends registriert (weder ToolRegistry noch
+      direct_tools). Entscheiden: anbinden oder löschen.
+
+- [ ] config.openai-eval.yaml steht in .gitignore, ist aber getrackt
+      (gitignore wirkt nicht auf bereits getrackte Dateien).
+      Falls unbeabsichtigt: git rm --cached config.openai-eval.yaml
+
+## DONE
+
+- [x] 2026-06-13: memory-Skill `search` durchsucht jetzt die VOLLE Log-Historie
+      (search_logs in memory.py), nicht nur 2 Tage → auch alte, nicht gedreamte
+      Gespräche recallbar; bei null Treffern kein Dump. Bewusster Aufruf, keine
+      Auto-Injektion (Wunsch des Users).
+- [x] 2026-06-13: Sprach-Bug gefixt — DreamWiki-Backend (Default) gab
+      "No relevant information found." englisch zurück, wurde vom Skill nicht als
+      leer erkannt und als "## Langzeit-Wissen (Wiki)" durchgereicht. Jetzt
+      deutsch + Skill filtert Sentinels sprachunabhängig (_is_empty_rag).
+
+- [x] 2026-06-12: agents.md auf aktuellen Stand gebracht (Sandbox, Attachments,
+      Discord/VoIP, Vision-/Context-Probe, Credentials, Skill-Config) — 300e8e0
+- [x] 2026-06-12: Discord-Abschnitt in docs/interfaces.md ergänzt — 300e8e0
+- [x] 2026-06-12: CHANGELOG [Unreleased] nachgetragen — 300e8e0
+- [x] 2026-06-12: .gitignore bereinigt (Duplikat, tote Patterns) — 300e8e0

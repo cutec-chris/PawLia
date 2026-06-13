@@ -524,6 +524,79 @@ class MemoryManager:
             if len(tok) >= 3 and tok not in cls._RECALL_STOPWORDS
         }
 
+    def _collect_log_threads(
+        self,
+        user_id: str,
+        *,
+        max_days: Optional[int] = None,
+        exclude_thread_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Parse thread sections out of the daily logs into raw dicts.
+
+        With ``max_days=None`` the full log history is scanned; otherwise only
+        the most recent ``max_days`` log files. Each dict is
+        ``{"date", "thread_id", "title", "body", "_sort"}`` with TOOL_CALL
+        blobs stripped from ``body``. No scoring or trimming is applied — that
+        is left to the callers (:func:`recent_threads`, :func:`search_logs`).
+        """
+        paths = self._daily_log_paths(user_id)
+        if not paths:
+            return []
+        if max_days is not None:
+            paths = paths[-max_days:]
+        pattern = self._new_thread_section_pattern()
+        collected: List[Dict[str, Any]] = []
+        for path in reversed(paths):
+            date_str = os.path.basename(path)[:-3]
+            text = self._read(path)
+            if not text:
+                continue
+            for m in pattern.finditer(text):
+                thread_id = m.group(2).strip()
+                if exclude_thread_id and thread_id == exclude_thread_id:
+                    continue
+                body = m.group(3)
+                stamps = re.findall(r"\[(\d{2}:\d{2}:\d{2})\]", body)
+                # Drop verbose TOOL_CALL blobs from the recall view (the stored
+                # log keeps them) so the char budget goes to conversation text.
+                body = re.sub(r"\n?<!-- TOOL_CALL: .*? -->", "", body, flags=re.DOTALL).strip()
+                title = m.group(1).lstrip("#").strip() or "Thread"
+                collected.append({
+                    "date": date_str,
+                    "thread_id": thread_id,
+                    "title": title,
+                    "body": body,
+                    "_sort": (date_str, stamps[-1] if stamps else "00:00:00"),
+                })
+        return collected
+
+    @classmethod
+    def _snippet_around_match(cls, body: str, q_tokens: set, max_chars: int) -> str:
+        """Trim *body* to ``max_chars`` around the first query-token match.
+
+        Unlike the tail-trim used for recency recall, a keyword hit may sit
+        anywhere in an old thread, so the window is centred on the match to
+        keep the relevant exchange instead of just the last lines.
+        """
+        if not max_chars or len(body) <= max_chars:
+            return body
+        low = body.lower()
+        pos = -1
+        for tok in q_tokens:
+            i = low.find(tok)
+            if i != -1 and (pos == -1 or i < pos):
+                pos = i
+        if pos == -1:
+            return body[:max_chars].rstrip() + "…"
+        start = max(0, pos - max_chars // 2)
+        end = min(len(body), start + max_chars)
+        snippet = body[start:end].strip()
+        if start > 0:
+            snippet = "…" + snippet
+        if end < len(body):
+            snippet = snippet + "…"
+        return snippet
+
     def recent_threads(
         self,
         user_id: str,
@@ -546,34 +619,13 @@ class MemoryManager:
         ordered by (log date, last timestamp in the body).  Each entry is
         ``{"date", "thread_id", "title", "body"}``; ``body`` is tail-trimmed
         to ``max_chars_per_thread`` so the most recent exchanges survive.
+
+        Scoped to the last ``max_days`` logs — for a full-history keyword
+        recall use :func:`search_logs`.
         """
-        paths = self._daily_log_paths(user_id)
-        if not paths:
-            return []
-        pattern = self._new_thread_section_pattern()
-        collected: List[Dict[str, Any]] = []
-        for path in reversed(paths[-max_days:]):
-            date_str = os.path.basename(path)[:-3]
-            text = self._read(path)
-            if not text:
-                continue
-            for m in pattern.finditer(text):
-                thread_id = m.group(2).strip()
-                if exclude_thread_id and thread_id == exclude_thread_id:
-                    continue
-                body = m.group(3)
-                stamps = re.findall(r"\[(\d{2}:\d{2}:\d{2})\]", body)
-                # Drop verbose TOOL_CALL blobs from the recall view (the stored
-                # log keeps them) so the char budget goes to conversation text.
-                body = re.sub(r"\n?<!-- TOOL_CALL: .*? -->", "", body, flags=re.DOTALL).strip()
-                title = m.group(1).lstrip("#").strip() or "Thread"
-                collected.append({
-                    "date": date_str,
-                    "thread_id": thread_id,
-                    "title": title,
-                    "body": body,
-                    "_sort": (date_str, stamps[-1] if stamps else "00:00:00"),
-                })
+        collected = self._collect_log_threads(
+            user_id, max_days=max_days, exclude_thread_id=exclude_thread_id,
+        )
 
         q_tokens = self._lexical_tokens(query) if query else set()
         if q_tokens:
@@ -598,6 +650,47 @@ class MemoryManager:
                 "thread_id": t["thread_id"],
                 "title": t["title"],
                 "body": body,
+            })
+        return result
+
+    def search_logs(
+        self,
+        user_id: str,
+        query: str,
+        *,
+        limit: int = 8,
+        max_chars_per_thread: int = 900,
+    ) -> List[Dict[str, Any]]:
+        """Keyword-search the **full** daily-log history (every day on disk).
+
+        The deliberate recall path behind the ``memory`` skill: a thread from
+        weeks ago that was never distilled into the Dream Wiki is still findable
+        here, because the raw logs are searched directly — no RAG index, no
+        ``max_days`` cap.
+
+        Only threads sharing at least one content keyword with *query* are
+        returned, ranked by distinct-token overlap then recency. Returns ``[]``
+        when nothing matches (never a recency dump), so the model is not fed
+        unrelated context just because it asked. Each entry is
+        ``{"date", "thread_id", "title", "body"}`` with the body trimmed around
+        the matching region.
+        """
+        q_tokens = self._lexical_tokens(query)
+        if not q_tokens:
+            return []
+        collected = self._collect_log_threads(user_id, max_days=None)
+        for t in collected:
+            t["_score"] = len(q_tokens & self._lexical_tokens(t["title"] + " " + t["body"]))
+        collected = [t for t in collected if t["_score"] > 0]
+        collected.sort(key=lambda t: (t["_score"], t["_sort"]), reverse=True)
+
+        result: List[Dict[str, Any]] = []
+        for t in collected[:limit]:
+            result.append({
+                "date": t["date"],
+                "thread_id": t["thread_id"],
+                "title": t["title"],
+                "body": self._snippet_around_match(t["body"], q_tokens, max_chars_per_thread),
             })
         return result
 

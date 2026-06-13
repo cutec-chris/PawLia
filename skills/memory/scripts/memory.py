@@ -86,49 +86,70 @@ async def _get_backend(user_id: str):
 # Commands
 # ---------------------------------------------------------------------------
 
-def _recent_threads_block(user_id: str, question: str, limit: int = 5, max_days: int = 2) -> str:
-    """Search the recent (not-yet-indexed) threads straight from the daily logs.
+def _log_search_block(user_id: str, question: str, limit: int = 8) -> str:
+    """Keyword-search the FULL daily-log history straight from the chat logs.
 
-    Covers the gap the RAG index lags behind on — threads from today and the
-    last day are matched against *question* by keyword, so a call or file from
-    minutes ago is findable before the background indexer has processed it.
+    Covers everything the Dream Wiki hasn't distilled yet — not just the last
+    couple of days but every log on disk — so a thread from weeks ago is
+    recallable even if the background indexer never turned it into a wiki page.
+    Goes first in the result so it survives any downstream output truncation.
+    Returns "" when nothing matches (no recency dump).
     """
     try:
         from pawlia.memory import MemoryManager
 
-        threads = MemoryManager(str(_SESSION_DIR)).recent_threads(
-            user_id, limit=limit, max_days=max_days, query=question,
+        threads = MemoryManager(str(_SESSION_DIR)).search_logs(
+            user_id, question, limit=limit,
         )
     except Exception:
         return ""
     if not threads:
         return ""
-    lines = ["## Treffer in den jüngsten Gesprächen (noch nicht indiziert, direkt aus den Chat-Logs)"]
+    lines = ["## Treffer in den Chat-Logs (Volltextsuche über alle Tage, auch noch nicht ins Wiki übernommen)"]
     for t in threads:
         lines.append(f"\n### {t['date']} — {t['title']}")
         lines.append(t["body"])
     return "\n".join(lines)
 
 
+# "Nothing found" sentinels returned by the various RAG backends. Treated as
+# empty so they never leak into the answer as if they were real knowledge
+# (e.g. the model presenting "No relevant information found." as a fact).
+# Both languages are listed because backends are not consistent.
+_EMPTY_RAG_MARKERS = (
+    "keine relevanten",
+    "noch keine dokumente",
+    "no relevant information",
+    "no documents indexed",
+)
+
+
+def _is_empty_rag(text: str) -> bool:
+    stripped = (text or "").strip()
+    return not stripped or stripped.lower().startswith(_EMPTY_RAG_MARKERS)
+
+
 async def cmd_search(user_id: str, question: str):
-    # Search the recent, not-yet-indexed threads too. These go first so they
-    # survive any downstream output truncation.
-    recent = _recent_threads_block(user_id, question)
+    # Search the raw chat logs (full history) too. This goes first so it
+    # survives any downstream output truncation.
+    logs = _log_search_block(user_id, question)
 
     backend = await _get_backend(user_id)
-    if backend is None:
-        print(json.dumps({
-            "result": recent or "Noch kein Langzeitgedächtnis vorhanden. Chatlogs werden automatisch im Hintergrund indiziert.",
-        }, ensure_ascii=False))
-        return
+    rag_result = await backend.query(question) if backend is not None else ""
 
-    rag_result = await backend.query(question)
     parts = []
-    if recent:
-        parts.append(recent)
-    if rag_result and rag_result.strip():
+    if logs:
+        parts.append(logs)
+    if not _is_empty_rag(rag_result):
         parts.append("## Langzeit-Wissen (Wiki)\n" + rag_result.strip())
-    print(json.dumps({"result": "\n\n".join(parts)}, ensure_ascii=False))
+
+    if parts:
+        result = "\n\n".join(parts)
+    elif backend is None:
+        result = "Noch kein Langzeitgedächtnis vorhanden. Chatlogs werden automatisch im Hintergrund indiziert."
+    else:
+        result = "Keine passenden früheren Gespräche gefunden."
+    print(json.dumps({"result": result}, ensure_ascii=False))
 
 
 async def cmd_index(user_id: str):

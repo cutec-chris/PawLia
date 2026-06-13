@@ -759,7 +759,7 @@ class DreamWikiBackend:
 
     async def query(self, question: str) -> str:
         if not os.path.isdir(self._topics_dir):
-            return "No documents indexed yet."
+            return "Noch keine Dokumente indiziert."
 
         from pawlia.workspace_search import WorkspaceSearch
 
@@ -775,7 +775,7 @@ class DreamWikiBackend:
         ).search(question)
 
         if not hits:
-            return "No relevant information found."
+            return "Keine relevanten Informationen gefunden."
 
         results: list[str] = []
         total = 0
@@ -787,5 +787,5 @@ class DreamWikiBackend:
             total += len(part)
 
         if not results:
-            return "No relevant information found."
+            return "Keine relevanten Informationen gefunden."
         return "\n\n---\n\n".join(results)
