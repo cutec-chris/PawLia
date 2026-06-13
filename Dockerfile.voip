@@ -15,6 +15,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY constraints.txt requirements.txt requirements-e2e.txt requirements-voip.txt ./
 
+# Ensure _libolm.abi3.so links against libstdc++ explicitly.
+# CFFI uses gcc (not g++), so without this flag libolm.so.3 C++ symbols are
+# undefined on platforms where libolm.so.3 doesn't declare libstdc++ as NEEDED
+# (reproducible on aarch64 Debian bookworm).
+ENV LDFLAGS="-Wl,--no-as-needed -lstdc++ -Wl,--as-needed"
+
 RUN pip install --no-cache-dir \
         -c constraints.txt \
         -r requirements.txt \
@@ -54,6 +60,12 @@ ENV PIP_CONSTRAINT=/app/constraints.txt
 COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 # piper-Console-Script liegt in /usr/local/bin, nicht in site-packages
 COPY --from=builder /usr/local/bin/piper /usr/local/bin/piper
+
+# Runtime safety net: preload libstdc++ before any C extension is imported so
+# that libolm.so.3 C++ symbols resolve even if _libolm.abi3.so's NEEDED list
+# doesn't explicitly include libstdc++.so.6 (arch-dependent linker behaviour).
+RUN printf 'import ctypes\ntry:\n    ctypes.CDLL("libstdc++.so.6", ctypes.RTLD_GLOBAL)\nexcept Exception:\n    pass\n' \
+    >> /usr/local/lib/python3.14/sitecustomize.py
 
 # Application code
 COPY pawlia/ pawlia/
