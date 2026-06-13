@@ -3,11 +3,6 @@
 
 ## Offen
 
-- [ ] tests/test_llm_factory.py: zwei Tests rot (vorbestehend, NICHT von mir) —
-      test_context_size_uses_probe_over_heuristic,
-      test_probe_disabled_falls_back_to_heuristic. Betreffen context_probe;
-      auf sauberem develop-Stand ebenfalls rot. Prüfen/fixen.
-
 - [ ] NACHARBEIT zum History-Rewrite (config.openai-eval.yaml):
       1. GROQ-KEY ROTIEREN (gsk_…) — Pflicht, war öffentlich; Rewrite un-leakt
          nicht, was schon geklont/gepullt wurde.
@@ -22,6 +17,10 @@
 
 ## DONE
 
+- [x] 2026-06-13: test_llm_factory: zwei Tests gefixt — nutzten `glm-5-turbo` als
+      "unbekanntes Modell" (erwartet Heuristik-Default 8192), aber glm ist seit
+      37dba14 eine 128K-Familie. Auf heuristik-unbekannten Namen (mystery-model)
+      umgestellt. Suite jetzt komplett grün (828 passed).
 - [x] 2026-06-13: config.openai-eval.yaml + Groq-Key per git-filter-repo aus der
       KOMPLETTEN History getilgt; develop/main/feature-discord-interface/
       fix-duplicate-code + Tag v0.1.0 rewritten und force-gepusht. Lokal verifiziert

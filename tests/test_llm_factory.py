@@ -710,15 +710,17 @@ def test_probe_swallows_network_errors(monkeypatch: pytest.MonkeyPatch):
 def test_context_size_uses_probe_over_heuristic(monkeypatch: pytest.MonkeyPatch):
     config = _base_config()
     config["context-probe"] = {"enabled": True}
-    config["models"]["glm"] = {"model": "glm-5-turbo", "provider": "test"}
+    # A model matched by no family/size rule, so the heuristic floor is 8192
+    # (don't use a real family like glm/qwen — those carry their own ctx).
+    config["models"]["mystery"] = {"model": "mystery-model", "provider": "test"}
 
-    # Heuristic would return 8192 for an unknown model; the probe wins.
-    assert estimate_context_size("glm-5-turbo") == 8192
+    # Heuristic returns 8192 for this unknown model; the probe wins.
+    assert estimate_context_size("mystery-model") == 8192
     monkeypatch.setattr(
         "pawlia.llm.probe_context_window", lambda cfg, mid: 131072
     )
     factory = LLMFactory(config)
-    assert factory.context_size_for_model("glm") == 131072
+    assert factory.context_size_for_model("mystery") == 131072
 
 
 def test_explicit_context_size_beats_probe(monkeypatch: pytest.MonkeyPatch):
@@ -754,11 +756,12 @@ def test_probe_result_is_cached(monkeypatch: pytest.MonkeyPatch):
 
 def test_probe_disabled_falls_back_to_heuristic(monkeypatch: pytest.MonkeyPatch):
     config = _base_config()  # probe disabled by default in _base_config
-    config["models"]["glm"] = {"model": "glm-5-turbo", "provider": "test"}
+    # Unknown to every family/size rule → heuristic floor of 8192.
+    config["models"]["mystery"] = {"model": "mystery-model", "provider": "test"}
 
     def fail(cfg, mid):
         raise AssertionError("probe must not run when disabled")
 
     monkeypatch.setattr("pawlia.llm.probe_context_window", fail)
     factory = LLMFactory(config)
-    assert factory.context_size_for_model("glm") == 8192
+    assert factory.context_size_for_model("mystery") == 8192
