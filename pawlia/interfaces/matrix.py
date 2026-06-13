@@ -51,6 +51,7 @@ from nio import (
     RoomMessageImage,
     RoomMessageText,
     SyncResponse,
+    UnknownEvent,
 )
 
 if TYPE_CHECKING:
@@ -1090,6 +1091,20 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             "Install with: pip install aiortc"
         )
 
+    # Element X / MatrixRTC calls (LiveKit SFU) — parallel to the classic path.
+    from pawlia.interfaces.matrixrtc_call import MatrixRTCManager
+
+    rtc_manager = MatrixRTCManager(
+        client=client,
+        app=app,
+        cfg=cfg,
+        send_text_cb=_send_text,
+        send_thread_reply_cb=_send_thread_reply,
+        get_agent_cb=get_agent,
+    )
+    if rtc_manager.available():
+        logger.info("Matrix: Element X (MatrixRTC/LiveKit) calls enabled")
+
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
@@ -1332,6 +1347,11 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
             return
         await call_manager.on_hangup(room, event)
 
+    async def on_unknown_event(room: MatrixRoom, event: UnknownEvent) -> None:
+        # MatrixRTC (Element X) membership state events arrive as UnknownEvent;
+        # the manager filters by type and ignores everything else.
+        await rtc_manager.on_member_event(room, event)
+
     # ------------------------------------------------------------------
     # Auto-join on invite (with pairing)
     # ------------------------------------------------------------------
@@ -1479,6 +1499,7 @@ async def start_matrix(app: "App", cfg: Dict) -> None:
         client.add_event_callback(on_call_invite, CallInviteEvent)
         client.add_event_callback(on_call_candidates, CallCandidatesEvent)
         client.add_event_callback(on_call_hangup, CallHangupEvent)
+        client.add_event_callback(on_unknown_event, UnknownEvent)
         client.add_event_callback(on_invite, InviteMemberEvent)
         client.add_event_callback(on_megolm, MegolmEvent)
 

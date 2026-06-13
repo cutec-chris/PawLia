@@ -114,6 +114,10 @@ interfaces:
   #   #   - "@you:matrix.org"
   #   # stun_servers:                        # STUN for VoIP (optional)
   #   #   - stun:stun.l.google.com:19302
+  #   # matrixrtc:                           # Element X / MatrixRTC calls (LiveKit SFU)
+  #   #   enabled: true                      # join Element X calls (default: false)
+  #   #   focus_url: https://rtc.example.org # optional override; else from .well-known rtc_foci
+  #   #   e2ee: true                         # end-to-end encrypt media (Phase 2)
 
   # discord:
   #   token: YOUR_BOT_TOKEN                # Discord bot token from Developer Portal
