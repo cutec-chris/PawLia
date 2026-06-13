@@ -36,6 +36,8 @@ RUN apk add --no-cache \
         ffmpeg \
         flac \
         wget \
+        py3-numpy \
+        py3-onnxruntime \
         openssl \
         openssh-client \
         git \
@@ -48,13 +50,12 @@ RUN apk add --no-cache \
     && apk add --no-cache --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing \
         piper-tts
 
-# Node.js v20 aus Alpine 3.20 (Akamai blockt v22+ auf musl).
-RUN apk add --no-cache \
-        --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/main \
-        nodejs=20.15.1-r0 \
-    && apk add --no-cache \
-        --repository=https://dl-cdn.alpinelinux.org/alpine/v3.20/community \
-        npm=10.9.1-r0
+# Node.js/npm aus edge. KEIN v20-Pinning aus Alpine 3.20: dessen nodejs
+# braucht icu-libs-74, was mit dem icu-libs-78 von py3-onnxruntime (via re2)
+# kollidiert und Piper-TTS kaputtmacht. edge-nodejs nutzt icu-78 → konfliktfrei.
+# (Das alte v20-Pinning kam nur vom Tarball-Download-Workaround, nicht von
+#  einer echten Versionsanforderung — über apk entfällt das.)
+RUN apk add --no-cache nodejs npm
 
 WORKDIR /app
 COPY constraints.txt constraints.txt

@@ -10,5 +10,7 @@ webrtcvad-wheels>=2.0.14
 
 # TTS providers
 edge-tts>=6.1        # Microsoft Edge TTS (needs internet, no local model)
-# piper-tts comes from Alpine package (has compiled espeakbridge + onnxruntime)
+# piper-tts comes from the Alpine package (compiled espeakbridge). Its runtime
+# onnxruntime dep is NOT bundled — it must be installed as py3-onnxruntime in
+# Dockerfile.voip, otherwise piper aborts with ModuleNotFoundError: onnxruntime.
 pathvalidate>=3.3,<4  # missing Python dep in Alpine's piper-tts package
