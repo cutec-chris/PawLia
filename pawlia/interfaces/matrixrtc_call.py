@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
@@ -320,6 +319,8 @@ class LiveKitTransport(CallTransport):
         track = rtc.LocalAudioTrack.create_audio_track("pawlia-voice", self._source)
         options = rtc.TrackPublishOptions()
         options.source = rtc.TrackSource.SOURCE_MICROPHONE
+        options.dtx = False  # keep sending frames during silence; avoids comfort-noise artefacts
+        options.red = True   # redundant audio encoding mitigates packet loss
         await self._room.local_participant.publish_track(track, options)
 
         self._publish_task = asyncio.create_task(self._publish_loop())
@@ -330,10 +331,12 @@ class LiveKitTransport(CallTransport):
         return True
 
     async def _publish_loop(self) -> None:
-        """Pace 20 ms TTS/hold frames out to LiveKit in real time."""
+        """Push 20 ms TTS/hold frames into the LiveKit AudioSource.
+
+        capture_frame() back-pressures when the internal buffer is full, so it
+        acts as its own real-time pacer — no explicit sleep needed.
+        """
         samples_per_frame = TTSFrameBuffer.SAMPLES_PER_FRAME  # 960
-        period = self.FRAME_MS / 1000.0
-        next_t = time.monotonic()
         try:
             while not self._closed:
                 frame_int16 = self._buf.next_frame_960()  # int16 mono 48 kHz
@@ -347,12 +350,7 @@ class LiveKitTransport(CallTransport):
                     await self._source.capture_frame(frame)
                 except Exception as e:
                     logger.debug("call %s: capture_frame failed: %s", self._call_id[:8], e)
-                next_t += period
-                delay = next_t - time.monotonic()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                else:
-                    next_t = time.monotonic()  # fell behind; resync
+                    await asyncio.sleep(0.02)  # fallback pacing on error
         except asyncio.CancelledError:
             raise
         except Exception as e:  # pragma: no cover
