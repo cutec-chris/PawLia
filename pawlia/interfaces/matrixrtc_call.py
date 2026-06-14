@@ -357,11 +357,17 @@ class LiveKitTransport(CallTransport):
             logger.warning("call %s: publish loop ended: %s", self._call_id[:8], e)
 
     async def _read_remote_audio(self, track) -> None:
-        """Forward a remote participant's audio frames to the core pipeline."""
+        """Forward a remote participant's audio frames to the core pipeline.
+
+        AudioStream resamples + downmixes internally (proper stateful resampler),
+        so we ask it for 48 kHz mono 20 ms frames and skip our own conversion —
+        per-frame np.interp would inject a discontinuity at every frame boundary.
+        """
         if self.on_incoming_pcm is None:
             return
         try:
-            stream = rtc.AudioStream(track)
+            stream = rtc.AudioStream(
+                track, sample_rate=SAMPLE_RATE, num_channels=1, frame_size_ms=self.FRAME_MS)
             async for event in stream:
                 frame = getattr(event, "frame", event)
                 samples = np.frombuffer(frame.data, dtype=np.int16)
