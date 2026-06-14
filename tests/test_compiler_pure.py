@@ -122,3 +122,36 @@ def test_lint_skips_script_check_when_no_scripts_declared():
     issues = _lint_compiled_workflow(
         _compiled(command="echo hello"), today="2026-06-04", scripts=[])
     assert issues == []
+
+
+def test_lint_flags_invented_script_path_placeholder():
+    # The compiler must not invoke a script via a made-up dir placeholder
+    # (e.g. {skill_dir} from a SKILL_DIR="<scripts_dir>" shell var); only
+    # {scripts_dir}/{skills_root} are resolved at runtime.
+    issues = _lint_compiled_workflow(
+        _compiled(command="node {skill_dir}/nav.py --go"),
+        today="2026-06-04", scripts=["nav.py"])
+    assert any("unresolved path placeholder {skill_dir}" in i for i in issues)
+    assert any("{scripts_dir}/nav.py" in i for i in issues)
+
+
+def test_lint_accepts_scripts_dir_path_placeholder():
+    issues = _lint_compiled_workflow(
+        _compiled(command="node {scripts_dir}/nav.py --go"),
+        today="2026-06-04", scripts=["nav.py"])
+    assert issues == []
+
+
+def test_lint_accepts_skills_root_path_placeholder():
+    issues = _lint_compiled_workflow(
+        _compiled(command="node {skills_root}/nav.py --go"),
+        today="2026-06-04", scripts=["nav.py"])
+    assert issues == []
+
+
+def test_lint_accepts_bare_script_reference():
+    # A script run from the working directory (no path prefix) is fine.
+    issues = _lint_compiled_workflow(
+        _compiled(command="node nav.py --go"),
+        today="2026-06-04", scripts=["nav.py"])
+    assert issues == []

@@ -31,6 +31,12 @@ _SKIP_COMPILE = {"skill-creator"}
 
 _ANGLE_PLACEHOLDER_RE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_]*)>")
 
+# Directory placeholders the executor actually resolves (pawlia/skills/executor.py
+# _substitute). Any *other* placeholder used as a script-path prefix (e.g. a
+# {skill_dir} invented from a `SKILL_DIR="<scripts_dir>"` shell variable) is left
+# unresolved and breaks the command at runtime — so the lint rejects it.
+_ALLOWED_PATH_VARS = {"scripts_dir", "skills_root"}
+
 
 def _extract_yaml(text: str) -> str:
     """Extract YAML from LLM output, stripping think tags and markdown fences."""
@@ -108,6 +114,18 @@ def _lint_compiled_workflow(
                 issues.append(
                     f"block {block.id} command does not reference a known script: {command}"
                 )
+            # A script invoked through a path prefix must use {scripts_dir} (the
+            # only script-dir placeholder the executor resolves). Catch invented
+            # prefixes like {skill_dir}/foo.mjs that would never be substituted.
+            for script in scripts:
+                for match in re.finditer(r"\{(\w+)\}/" + re.escape(script), command):
+                    var = match.group(1)
+                    if var not in _ALLOWED_PATH_VARS:
+                        issues.append(
+                            f"block {block.id} invokes '{script}' via unresolved path "
+                            f"placeholder {{{var}}} — use {{scripts_dir}}/{script} "
+                            f"(only {{scripts_dir}}/{{skills_root}} are resolved at runtime)"
+                        )
 
     return issues
 
@@ -228,6 +246,7 @@ async def compile_skill(
                             "Regenerate it and fix these issues exactly:\n- "
                             + "\n- ".join(issues)
                             + "\nDo not use bracketed optional shell syntax like [--foo ...]. "
+                            "Invoke every script via {scripts_dir}/<script>. "
                             "Every command must be directly executable as written."
                         )
                     )

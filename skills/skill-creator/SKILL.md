@@ -313,9 +313,17 @@ referencing, not probing.
 
 ### Phase 3 — Verify (≤3 tool calls)
 
-Run the harness (or reproduce the original failing command). Green → done,
-report a short summary to the user. Red → one loop back to Phase 2, same
-budget. Never go back to Phase 1 from here.
+Run the harness (`test`) — or reproduce the original failing command. **If the
+skill has discrete, scriptable commands (a "simple" skill — lookups, CRUD,
+status checks), you must also re-compile its workflow and re-test:** run
+`compile --name "<name>"`, then `test --name "<name>"`. A workflow-backed skill
+is only fixed once both the script *and* the compiled `workflow.yaml` are green.
+Invoke every script in the SKILL.md as `<scripts_dir>/<script>` so the compiler
+emits a runnable `{scripts_dir}/...` command — never a hand-written or invented
+path placeholder.
+
+Green → done, report a short summary to the user. Red → one loop back to
+Phase 2, same budget. Never go back to Phase 1 from here.
 
 ### Failure exit
 
@@ -376,4 +384,5 @@ in-place.
 python <scripts_dir>/creator.py fix --name "<name>" --error "<error message>" --command "<failing command>"
 ```
 
-After `fix`, run the harness (`test`) to verify the fix worked.
+After `fix`, re-compile the workflow (`compile`) when the skill is
+workflow-suitable, then run the harness (`test`) to verify the fix worked.
