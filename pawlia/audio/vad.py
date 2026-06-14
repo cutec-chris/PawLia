@@ -82,6 +82,23 @@ class SpeechDetector:
     SILENCE_THRESHOLD: float = 0.018
     SILENCE_EMPHASIS_FACTOR: float = 2.0
     SILENCE_SECONDS: float = 1.8
+    # Adaptive endpointing: the longer the caller has already been speaking in
+    # the current utterance, the longer a mid-thought pause we tolerate before
+    # closing the chunk — so a long, complex sentence with thinking pauses is
+    # not chopped into pieces, while short replies ("ja", "nein") still close
+    # promptly at SILENCE_SECONDS. Effective silence grows by
+    # SILENCE_GROWTH_PER_SEC for each second already spoken, capped at
+    # SILENCE_SECONDS_MAX. Set SILENCE_GROWTH_PER_SEC=0 for a fixed endpoint.
+    #
+    # The longer pause is only safe against gusty wind because we *also* require
+    # a more sustained return to count as resumed speech as the tolerance grows
+    # (resume_frames_for_silence): a short wind gust (1–5 frames) can no longer
+    # cancel a long pause and hold the chunk open, while a real continuation
+    # (the caller speaking again) still does. RESUME_FRAMES_AT_MAX is the resume
+    # requirement when the pause tolerance is at SILENCE_SECONDS_MAX.
+    SILENCE_GROWTH_PER_SEC: float = 0.12
+    SILENCE_SECONDS_MAX: float = 3.0
+    RESUME_FRAMES_AT_MAX: int = 8
     MIN_SPEECH_SECONDS: float = 0.4
     MIN_ACTIVE_SPEECH_RATIO: float = 0.12
     MIN_CONSECUTIVE_SPEECH_FRAMES: int = 8
@@ -134,6 +151,8 @@ class SpeechDetector:
         ("silence_threshold", "SILENCE_THRESHOLD", 0.0, None),
         ("silence_emphasis_factor", "SILENCE_EMPHASIS_FACTOR", 1.0, 10.0),
         ("silence_seconds", "SILENCE_SECONDS", 0.1, None),
+        ("silence_growth_per_sec", "SILENCE_GROWTH_PER_SEC", 0.0, None),
+        ("silence_seconds_max", "SILENCE_SECONDS_MAX", 0.1, None),
         ("min_speech_seconds", "MIN_SPEECH_SECONDS", 0.1, None),
         ("min_active_speech_ratio", "MIN_ACTIVE_SPEECH_RATIO", 0.0, 1.0),
         ("min_speech_band_ratio", "MIN_SPEECH_BAND_RATIO", 0.0, 1.0),
@@ -466,6 +485,40 @@ class SpeechDetector:
         resume_speech_count += 1
         threshold = min_frames if min_frames is not None else self.MIN_RESUME_SPEECH_FRAMES
         return resume_speech_count >= threshold, resume_speech_count
+
+    def adaptive_silence_seconds(self, spoken_seconds: float) -> float:
+        """Pause tolerance (s) before an open chunk is finalised.
+
+        Grows with how long the caller has already been speaking in the current
+        utterance, so a long sentence with thinking pauses is not chopped into
+        separate STT chunks, while short replies still close promptly at the
+        ``SILENCE_SECONDS`` base. ``SILENCE_GROWTH_PER_SEC == 0`` disables growth.
+
+        Wind safety is not handled here but via :meth:`resume_frames_for_silence`
+        — see the class-level note.
+        """
+        base = max(1.2, self.SILENCE_SECONDS)
+        if self.SILENCE_GROWTH_PER_SEC <= 0.0:
+            return base
+        grown = base + max(0.0, spoken_seconds) * self.SILENCE_GROWTH_PER_SEC
+        return min(max(base, self.SILENCE_SECONDS_MAX), grown)
+
+    def resume_frames_for_silence(self, silence_seconds: float) -> int:
+        """Consecutive speech-like frames needed to cancel a pause of the given
+        tolerance.
+
+        Scales linearly from ``MIN_RESUME_SPEECH_FRAMES`` at the base
+        ``SILENCE_SECONDS`` up to ``RESUME_FRAMES_AT_MAX`` at
+        ``SILENCE_SECONDS_MAX``: a longer tolerated pause demands a more
+        sustained return, so brief wind gusts cannot keep it open.
+        """
+        base = max(1.2, self.SILENCE_SECONDS)
+        ceil = max(base, self.SILENCE_SECONDS_MAX)
+        if ceil <= base:
+            return self.MIN_RESUME_SPEECH_FRAMES
+        frac = (max(base, min(ceil, silence_seconds)) - base) / (ceil - base)
+        span = max(0, self.RESUME_FRAMES_AT_MAX - self.MIN_RESUME_SPEECH_FRAMES)
+        return self.MIN_RESUME_SPEECH_FRAMES + int(round(frac * span))
 
     @staticmethod
     def start_buffer(

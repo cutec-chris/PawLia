@@ -143,7 +143,11 @@ interfaces:
 #   silence_threshold: 0.018          # frame RMS above this counts as speech (after AGC)
 #   silence_emphasis_factor: 2.0      # base multiplier for adaptive threshold
 #                                       # (auto-scaled down to 1.2 in noisy environments)
-#   silence_seconds: 2.2              # trailing silence that ends a chunk
+#   silence_seconds: 1.8              # base trailing silence that ends a chunk
+#   silence_growth_per_sec: 0.12      # +pause tolerance per second already spoken
+#                                       # (long sentences with thinking pauses aren't chopped;
+#                                       #  short replies still close at silence_seconds; 0 = off)
+#   silence_seconds_max: 3.0          # cap for the grown pause tolerance
 #   min_speech_seconds: 0.4           # shorter chunks are discarded early
 #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
 #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required

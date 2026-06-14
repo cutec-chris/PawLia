@@ -261,25 +261,39 @@ def detect_close_time(pcm, sr, fps=50):
     frame_rms = np.array([float(np.sqrt(np.mean(f ** 2))) for f in frames])
     d = _detector()
     d._noise_floor = max(d.SILENCE_THRESHOLD, float(np.percentile(frame_rms, 20)))
-    silence_threshold = int(max(1.2, d.SILENCE_SECONDS) * fps)
     cap_frames = int(MAX_CHUNK_SECONDS * fps)
     ratio = d.SPEECH_PAUSE_RATIO
     in_speech = False
     silence = 0
+    resume_speech_count = 0
     speech_ref = 0.0
     start = None
     for i, (frame, rms) in enumerate(zip(frames, frame_rms)):
         is_like = d.is_speech_like_frame(frame, sr, rms)
         if is_like and ratio > 0.0 and speech_ref > 0.0 and rms < speech_ref * ratio:
             is_like = False
+        # adaptive endpoint: the longer this utterance has run, the longer a
+        # mid-thought pause we tolerate — and the more sustained a return must
+        # be to cancel that pause (so brief gusts can't hold the chunk open).
+        spoken_seconds = (i - start) / fps if (in_speech and start is not None) else 0.0
+        adaptive_silence = d.adaptive_silence_seconds(spoken_seconds)
+        silence_threshold = int(adaptive_silence * fps)
+        resume_frames = d.resume_frames_for_silence(adaptive_silence)
         if is_like:
             if not in_speech:
                 start = i
             in_speech = True
-            silence = 0
             speech_ref = 0.2 * rms + 0.8 * speech_ref if speech_ref > 0.0 else rms
+            resume_confirmed, resume_speech_count = d.resume_after_pause(
+                is_like, silence, resume_speech_count, min_frames=resume_frames)
+            if resume_confirmed:
+                silence = 0
+                resume_speech_count = 0
+            elif silence == 0:
+                resume_speech_count = 0
         elif in_speech:
             silence += 1
+            resume_speech_count = 0
             if silence >= silence_threshold:
                 return (i + 1) / fps
         if in_speech and start is not None and (i - start) >= cap_frames:
@@ -414,3 +428,45 @@ def test_endpointer_closes_soon_after_speech(row):
         f"{fname}: chunk closed {latency:.1f}s after speech ended "
         f"(speech ~{gt_speech_end:.1f}s, close {close:.1f}s, budget {max_latency:.1f}s)"
     )
+
+
+# --- adaptive endpointing invariants (unit-level, no fixtures) ---------------
+
+def test_adaptive_silence_grows_with_speech_then_caps():
+    """The longer the caller has been speaking, the longer a mid-thought pause
+    we tolerate — monotonically, up to SILENCE_SECONDS_MAX. This is the whole
+    point of adaptive endpointing: a long sentence is not chopped into pieces."""
+    d = _detector()
+    base = max(1.2, d.SILENCE_SECONDS)
+    short = d.adaptive_silence_seconds(0.5)
+    mid = d.adaptive_silence_seconds(6.0)
+    long = d.adaptive_silence_seconds(30.0)
+    assert short == pytest.approx(base, abs=0.2)        # short reply ≈ base
+    assert mid > short                                   # grows while talking
+    assert long > mid
+    assert long <= d.SILENCE_SECONDS_MAX + 1e-6          # but capped
+    # the cap must actually bind for a long monologue
+    assert d.adaptive_silence_seconds(1e6) == pytest.approx(
+        max(base, d.SILENCE_SECONDS_MAX), abs=1e-6)
+
+
+def test_adaptive_silence_disabled_is_fixed():
+    """SILENCE_GROWTH_PER_SEC == 0 restores the fixed endpoint (opt-out)."""
+    d = _detector()
+    d.SILENCE_GROWTH_PER_SEC = 0.0
+    base = max(1.2, d.SILENCE_SECONDS)
+    assert d.adaptive_silence_seconds(0.0) == base
+    assert d.adaptive_silence_seconds(60.0) == base
+
+
+def test_resume_requirement_grows_with_pause_tolerance():
+    """Wind-safety invariant: as the tolerated pause grows, a more sustained
+    return is required to cancel it — otherwise a brief gust could hold a long
+    pause open until the max-chunk cap (the gusty-wind regression)."""
+    d = _detector()
+    base = max(1.2, d.SILENCE_SECONDS)
+    at_base = d.resume_frames_for_silence(base)
+    at_max = d.resume_frames_for_silence(d.SILENCE_SECONDS_MAX)
+    assert at_base == d.MIN_RESUME_SPEECH_FRAMES       # base pause: prompt resume
+    assert at_max >= d.RESUME_FRAMES_AT_MAX            # long pause: sustained return
+    assert at_max > at_base                             # monotonic with tolerance

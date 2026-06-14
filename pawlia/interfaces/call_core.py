@@ -1099,13 +1099,25 @@ class CallCore:
                             0.2 * adjusted_rms + 0.8 * speech_ref
                             if speech_ref > 0.0 else adjusted_rms)
 
-                silence_threshold = int(max(1.2, self._speech_detector.SILENCE_SECONDS) * fps)
+                # The longer this utterance has already run, the longer a
+                # mid-thought pause we tolerate before closing the chunk — so a
+                # long sentence is not split across STT calls (short replies
+                # still close at the SILENCE_SECONDS base).
+                spoken_seconds = (
+                    (frames_received - speech_buffer_start_frame) / fps
+                    if speech_buffer else 0.0)
+                adaptive_silence = self._speech_detector.adaptive_silence_seconds(spoken_seconds)
+                silence_threshold = int(adaptive_silence * fps)
                 nf_ratio = self._speech_detector.noise_floor / max(
                     self._speech_detector.SILENCE_THRESHOLD, 1e-6)
+                # As the tolerated pause grows, require a more sustained return to
+                # count as resumed speech — so a brief wind gust can't keep the
+                # longer pause open (it would otherwise hold the chunk to the cap).
                 effective_resume_frames = min(
                     20, max(
                         self._speech_detector.MIN_RESUME_SPEECH_FRAMES,
-                        int(self._speech_detector.MIN_RESUME_SPEECH_FRAMES * nf_ratio)))
+                        int(self._speech_detector.MIN_RESUME_SPEECH_FRAMES * nf_ratio),
+                        self._speech_detector.resume_frames_for_silence(adaptive_silence)))
 
                 if (max_chunk_frames > 0 and speech_buffer
                         and (frames_received - speech_buffer_start_frame) >= max_chunk_frames):
