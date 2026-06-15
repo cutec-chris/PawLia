@@ -46,9 +46,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libolm3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js LTS via NodeSource (kein Alpine-icu-Konflikt mehr — war musl-spezifisch)
+# Node.js 20 via NodeSource.
+# Pinned to 20 (not setup_lts.x = node 24): the Deutsche Bahn API is fronted by
+# Akamai, which 403-blocks Node 24's TLS/HTTP fingerprint. Node 20 is verified
+# working (same container, same IP, same db-vendo-client) — see hermes-agent.
 RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
