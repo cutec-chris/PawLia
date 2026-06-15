@@ -72,6 +72,19 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   v22+ musl tarballs).
 
 ### Fixed
+- VoIP: speech-pause detection (endpointing) regressed in loud environments
+  (wind/train) — the noise fills the gaps between words so the silence counter
+  never advances, and the patient defaults (relative pause softened to 0.25,
+  adaptive pause tolerance grown to 3.0s) made it worse, so ~21% of chunks on a
+  noisy ride ran to the 15s max-chunk cap and the caller waited for a reply. The
+  endpoint is now **coupled to the noise floor**: while loud, the relative-pause
+  fraction rises (`high_noise_pause_ratio`, 0.40), the adaptive growth is
+  suppressed (`high_noise_silence_seconds_max`, 1.8s), and the hard cap shortens
+  (`high_noise_max_chunk_seconds`, 8s) — bounding the worst-case wait. Quiet
+  calls keep the patient values, so long sentences with thinking pauses are not
+  chopped (validated against the speech/zahlenspiel fixtures: no premature
+  closes; replay of the real noisy ride: avg close 10.9s → 5.5s). All three are
+  config-tunable under `voip:`.
 - Matrix: attachments (e.g. a generated rain-radar image) are now sent into the
   active thread via `m.relates_to`, instead of landing loose in the room
   timeline where a user viewing the thread never saw them.

@@ -158,13 +158,23 @@ interfaces:
 #                                       # noise that energy/spectral gates miss
 #   min_speech_like_ratio: 0.08       # active + speech-like frame ratio required
 #   min_consecutive_speechlike_frames: 4
-#   speech_pause_ratio: 0.35          # frame below this fraction of the running speech
+#   speech_pause_ratio: 0.25          # frame below this fraction of the running speech
 #                                       # level counts as a pause even if spectrally
 #                                       # speech-like — lets chunks close in wind (0 = off)
 #   min_resume_speech_frames: 3       # consecutive speech-like frames to break a running pause
 #                                       # (auto-scaled up in noisy environments — see adaptive silence)
 #   vad_max_chunk_seconds: 15          # force-flush open speech buffer after this many seconds
 #                                       # (safety net so sustained wind can't hold a chunk open; 0 = disabled)
+#   # --- noise-coupled endpointing: in a persistently loud environment
+#   #     (noise_floor > high_noise_floor, e.g. wind/train) the patient values
+#   #     above stop working (noise fills the gaps, the silence counter never
+#   #     advances, chunks run to vad_max_chunk_seconds). These switch to a more
+#   #     aggressive endpoint while loud; quiet calls are untouched.
+#   high_noise_pause_ratio: 0.40       # stronger relative-pause fraction used instead of
+#                                       # speech_pause_ratio while loud (== speech_pause_ratio to opt out)
+#   high_noise_silence_seconds_max: 1.8 # clamp pause tolerance + suppress adaptive growth while loud
+#   high_noise_max_chunk_seconds: 8    # shorter force-flush cap while loud — bounds the worst-case
+#                                       # wait when no pause is detectable (0 = no extra cap)
 #   pre_speech_seconds: 0.6           # prepend this much audio before detected speech (onset safety)
 #   webrtcvad_enabled: true           # extra lightweight speech detector
 #   webrtcvad_mode: 2                 # 0..3, higher = stricter
