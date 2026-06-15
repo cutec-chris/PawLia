@@ -134,6 +134,21 @@ class SpeechDetector:
     # loudness), so this lets the chunk close instead of staying open for tens
     # of seconds. 0 disables it.
     SPEECH_PAUSE_RATIO: float = 0.25
+    # When the environment is persistently loud (noise_floor > HIGH_NOISE_FLOOR,
+    # e.g. wind/train), the gentle, patient endpointing above stops working: the
+    # noise fills the gaps between words so the silence counter never advances,
+    # the relative pause at SPEECH_PAUSE_RATIO is too lax to register a real
+    # pause against the speaker's own loudness, and the adaptive growth only
+    # delays the close further. So in loud environments we switch to a more
+    # aggressive endpoint — a higher relative-pause fraction, no adaptive growth
+    # of the pause tolerance (clamped to HIGH_NOISE_SILENCE_SECONDS_MAX), and a
+    # shorter max-chunk cap — trading the (already impossible) clean capture of a
+    # long monologue for a bounded, responsive reply. Quiet/local calls keep the
+    # patient values, so long sentences with thinking pauses are not chopped.
+    # Set HIGH_NOISE_PAUSE_RATIO == SPEECH_PAUSE_RATIO to opt out of the coupling.
+    HIGH_NOISE_PAUSE_RATIO: float = 0.40
+    HIGH_NOISE_SILENCE_SECONDS_MAX: float = 1.8
+    HIGH_NOISE_MAX_CHUNK_SECONDS: float = 8.0
 
     def __init__(
         self,
@@ -164,6 +179,9 @@ class SpeechDetector:
         ("high_noise_strictness", "HIGH_NOISE_STRICTNESS", 1.0, 3.0),
         ("min_speech_modulation", "MIN_SPEECH_MODULATION", 0.0, None),
         ("speech_pause_ratio", "SPEECH_PAUSE_RATIO", 0.0, 1.0),
+        ("high_noise_pause_ratio", "HIGH_NOISE_PAUSE_RATIO", 0.0, 1.0),
+        ("high_noise_silence_seconds_max", "HIGH_NOISE_SILENCE_SECONDS_MAX", 0.1, None),
+        ("high_noise_max_chunk_seconds", "HIGH_NOISE_MAX_CHUNK_SECONDS", 0.0, None),
     ]
 
     _INT_CONFIGS = [
@@ -486,7 +504,52 @@ class SpeechDetector:
         threshold = min_frames if min_frames is not None else self.MIN_RESUME_SPEECH_FRAMES
         return resume_speech_count >= threshold, resume_speech_count
 
-    def adaptive_silence_seconds(self, spoken_seconds: float) -> float:
+    @property
+    def noise_is_high(self) -> bool:
+        """Persistently loud environment (wind/road/train noise).
+
+        The same gate ``should_transcribe`` uses to tighten its acceptance: the
+        noise floor sits well above clean levels. In this regime the patient
+        endpointing is counter-productive (see :meth:`effective_pause_ratio`,
+        :meth:`effective_max_chunk_seconds`, and the ``high_noise`` branch of
+        :meth:`adaptive_silence_seconds`).
+        """
+        return self._noise_floor > self.HIGH_NOISE_FLOOR
+
+    def effective_pause_ratio(self) -> float:
+        """Relative-energy pause fraction for the *current* noise conditions.
+
+        In a loud environment the gentle ``SPEECH_PAUSE_RATIO`` is too lax to
+        register a real pause against the speaker's own (AGC-amplified) loudness,
+        so the chunk only ever closes on the max-chunk cap. Raising the fraction
+        lets a genuine mid-utterance drop register as a pause again. Quiet calls
+        keep ``SPEECH_PAUSE_RATIO`` so deliberate, level mid-sentence pauses are
+        not mistaken for an endpoint. ``SPEECH_PAUSE_RATIO == 0`` (disabled)
+        stays disabled regardless of noise.
+        """
+        if self.SPEECH_PAUSE_RATIO <= 0.0:
+            return 0.0
+        if self.noise_is_high:
+            return max(self.SPEECH_PAUSE_RATIO, self.HIGH_NOISE_PAUSE_RATIO)
+        return self.SPEECH_PAUSE_RATIO
+
+    def effective_max_chunk_seconds(self, base_cap: float) -> float:
+        """Hard max-chunk cap for the current noise conditions.
+
+        Shortened to ``HIGH_NOISE_MAX_CHUNK_SECONDS`` in a loud environment so
+        the worst-case wait is bounded when no pause can be detected (the caller
+        otherwise speaks into the void for the full quiet-call budget). A cap the
+        operator has disabled (``base_cap <= 0``) stays disabled.
+        """
+        if base_cap <= 0.0:
+            return 0.0
+        if self.noise_is_high and self.HIGH_NOISE_MAX_CHUNK_SECONDS > 0.0:
+            return min(base_cap, self.HIGH_NOISE_MAX_CHUNK_SECONDS)
+        return base_cap
+
+    def adaptive_silence_seconds(
+        self, spoken_seconds: float, high_noise: bool = False
+    ) -> float:
         """Pause tolerance (s) before an open chunk is finalised.
 
         Grows with how long the caller has already been speaking in the current
@@ -494,10 +557,19 @@ class SpeechDetector:
         separate STT chunks, while short replies still close promptly at the
         ``SILENCE_SECONDS`` base. ``SILENCE_GROWTH_PER_SEC == 0`` disables growth.
 
-        Wind safety is not handled here but via :meth:`resume_frames_for_silence`
-        — see the class-level note.
+        When ``high_noise`` is set (caller passes :attr:`noise_is_high`), the
+        growth is suppressed and the tolerance is clamped to
+        ``HIGH_NOISE_SILENCE_SECONDS_MAX``: in sustained noise a long tolerated
+        pause can never be satisfied (the noise fills the gaps), so growing it
+        only delays the close to the cap. A short, fixed tolerance lets the
+        relative-energy pause actually fire.
+
+        Wind safety for the *grown* (quiet-call) path is handled via
+        :meth:`resume_frames_for_silence` — see the class-level note.
         """
         base = max(1.2, self.SILENCE_SECONDS)
+        if high_noise:
+            return min(base, max(1.2, self.HIGH_NOISE_SILENCE_SECONDS_MAX))
         if self.SILENCE_GROWTH_PER_SEC <= 0.0:
             return base
         grown = base + max(0.0, spoken_seconds) * self.SILENCE_GROWTH_PER_SEC

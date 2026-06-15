@@ -244,7 +244,7 @@ def detect_speech_span(pcm, sr, fps=50, min_run=5):
 MAX_CHUNK_SECONDS = 15.0
 
 
-def detect_close_time(pcm, sr, fps=50):
+def detect_close_time(pcm, sr, fps=50, noise_floor=None):
     """Time (s) at which the endpointer finalises the chunk, or None if never.
 
     Mirrors the live loop's hybrid endpointing:
@@ -260,9 +260,14 @@ def detect_close_time(pcm, sr, fps=50):
     frames = [pcm[i:i + fs] for i in range(0, len(pcm) - fs + 1, fs)]
     frame_rms = np.array([float(np.sqrt(np.mean(f ** 2))) for f in frames])
     d = _detector()
-    d._noise_floor = max(d.SILENCE_THRESHOLD, float(np.percentile(frame_rms, 20)))
-    cap_frames = int(MAX_CHUNK_SECONDS * fps)
-    ratio = d.SPEECH_PAUSE_RATIO
+    d._noise_floor = (
+        noise_floor if noise_floor is not None
+        else max(d.SILENCE_THRESHOLD, float(np.percentile(frame_rms, 20))))
+    # Noise-coupled endpointing (mirror the live loop): in a loud environment the
+    # relative pause is more aggressive and the max-chunk cap is shorter, while a
+    # quiet call keeps the patient values.
+    cap_frames = int(d.effective_max_chunk_seconds(MAX_CHUNK_SECONDS) * fps)
+    ratio = d.effective_pause_ratio()
     in_speech = False
     silence = 0
     resume_speech_count = 0
@@ -275,8 +280,9 @@ def detect_close_time(pcm, sr, fps=50):
         # adaptive endpoint: the longer this utterance has run, the longer a
         # mid-thought pause we tolerate — and the more sustained a return must
         # be to cancel that pause (so brief gusts can't hold the chunk open).
+        # In a loud environment the growth is suppressed (high_noise).
         spoken_seconds = (i - start) / fps if (in_speech and start is not None) else 0.0
-        adaptive_silence = d.adaptive_silence_seconds(spoken_seconds)
+        adaptive_silence = d.adaptive_silence_seconds(spoken_seconds, high_noise=d.noise_is_high)
         silence_threshold = int(adaptive_silence * fps)
         resume_frames = d.resume_frames_for_silence(adaptive_silence)
         if is_like:
@@ -470,3 +476,101 @@ def test_resume_requirement_grows_with_pause_tolerance():
     assert at_base == d.MIN_RESUME_SPEECH_FRAMES       # base pause: prompt resume
     assert at_max >= d.RESUME_FRAMES_AT_MAX            # long pause: sustained return
     assert at_max > at_base                             # monotonic with tolerance
+
+
+# --- noise-coupled endpointing invariants ------------------------------------
+# In a persistently loud environment (noise_floor > HIGH_NOISE_FLOOR) the patient
+# endpointing fails: wind/train noise fills the gaps so the silence counter never
+# advances and the chunk only ever closes on the max-chunk cap (the field log of
+# the 2026-06-15 ride showed ~21% of chunks running to the 15s cap). The fix
+# couples the endpoint to the noise floor — aggressive when loud, patient when
+# quiet — so pause detection works again without chopping quiet long sentences.
+
+def test_noise_is_high_gate_matches_floor():
+    d = _detector()
+    d._noise_floor = d.HIGH_NOISE_FLOOR * 0.5
+    assert d.noise_is_high is False
+    d._noise_floor = d.HIGH_NOISE_FLOOR * 2.0
+    assert d.noise_is_high is True
+
+
+def test_effective_pause_ratio_rises_in_noise():
+    """Quiet calls keep the gentle pause ratio (don't chop deliberate mid-
+    sentence pauses); loud calls raise it so a real pause registers against the
+    speaker's own loudness instead of running to the cap."""
+    d = _detector()
+    d._noise_floor = 0.01
+    assert d.effective_pause_ratio() == pytest.approx(d.SPEECH_PAUSE_RATIO)
+    d._noise_floor = 0.08
+    assert d.effective_pause_ratio() == pytest.approx(
+        max(d.SPEECH_PAUSE_RATIO, d.HIGH_NOISE_PAUSE_RATIO))
+    assert d.effective_pause_ratio() > d.SPEECH_PAUSE_RATIO
+
+
+def test_effective_pause_ratio_disabled_stays_disabled():
+    """SPEECH_PAUSE_RATIO == 0 (relative pause off) is not silently re-enabled
+    by the noise coupling."""
+    d = _detector()
+    d.SPEECH_PAUSE_RATIO = 0.0
+    d._noise_floor = 0.08
+    assert d.effective_pause_ratio() == 0.0
+
+
+def test_high_noise_suppresses_adaptive_growth():
+    """In a loud environment the pause tolerance must NOT grow with speech (the
+    growth only delays the close to the cap when noise fills the gaps); it is
+    clamped to HIGH_NOISE_SILENCE_SECONDS_MAX. Quiet calls still grow."""
+    d = _detector()
+    base = max(1.2, d.SILENCE_SECONDS)
+    # quiet: grows (existing behaviour, regression guard)
+    assert d.adaptive_silence_seconds(30.0, high_noise=False) > base
+    # loud: flat, short, independent of how long the caller has spoken
+    short = d.adaptive_silence_seconds(0.5, high_noise=True)
+    long = d.adaptive_silence_seconds(60.0, high_noise=True)
+    assert short == long
+    assert long <= max(1.2, d.HIGH_NOISE_SILENCE_SECONDS_MAX) + 1e-6
+    assert long <= d.adaptive_silence_seconds(60.0, high_noise=False)
+
+
+def test_effective_max_chunk_shrinks_in_noise():
+    d = _detector()
+    base_cap = 15.0
+    d._noise_floor = 0.01
+    assert d.effective_max_chunk_seconds(base_cap) == base_cap   # quiet: unchanged
+    d._noise_floor = 0.08
+    assert d.effective_max_chunk_seconds(base_cap) == pytest.approx(
+        min(base_cap, d.HIGH_NOISE_MAX_CHUNK_SECONDS))            # loud: shortened
+    assert d.effective_max_chunk_seconds(base_cap) < base_cap
+
+
+def test_effective_max_chunk_disabled_stays_disabled():
+    """An operator who disabled the cap (<=0) keeps it disabled even in noise."""
+    d = _detector()
+    d._noise_floor = 0.08
+    assert d.effective_max_chunk_seconds(0.0) == 0.0
+
+
+def _speechlike_tone(seconds, sr=48000, level=0.3):
+    """Deterministic, PII-free signal that passes is_speech_like_frame on every
+    frame and never pauses (constant level, tonal content in the speech band) —
+    so the ONLY thing that can close it is the max-chunk cap. Models the worst
+    case: sustained noise the relative pause cannot catch."""
+    n = int(seconds * sr)
+    t = np.arange(n, dtype=np.float32) / sr
+    sig = sum(np.sin(2 * np.pi * f * t) for f in (300.0, 700.0, 1300.0))
+    return (sig / 3.0 * level).astype(np.float32), sr
+
+
+def test_high_noise_cap_bounds_the_wait_end_to_end():
+    """A sustained speech-like signal with no detectable pause must close at the
+    SHORT high-noise cap when the floor is loud, and only at the long cap when
+    quiet. This is the guarantee the field complaint needs: in wind/train the
+    caller never waits the full quiet-call budget for a reply."""
+    pcm, sr = _speechlike_tone(20.0)
+    loud = detect_close_time(pcm, sr, noise_floor=0.08)
+    quiet = detect_close_time(pcm, sr, noise_floor=0.01)
+    d = _detector()
+    assert loud is not None and quiet is not None
+    assert loud == pytest.approx(d.HIGH_NOISE_MAX_CHUNK_SECONDS, abs=0.3)
+    assert quiet == pytest.approx(MAX_CHUNK_SECONDS, abs=0.3)
+    assert loud < quiet

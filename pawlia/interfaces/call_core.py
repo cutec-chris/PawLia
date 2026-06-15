@@ -1032,7 +1032,8 @@ class CallCore:
         resume_speech_count = 0
         speech_buffer_start_frame = 0
         speech_ref = 0.0
-        max_chunk_frames = int(self.VAD_MAX_CHUNK_SECONDS * fps) if self.VAD_MAX_CHUNK_SECONDS > 0 else 0
+        # The hard max-chunk cap is resolved per-frame from the live noise floor
+        # (effective_max_chunk_seconds) so it can shorten in loud environments.
 
         logger.info("call %s: audio pipeline started", self.call_id[:8])
         frames_received = 0
@@ -1089,7 +1090,7 @@ class CallCore:
                     self._speech_detector.update_noise_floor(adjusted_rms, during_speech=bool(speech_buffer))
                     speech_like_frame = self._speech_detector.is_speech_like_frame(
                         pcm, SAMPLE_RATE, adjusted_rms)
-                    pause_ratio = self._speech_detector.SPEECH_PAUSE_RATIO
+                    pause_ratio = self._speech_detector.effective_pause_ratio()
                     if (speech_like_frame and pause_ratio > 0.0
                             and speech_ref > 0.0
                             and adjusted_rms < speech_ref * pause_ratio):
@@ -1106,8 +1107,21 @@ class CallCore:
                 spoken_seconds = (
                     (frames_received - speech_buffer_start_frame) / fps
                     if speech_buffer else 0.0)
-                adaptive_silence = self._speech_detector.adaptive_silence_seconds(spoken_seconds)
+                # In a persistently loud environment the patient endpointing
+                # (adaptive growth, gentle relative pause, long max-chunk cap)
+                # stops working — noise fills the gaps so the silence counter
+                # never advances and only the cap closes the chunk. Couple the
+                # endpoint to the noise floor: aggressive when loud, patient when
+                # quiet (so long sentences with thinking pauses are not chopped).
+                high_noise = self._speech_detector.noise_is_high
+                adaptive_silence = self._speech_detector.adaptive_silence_seconds(
+                    spoken_seconds, high_noise=high_noise)
                 silence_threshold = int(adaptive_silence * fps)
+                effective_max_chunk_seconds = self._speech_detector.effective_max_chunk_seconds(
+                    self.VAD_MAX_CHUNK_SECONDS)
+                effective_max_chunk_frames = (
+                    int(effective_max_chunk_seconds * fps)
+                    if effective_max_chunk_seconds > 0 else 0)
                 nf_ratio = self._speech_detector.noise_floor / max(
                     self._speech_detector.SILENCE_THRESHOLD, 1e-6)
                 # As the tolerated pause grows, require a more sustained return to
@@ -1119,10 +1133,11 @@ class CallCore:
                         int(self._speech_detector.MIN_RESUME_SPEECH_FRAMES * nf_ratio),
                         self._speech_detector.resume_frames_for_silence(adaptive_silence)))
 
-                if (max_chunk_frames > 0 and speech_buffer
-                        and (frames_received - speech_buffer_start_frame) >= max_chunk_frames):
-                    logger.info("call %s: max chunk duration reached (%.0fs), force-flushing",
-                                self.call_id[:8], self.VAD_MAX_CHUNK_SECONDS)
+                if (effective_max_chunk_frames > 0 and speech_buffer
+                        and (frames_received - speech_buffer_start_frame) >= effective_max_chunk_frames):
+                    logger.info("call %s: max chunk duration reached (%.0fs%s), force-flushing",
+                                self.call_id[:8], effective_max_chunk_seconds,
+                                ", high-noise" if high_noise else "")
                     task = self._finalize_speech_chunk(
                         speech_buffer, SAMPLE_RATE, fps, min_speech_frames, is_barge_in=False)
                     if task is not None and self._transport:
