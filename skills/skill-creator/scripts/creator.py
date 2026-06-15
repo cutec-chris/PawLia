@@ -612,6 +612,31 @@ def _find_harness(skill_path: Path):
     return None
 
 
+def _parse_harness_success(stdout: str):
+    """Extract an explicit success flag from harness stdout.
+
+    Returns the harness JSON's ``success`` value (True/False) when present, else
+    None (no signal). `cmd_test` treats ``success: false`` as a failure even on
+    exit 0, so a command that prints ``{"success": false}`` can't pass by
+    merely returning a zero exit code.
+    """
+    if not stdout:
+        return None
+    candidates = []
+    lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+    if lines:
+        candidates.append(lines[-1])
+    candidates.append(stdout.strip())
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict) and "success" in data:
+            return bool(data["success"])
+    return None
+
+
 def _build_cred_env(meta: dict):
     """Load CRED_* env vars for credentials declared in requires_credentials.
 
@@ -770,8 +795,15 @@ def cmd_test(args):
         stray_writes = sandbox.diff_stray_writes(before, scan_roots, writable)
 
     harness_ok = (not timed_out) and exit_code == 0
+
+    # A harness that exits 0 may still signal failure in its JSON output
+    # ({"success": false, ...}). Treat an explicit success:false as a failure
+    # so `test` doesn't green-light a command that produced no real data.
+    harness_signal = _parse_harness_success(stdout)
+    signal_failed = harness_signal is False
+
     result = {
-        "success": harness_ok and not stray_writes,
+        "success": harness_ok and not stray_writes and not signal_failed,
         "name": name,
         "harness": str(harness_path),
         "exit_code": exit_code,
@@ -782,6 +814,8 @@ def cmd_test(args):
         "stdout": stdout,
         "stderr": stderr,
     }
+    if harness_signal is not None:
+        result["harness_success"] = harness_signal
     if stray_writes:
         result["error"] = (
             "Skill wrote outside the allowed roots (per-user session dir + "
@@ -790,6 +824,11 @@ def cmd_test(args):
             + ", ".join(stray_writes[:20])
         )
         result["stray_writes"] = stray_writes
+    if signal_failed:
+        result["error"] = (
+            "Harness exited 0 but its JSON output signalled success:false — "
+            "treat this as a failed test. The command produced no valid result."
+        )
     print(json.dumps(result, ensure_ascii=False))
 
 
@@ -825,6 +864,7 @@ def cmd_compile(args):
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=300, check=False,
+            cwd=str(PROJECT_ROOT),
         )
     except subprocess.TimeoutExpired:
         print(json.dumps({

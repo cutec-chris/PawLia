@@ -322,6 +322,29 @@ Invoke every script in the SKILL.md as `<scripts_dir>/<script>` so the compiler
 emits a runnable `{scripts_dir}/...` command — never a hand-written or invented
 path placeholder.
 
+**What "green" means — hard rule.** A passing test is NOT "the command exited 0".
+For any command you added or changed, capture its `--json` output and confirm
+**both**:
+1. It contains a top-level `"success": true`.
+2. Its payload fields carry **real data** for the command's purpose — not all
+   `null`/`[]`/`{}`.
+
+An exit code 0 with an all-null envelope (every result field `null`) or with no
+`success` field is **RED**, period. Do not declare "alle Tests laufen
+einwandfrei" after eyeballing null output — that ships a broken command. Re-read
+the command's wiring (is its result actually written into the output envelope?
+is `success` set?) and loop back to Phase 2.
+
+**Commit atomically when green.** A scheduled workspace-sync (`workspace-git`)
+can `git add -A && commit` at any moment — including mid-edit. To stop it
+capturing a half-finished fix, commit your own work the moment Phase 3 is green:
+```
+git -C "$PAWLIA_SESSION_DIR/$PAWLIA_USER_ID/workspace" \
+  add skills/<name> && git commit -m "fix(<name>): <what>"
+```
+Leave the workspace either fully green+committed or rolled back — never broken
+and uncommitted across a pause.
+
 Green → done, report a short summary to the user. Red → one loop back to
 Phase 2, same budget. Never go back to Phase 1 from here.
 
