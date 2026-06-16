@@ -32,20 +32,25 @@ Use this path for all commands below. Never scan other sessions.
 
 ## Workflow
 
-### Step 0 — Pull workspace (always first)
+### Step 0 — Sync workspace (always first)
 
-Before any read or write operation on the workspace, pull the latest state
-from the remote (if one is configured):
+Before any read or write operation on the workspace, sync the latest state
+from the remote. **The remote is authoritative — on divergence it always wins:**
 
 ```
-git -C <session_dir>/<user_id>/workspace pull --ff-only 2>&1
+git -C <session_dir>/<user_id>/workspace add -A
+git -C <session_dir>/<user_id>/workspace commit -m "pre-sync" 2>&1 || true
+git -C <session_dir>/<user_id>/workspace fetch origin 2>&1
+git -C <session_dir>/<user_id>/workspace reset --hard origin/HEAD 2>&1
 ```
 
-- If the remote is not yet configured (exit code non-zero, message contains
-  "no remote"), continue to Step 1 — setup is needed first.
-- If there are local conflicts, report them and stop — never force-overwrite
-  local changes without user confirmation.
-- On success (or "Already up to date"), proceed normally.
+- If the remote is not yet configured (message contains "does not appear to
+  be a git repository" / "no remote"), continue to Step 1 — setup is needed first.
+- **Never** use `git pull`, `git merge`, or `pull --ff-only`. Local divergence
+  is always resolved with `reset --hard origin/HEAD` — the remote wins.
+- Committing local changes first (`pre-sync`) ensures uncommitted edits are
+  not silently destroyed by the hard reset; they remain in the reflog.
+- On success, proceed normally.
 
 ### Step 1 — Check current state
 

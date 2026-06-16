@@ -594,12 +594,18 @@ class Scheduler:
         if not ensure_repo(workspace):
             return
 
-        # Pull from remote (throttled to 1/h inside pull), only if push is enabled
+        # Commit local changes FIRST so they are never destroyed by pull's
+        # hard reset on divergence — they remain recoverable via the reflog.
+        committed = auto_commit(workspace)
+
+        # Pull from remote (throttled to 1/h inside pull) — remote always wins
+        # on divergence (ff-only, else reset --hard to origin/HEAD).
         if self._git_push:
             pull(workspace)
 
-        # Auto-commit (throttled to max 1 per 5 min inside auto_commit)
-        if auto_commit(workspace) and self._git_push:
+        # Push if we produced local commits (no-op after a hard-reset pull,
+        # since local then equals remote).
+        if committed and self._git_push:
             push(workspace)
 
         now = datetime.now()

@@ -12,6 +12,7 @@ from pawlia.workspace_git import (
     auto_commit,
     daily_squash,
     ensure_repo,
+    pull,
     weekly_squash,
 )
 
@@ -132,3 +133,96 @@ class TestWeeklySquash:
 
             r = _git(ws, "log", "-1", "--format=%s")
             assert r.stdout.strip().startswith("Week:")
+
+
+def _seed_remote(workspace: str, remote: str) -> str:
+    """Init a repo in `workspace`, add `remote` as origin, commit, push.
+
+    Returns the branch name (so tests are independent of the git default branch).
+    """
+    _git(workspace, "init")
+    _git(workspace, "config", "user.name", "test")
+    _git(workspace, "config", "user.email", "test@test")
+    _write(workspace, "init.md", "init")
+    _git(workspace, "add", "-A")
+    _git(workspace, "commit", "-m", "init")
+    _git(workspace, "remote", "add", "origin", remote)
+    branch = _git(workspace, "symbolic-ref", "--short", "HEAD").stdout.strip()
+    _git(workspace, "push", "-q", "origin", branch)
+    # Establish origin/HEAD so rev-parse origin/HEAD works (clone normally does this)
+    _git(workspace, "remote", "set-head", "origin", branch)
+    return branch
+
+
+class TestPull:
+    def test_pull_no_remote_returns_false(self):
+        with tempfile.TemporaryDirectory() as ws:
+            ensure_repo(ws)
+            assert pull(ws) is False
+
+    def test_pull_up_to_date(self, monkeypatch):
+        monkeypatch.setattr("pawlia.workspace_git.PULL_COOLDOWN", 0)
+        with tempfile.TemporaryDirectory() as remote, tempfile.TemporaryDirectory() as ws:
+            _git(remote, "init", "--bare")
+            _seed_remote(ws, remote)
+            # Local HEAD already matches origin/HEAD
+            assert pull(ws) is True
+
+    def test_pull_fast_forward(self, monkeypatch):
+        """Local behind remote → ff-only advances local HEAD."""
+        monkeypatch.setattr("pawlia.workspace_git.PULL_COOLDOWN", 0)
+        with tempfile.TemporaryDirectory() as remote, tempfile.TemporaryDirectory() as ws:
+            _git(remote, "init", "--bare")
+            branch = _seed_remote(ws, remote)
+
+            # Advance the remote from a second clone
+            with tempfile.TemporaryDirectory() as other_parent:
+                other = os.path.join(other_parent, "other")
+                _git(other_parent, "clone", "-q", remote, other)
+                _write(other, "remote_only.md", "from remote")
+                _git(other, "add", "-A")
+                _git(other, "commit", "-m", "remote advance")
+                _git(other, "push", "-q", "origin", branch)
+
+            # Local ws is behind; pull should fast-forward
+            assert pull(ws) is True
+            assert os.path.exists(os.path.join(ws, "remote_only.md"))
+
+    def test_pull_divergent_resets_hard(self, monkeypatch):
+        """Local diverges from remote → reset --hard, remote wins."""
+        monkeypatch.setattr("pawlia.workspace_git.PULL_COOLDOWN", 0)
+        with tempfile.TemporaryDirectory() as remote, tempfile.TemporaryDirectory() as ws:
+            _git(remote, "init", "--bare")
+            branch = _seed_remote(ws, remote)
+
+            # Advance remote from a second clone
+            with tempfile.TemporaryDirectory() as other_parent:
+                other = os.path.join(other_parent, "other")
+                _git(other_parent, "clone", "-q", remote, other)
+                _write(other, "remote_change.md", "remote wins")
+                _git(other, "add", "-A")
+                _git(other, "commit", "-m", "remote change")
+                _git(other, "push", "-q", "origin", branch)
+
+            # Create a divergent local commit
+            _write(ws, "local_change.md", "local loses")
+            _git(ws, "add", "-A")
+            _git(ws, "commit", "-m", "local change")
+            local_head_before = _git(ws, "rev-parse", "HEAD").stdout.strip()
+
+            assert pull(ws) is True
+
+            # Remote state applied, local divergence discarded
+            assert os.path.exists(os.path.join(ws, "remote_change.md"))
+            assert not os.path.exists(os.path.join(ws, "local_change.md"))
+            # HEAD moved away from the divergent local commit
+            assert _git(ws, "rev-parse", "HEAD").stdout.strip() != local_head_before
+
+    def test_pull_throttled(self):
+        """Pull within cooldown window is skipped."""
+        with tempfile.TemporaryDirectory() as remote, tempfile.TemporaryDirectory() as ws:
+            _git(remote, "init", "--bare")
+            _seed_remote(ws, remote)
+            # A recent fetch creates FETCH_HEAD at ~now → cooldown active
+            _git(ws, "fetch", "origin")
+            assert pull(ws) is False

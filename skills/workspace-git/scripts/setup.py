@@ -120,7 +120,18 @@ _JOB_DEFAULTS = {
         "id": "job-workspace-git-pull",
         "name": "Workspace Git Pull",
         "schedule": "*/15 * * * *",
-        "instruction": "Führe einen git pull --ff-only für den Workspace durch",
+        "instruction": (
+            "Synchronisiere den Workspace vom Remote — das REMOTE gewinnt immer. "
+            "Schritte im Workspace: "
+            "1) `git add -A && git commit -m \"pre-sync\"` (lokale Änderungen als Commit sichern, "
+            "damit sie im Reflog bleiben), "
+            "2) `git fetch origin`, "
+            "3) `git reset --hard origin/HEAD`. "
+            "NIEMALS `git pull`, `git merge` oder `pull --ff-only` verwenden — bei Divergenz "
+            "gewinnt das Remote per `reset --hard`. "
+            "Falls kein Remote konfiguriert ist (`fatal: 'origin' does not appear to be a git repository`), "
+            "brich still ab."
+        ),
     },
 }
 

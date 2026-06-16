@@ -270,10 +270,18 @@ def weekly_squash(workspace: str) -> bool:
 
 
 def pull(workspace: str, remote: str = "origin") -> bool:
-    """Fast-forward pull from remote if configured. Throttled to PULL_COOLDOWN.
+    """Pull from remote — the remote always wins on conflict/divergence.
 
-    Returns True if a pull was attempted and succeeded (including no-op fast-forward).
-    Non-fast-forward divergence is logged as a warning; no merge is created.
+    Throttled to PULL_COOLDOWN. Strategy:
+      1. fetch
+      2. HEAD == remote/HEAD -> up to date
+      3. merge --ff-only -> fast forward (keeps non-conflicting local history)
+      4. otherwise -> reset --hard to remote/HEAD (remote wins)
+
+    Callers should commit local changes before calling this so uncommitted
+    edits are not destroyed by the hard reset (the scheduler does this).
+
+    Returns True if the local HEAD now matches the remote.
     """
     if not os.path.isdir(os.path.join(workspace, ".git")):
         return False
@@ -290,11 +298,32 @@ def pull(workspace: str, remote: str = "origin") -> bool:
     rc, _ = _git(workspace, "fetch", remote)
     if rc != 0:
         return False
-    rc, _ = _git(workspace, "merge", "--ff-only", f"{remote}/HEAD")
+
+    rc, remote_head = _git(workspace, "rev-parse", f"{remote}/HEAD", quiet=True)
+    if rc != 0 or not remote_head:
+        logger.warning("Pull from %s skipped: %s/HEAD not resolvable", remote, remote)
+        return False
+
+    rc, local_head = _git(workspace, "rev-parse", "HEAD", quiet=True)
+    if rc == 0 and local_head == remote_head:
+        logger.debug("Workspace already up to date with %s", remote)
+        return True
+
+    # Try fast-forward first (preserves non-conflicting local history)
+    rc, _ = _git(workspace, "merge", "--ff-only", f"{remote}/HEAD", quiet=True)
     if rc == 0:
         logger.debug("Pulled workspace from %s (ff-only)", remote)
         return True
-    logger.warning("Pull from %s skipped: local diverges from remote (no ff-only possible)", remote)
+
+    # Divergent or blocked — remote wins, hard reset
+    logger.warning(
+        "Workspace diverged from %s — resetting hard to remote (remote wins)", remote,
+    )
+    rc, _ = _git(workspace, "reset", "--hard", f"{remote}/HEAD")
+    if rc == 0:
+        logger.info("Reset workspace to %s/HEAD (remote wins on conflict)", remote)
+        return True
+    logger.error("Hard reset to %s/HEAD failed", remote)
     return False
 
 
