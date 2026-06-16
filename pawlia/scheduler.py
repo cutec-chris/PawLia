@@ -498,8 +498,14 @@ class Scheduler:
 
         # ── High priority (every tick) ──
         for user_id in user_ids:
-            await self._check_reminders(user_id)
-            await self._check_events(user_id)
+            try:
+                await self._check_reminders(user_id)
+            except Exception as e:
+                logger.error("Reminder check failed for %s: %s", user_id, e)
+            try:
+                await self._check_events(user_id)
+            except Exception as e:
+                logger.error("Event check failed for %s: %s", user_id, e)
 
             if self._checklist:
                 try:
@@ -723,37 +729,41 @@ class Scheduler:
         now = self._user_now(user_id)
 
         for rem in reminders:
-            scheduled = rem.get("scheduled", "")
-            if not scheduled:
-                continue
             try:
-                fire_at = datetime.fromisoformat(scheduled)
-                if fire_at.tzinfo is not None:
-                    fire_at = fire_at.replace(tzinfo=None)
-            except ValueError:
-                continue
+                scheduled = rem.get("scheduled", "")
+                if not scheduled:
+                    continue
+                try:
+                    fire_at = datetime.fromisoformat(scheduled)
+                    if fire_at.tzinfo is not None:
+                        fire_at = fire_at.replace(tzinfo=None)
+                except ValueError:
+                    continue
 
-            if fire_at <= now:
-                title = rem.get("title", "Reminder")
-                await self._notify(user_id, f"\U0001f514 {title}")
+                if fire_at <= now:
+                    title = rem.get("title", "Reminder")
+                    await self._notify(user_id, f"\U0001f514 {title}")
 
-                source = rem.get("_source", "tasks.md")
-                if source == "tasks.md":
-                    # tasks.md: use legacy helpers that resolve path internally
-                    recurrence = rem.get("recurrence", "")
-                    if recurrence:
-                        _reschedule_reminder(self.session_dir, user_id, rem["_line"], recurrence)
+                    source = rem.get("_source", "tasks.md")
+                    if source == "tasks.md":
+                        # tasks.md: use legacy helpers that resolve path internally
+                        recurrence = rem.get("recurrence", "")
+                        if recurrence:
+                            _reschedule_reminder(self.session_dir, user_id, rem["_line"], recurrence)
+                        else:
+                            _mark_task_done(self.session_dir, user_id, rem["_line"])
                     else:
-                        _mark_task_done(self.session_dir, user_id, rem["_line"])
-                else:
-                    # Project notes: resolve full path from relative source
-                    ws = os.path.join(self.session_dir, user_id, "workspace")
-                    path = os.path.join(ws, source)
-                    recurrence = rem.get("recurrence", "")
-                    if recurrence:
-                        _reschedule_reminder_in_file(path, rem["_line"], recurrence)
-                    else:
-                        _mark_task_done_in_file(path, rem["_line"])
+                        # Project notes: resolve full path from relative source
+                        ws = os.path.join(self.session_dir, user_id, "workspace")
+                        path = os.path.join(ws, source)
+                        recurrence = rem.get("recurrence", "")
+                        if recurrence:
+                            _reschedule_reminder_in_file(path, rem["_line"], recurrence)
+                        else:
+                            _mark_task_done_in_file(path, rem["_line"])
+            except Exception as e:
+                logger.warning("Reminder processing failed for %s (line %s): %s",
+                               user_id, rem.get("_line", "?"), e)
 
     async def _check_events(self, user_id: str) -> None:
         """Notify about upcoming events from workspace/calendar/*.md.
@@ -769,9 +779,12 @@ class Scheduler:
 
         state = _load_state(self.session_dir, user_id)
         notified = set(state.get("notified_events", []))
+
+        # Detect state reset: file exists but notified_events was wiped
+        _detect_state_reset(self.session_dir, user_id, state, len(events))
+
         now = self._user_now(user_id)
         generic_window = now + timedelta(minutes=EVENT_REMINDER_MINUTES)
-        changed = False
 
         for event in events:
             filename = event.get("_filename", "")
@@ -810,7 +823,7 @@ class Scheduler:
                     text += f" ({location})"
                 await self._notify(user_id, text)
                 notified.add(notify_key)
-                changed = True
+                self._save_notified_state(user_id, state, notified)
 
             # Custom per-event reminders (recurrence-aware: keyed per occurrence)
             event_info = {"title": title, "start": start, "location": location}
@@ -831,11 +844,14 @@ class Scheduler:
                     if rem.get("notify", True):
                         await self._notify(user_id, message)
                     notified.add(rem_key)
-                    changed = True
+                    self._save_notified_state(user_id, state, notified)
 
-        if changed:
-            state["notified_events"] = list(notified)
+    def _save_notified_state(self, user_id: str, state: dict, notified: set) -> None:
+        state["notified_events"] = list(notified)
+        try:
             _save_state(self.session_dir, user_id, state)
+        except Exception as e:
+            logger.error("Failed to save notified state for %s: %s", user_id, e)
 
     async def _notify(self, user_id: str, message: str) -> None:
         for callback in self._callbacks:
@@ -868,3 +884,25 @@ def _next_occurrence(fire_at: datetime, recurrence: str) -> datetime:
         except ValueError:
             return fire_at.replace(year=year, month=month, day=28)
     return fire_at + timedelta(days=1)
+
+
+def _detect_state_reset(session_dir: str, user_id: str, state: dict, event_count: int) -> None:
+    """Log a warning if the state file exists but notified_events was wiped."""
+    if event_count == 0:
+        return
+    state_path = os.path.join(session_dir, user_id, "scheduler_state.json")
+    if not os.path.exists(state_path):
+        return
+    notified = state.get("notified_events")
+    if notified is not None and len(notified) == 0:
+        logger.warning(
+            "notified_events reset for %s — file exists but empty. "
+            "Previous state lost; %d events will re-notify.",
+            user_id, event_count,
+        )
+    elif notified is not None and len(notified) < event_count:
+        logger.info(
+            "notified_events for %s has %d entries for %d events "
+            "(some events may not yet have been notified)",
+            user_id, len(notified), event_count,
+        )
