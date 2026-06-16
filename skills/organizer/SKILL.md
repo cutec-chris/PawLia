@@ -34,6 +34,8 @@ python <scripts_dir>/organizer.py add-reminder --fire-at "<time>" --message "<me
 - `--fire-at`: ISO8601 datetime or relative time: `"10m"`, `"2h"`, `"1d"`
 - `--recurrence`: optional, for repeating reminders (uses 🔁 emoji)
 
+**Weekday-specific recurrences** (e.g. `monday,wednesday`, `mo,mi`, `MO/WE`, or an RRULE like `FREQ=WEEKLY;BYDAY=MO,WE`) are **not** stored as tasks.md reminders — the reminder recurrence engine only knows daily/weekly/monthly and would otherwise fire them daily. Such reminders are automatically redirected to a recurring calendar event (`workspace/calendar/`) whose reminders fire on every matching weekday. The script reports this with `"redirected_to_event": true`. For full control over location, end time, or multiple lead-time reminders, use `add-event` directly with `--recurrence weekly --recurrence-days "MO,WE"`.
+
 List pending reminders:
 ```
 python <scripts_dir>/organizer.py list-reminders

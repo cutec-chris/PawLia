@@ -201,6 +201,38 @@ def _normalize_recurrence_days(days: str) -> list[str]:
     return result
 
 
+def _parse_weekdays_from_recurrence(recurrence: str) -> list[str] | None:
+    """Extract specific weekday codes (MO, TU, ...) from a recurrence string.
+
+    Returns None for plain cadences (daily/weekly/monthly) that carry no named
+    weekdays — those remain tasks.md reminders. Weekday-specific recurrences
+    (e.g. "mo,mi", "monday,wednesday", "FREQ=WEEKLY;BYDAY=MO,WE") return their
+    RRULE day codes so the caller can redirect to a recurring calendar event.
+    """
+    rec = (recurrence or "").strip()
+    if not rec:
+        return None
+
+    # RRULE form, e.g. FREQ=WEEKLY;BYDAY=MO,WE
+    if rec.upper().startswith("FREQ="):
+        byday = _rrule_part(rec, "BYDAY")
+        if not byday:
+            return None
+        days = [
+            d.strip().upper() for d in byday.split(",")
+            if d.strip().upper() in _RRULE_TO_FULLCALENDAR_DAY
+        ]
+        return days or None
+
+    # Plain text: scan tokens for weekday names in any supported locale.
+    found: list[str] = []
+    for token in re.split(r"[,\s/;&|+]+", rec.lower()):
+        code = _WEEKDAY_TO_RRULE.get(token)
+        if code and code not in found:
+            found.append(code)
+    return found or None
+
+
 def _build_rrule(
     recurrence: str,
     start: str,
@@ -1088,6 +1120,49 @@ def cmd_add_reminder(args) -> None:
         fire_at = _parse_fire_at(args.fire_at, now=now)
     except Exception as e:
         _out({"success": False, "error": f"Invalid fire_at format: {e}"})
+        return
+
+    # Weekday-specific recurrence (e.g. "mo,mi", "monday,wednesday",
+    # "FREQ=WEEKLY;BYDAY=MO,WE"). The tasks.md reminder engine only understands
+    # daily/weekly/monthly cadences and would silently turn anything else into a
+    # daily reminder. Redirect these to a recurring calendar event whose
+    # reminders fire on every matching weekday via the scheduler.
+    weekdays = _parse_weekdays_from_recurrence(args.recurrence)
+    if weekdays:
+        rrule = f"FREQ=WEEKLY;BYDAY={','.join(weekdays)}"
+        label = args.label or "Reminder"
+        start_iso = fire_at.strftime("%Y-%m-%dT%H:%M:%S")
+        event = {
+            "title": label,
+            "start": start_iso,
+            "end": "",
+            "description": args.message,
+            "location": "",
+            "reminders": [{"minutes_before": 0, "message": args.message, "notify": True}],
+            "checklist": [],
+            "recurrence": {"rrule": rrule, "until": ""},
+        }
+        cal_dir = _calendar_dir(args.user_id, args.session_dir)
+        filename = _event_filename(start_iso, label)
+        filepath = os.path.join(cal_dir, filename)
+        if os.path.exists(filepath):
+            base, ext = os.path.splitext(filename)
+            n = 2
+            while os.path.exists(os.path.join(cal_dir, f"{base} {n}{ext}")):
+                n += 1
+            filename = f"{base} {n}{ext}"
+            filepath = os.path.join(cal_dir, filename)
+        _write_event_md(filepath, event)
+        _out({
+            "success": True,
+            "message": (
+                f"Reminder als wiederkehrender Termin angelegt "
+                f"(Wochentage: {','.join(weekdays)}, "
+                f"{fire_at.strftime('%H:%M')} Uhr)."
+            ),
+            "event_id": filename,
+            "redirected_to_event": True,
+        })
         return
 
     recurrence = (args.recurrence or "").strip()

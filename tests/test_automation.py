@@ -203,6 +203,48 @@ def test_interpolate_blanks_missing_fields():
     assert ChecklistProcessor._interpolate("Ort: {location}", {}) == "Ort: "
 
 
+# ---- ChecklistProcessor skips event_reminder items -------------------------
+@pytest.mark.asyncio
+async def test_checklist_processor_skips_event_reminder_items(tmp_path):
+    """Reminders derived from event frontmatter are fired recurrence-aware by
+    the scheduler's _check_events, so ChecklistProcessor must not also fire
+    them (would double-notify)."""
+    import yaml
+
+    user = "u1"
+    cal_dir = tmp_path / user / "workspace" / "calendar"
+    cal_dir.mkdir(parents=True)
+    start = datetime.now() - timedelta(hours=1)
+    fm = {
+        "title": "Parcours",
+        "date": start.strftime("%Y-%m-%d"),
+        "startTime": start.strftime("%H:%M"),
+        "allDay": False,
+        "type": "single",
+        "checklist": [
+            {"id": "rem-1", "trigger": "relative", "trigger_offset": "-40m",
+             "message": "sollte NICHT feuern", "notify": True, "source": "event_reminder"},
+            {"id": "chk-1", "trigger": "relative", "trigger_offset": "-40m",
+             "message": "Prep: Unterlagen", "notify": True},
+        ],
+    }
+    (cal_dir / "2026-05-19 Parcours.md").write_text(
+        f"---\n{yaml.dump(fm, allow_unicode=True, default_flow_style=False).rstrip()}\n---\n",
+        encoding="utf-8",
+    )
+
+    notifications = []
+
+    async def capture(uid, msg):
+        notifications.append(msg)
+
+    proc = ChecklistProcessor(str(tmp_path), capture)
+    await proc.process_user(user)
+
+    assert any("Prep: Unterlagen" in n for n in notifications)
+    assert not any("sollte NICHT feuern" in n for n in notifications)
+
+
 # ---- factory helpers -------------------------------------------------------
 def test_create_checklist_item_has_prefixed_id_and_defaults():
     item = create_checklist_item(script="x.py", message="hi")

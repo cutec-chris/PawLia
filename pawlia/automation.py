@@ -212,6 +212,13 @@ class ChecklistProcessor:
                 if not item_id:
                     continue
 
+                # Reminders derived from the event's frontmatter ``reminders``
+                # are fired recurrence-aware by the scheduler's _check_events,
+                # so they must not also fire here (would double-notify and only
+                # trigger on the original event date for recurring events).
+                if item.get("source") == "event_reminder":
+                    continue
+
                 item_state = file_state.get(item_id, {})
                 if item_state.get("status") in ("done", "failed"):
                     continue

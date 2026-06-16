@@ -114,6 +114,66 @@ def test_organizer_persists_reminders_as_a_scheduler_checklist(tmp_path):
     assert fm["checklist"][0]["trigger_offset"] == "-40m"
 
 
+# ---------------------------------------------------------------------------
+# add-reminder with weekday-specific recurrence → recurring calendar event
+# ---------------------------------------------------------------------------
+def _reminder_args(tmp_path, **overrides):
+    base = dict(
+        user_id="u1", session_dir=str(tmp_path),
+        fire_at="2026-06-15T13:48",
+        message="RB40 Check -30min Rückweg",
+        label="RB40 Check",
+        recurrence="",
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+@pytest.mark.parametrize("recurrence,expected_byday", [
+    ("mo,mi", "MO,WE"),
+    ("monday,wednesday", "MO,WE"),
+    ("MO/MI", "MO,WE"),
+    ("montag mittwoch", "MO,WE"),
+    ("FREQ=WEEKLY;BYDAY=MO,WE", "MO,WE"),
+    ("every monday and wednesday", "MO,WE"),
+])
+def test_add_reminder_redirects_weekday_recurrence_to_event(tmp_path, capsys, recurrence, expected_byday):
+    mod = _load_organizer()
+    mod.cmd_add_reminder(_reminder_args(tmp_path, recurrence=recurrence))
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["success"] is True
+    assert result["redirected_to_event"] is True
+
+    path = tmp_path / "u1" / "workspace" / "calendar" / "2026-06-15 RB40 Check.md"
+    assert path.exists()
+    fm = yaml.safe_load(path.read_text(encoding="utf-8").split("---", 2)[1])
+    assert fm["type"] == "recurring"
+    assert fm["rrule"] == f"FREQ=WEEKLY;BYDAY={expected_byday}"
+    assert fm["reminders"] == [
+        {"minutes_before": 0, "message": "RB40 Check -30min Rückweg", "notify": True},
+    ]
+    # No tasks.md reminder may be created for the redirected case.
+    assert not (tmp_path / "u1" / "workspace" / "tasks.md").exists()
+
+
+@pytest.mark.parametrize("recurrence", [
+    "", "none", "daily", "weekly", "monthly", "every week", "every day",
+])
+def test_add_reminder_keeps_plain_cadence_as_task(tmp_path, capsys, recurrence):
+    mod = _load_organizer()
+    mod.cmd_add_reminder(_reminder_args(tmp_path, recurrence=recurrence))
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["success"] is True
+    assert "redirected_to_event" not in result
+    # No calendar event created.
+    assert not list((tmp_path / "u1" / "workspace" / "calendar").glob("*.md"))
+    # A tasks.md reminder exists.
+    md = (tmp_path / "u1" / "workspace" / "tasks.md").read_text(encoding="utf-8")
+    assert "RB40 Check -30min Rückweg" in md
+
+
 def test_organizer_run_job_forces_run_and_returns_the_instruction(tmp_path, capsys):
     import json
     mod = _load_organizer()

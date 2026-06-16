@@ -756,7 +756,13 @@ class Scheduler:
                         _mark_task_done_in_file(path, rem["_line"])
 
     async def _check_events(self, user_id: str) -> None:
-        """Notify about upcoming events from workspace/calendar/*.md."""
+        """Notify about upcoming events from workspace/calendar/*.md.
+
+        Fires a generic ``EVENT_REMINDER_MINUTES`` heads-up for every event,
+        plus any custom per-event ``reminders`` (frontmatter). Custom reminders
+        are evaluated per occurrence, so recurring events fire their reminders
+        on every occurrence — not just the first.
+        """
         events = _list_workspace_events(self.session_dir, user_id)
         if not events:
             return
@@ -764,11 +770,23 @@ class Scheduler:
         state = _load_state(self.session_dir, user_id)
         notified = set(state.get("notified_events", []))
         now = self._user_now(user_id)
-        window = now + timedelta(minutes=EVENT_REMINDER_MINUTES)
+        generic_window = now + timedelta(minutes=EVENT_REMINDER_MINUTES)
         changed = False
 
         for event in events:
             filename = event.get("_filename", "")
+            reminders = event.get("reminders") or []
+
+            # The look-ahead must cover the earliest reminder so a recurring
+            # occurrence due within that window becomes visible at all.
+            max_mb = 0
+            for rem in reminders:
+                try:
+                    max_mb = max(max_mb, int(rem.get("minutes_before", 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+            window = now + timedelta(minutes=max(EVENT_REMINDER_MINUTES, max_mb))
+
             start = None
             notify_key = filename
             if event.get("rrule"):
@@ -780,21 +798,40 @@ class Scheduler:
                 start = _event_start_datetime(event)
             if start is None:
                 continue
-            if notify_key in notified:
-                continue
 
-            if now <= start <= window:
-                title = event.get("title", "Event")
-                location = event.get("location", "")
+            title = event.get("title", "Event")
+            location = event.get("location", "")
+
+            # Generic heads-up
+            if notify_key not in notified and now <= start <= generic_window:
                 minutes_left = int((start - now).total_seconds() / 60)
-
                 text = f"\U0001f4c5 In {minutes_left} Min: {title}"
                 if location:
                     text += f" ({location})"
-
                 await self._notify(user_id, text)
                 notified.add(notify_key)
                 changed = True
+
+            # Custom per-event reminders (recurrence-aware: keyed per occurrence)
+            event_info = {"title": title, "start": start, "location": location}
+            for idx, rem in enumerate(reminders):
+                try:
+                    mb = int(rem.get("minutes_before", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                rem_key = f"{notify_key}#rem{idx}"
+                if rem_key in notified:
+                    continue
+                rem_fire = start - timedelta(minutes=mb)
+                # Fire once when the reminder time has been reached, but no
+                # later than shortly after the event start.
+                if rem_fire <= now <= start + timedelta(minutes=EVENT_REMINDER_MINUTES):
+                    message = rem.get("message") or f"In {mb} Min: {title}"
+                    message = _interpolate_event_text(message, event_info)
+                    if rem.get("notify", True):
+                        await self._notify(user_id, message)
+                    notified.add(rem_key)
+                    changed = True
 
         if changed:
             state["notified_events"] = list(notified)
@@ -806,6 +843,14 @@ class Scheduler:
                 await callback(user_id, message)
             except Exception as e:
                 logger.error("Notify callback failed for %s: %s", user_id, e)
+
+
+def _interpolate_event_text(message: str, event: dict) -> str:
+    """Replace {title}/{start}/{location} placeholders in an event reminder."""
+    for key in ("title", "start", "location"):
+        value = event.get(key, "")
+        message = message.replace(f"{{{key}}}", str(value))
+    return message
 
 
 def _next_occurrence(fire_at: datetime, recurrence: str) -> datetime:

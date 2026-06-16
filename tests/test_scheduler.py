@@ -289,6 +289,68 @@ class TestSchedulerEvents:
                 state = json.load(f)
             assert f"2026-05-19 Parcours.md#{start.strftime('%Y-%m-%dT%H:%M')}" in state.get("notified_events", [])
 
+    @pytest.mark.asyncio
+    async def test_recurring_event_fires_custom_reminder_message(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cal_dir = os.path.join(tmpdir, "test_user", "workspace", "calendar")
+            start = datetime.now() + timedelta(minutes=10)
+            byday = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"][start.weekday()]
+            _write_event_md(cal_dir, "2026-05-19 Parcours.md", {
+                "title": "Parcours",
+                "date": start.strftime("%Y-%m-%d"),
+                "startTime": start.strftime("%H:%M"),
+                "allDay": False,
+                "type": "recurring",
+                "rrule": f"FREQ=WEEKLY;BYDAY={byday}",
+                "reminders": [
+                    {"minutes_before": 30, "message": "Bereitmachen: {title}", "notify": True},
+                ],
+            })
+
+            notifications = []
+
+            async def capture(user_id, message):
+                notifications.append(message)
+
+            scheduler = Scheduler(tmpdir)
+            scheduler.register(capture)
+            await scheduler._check_all()
+
+            # The custom reminder fires (minutes_before=30 → fire time is in the past).
+            assert any("Bereitmachen: Parcours" in n for n in notifications)
+
+            # Per-occurrence key prevents re-firing on the next tick.
+            notifications.clear()
+            await scheduler._check_all()
+            assert not any("Bereitmachen" in n for n in notifications)
+
+    @pytest.mark.asyncio
+    async def test_single_event_custom_reminder_fires_via_check_events(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cal_dir = os.path.join(tmpdir, "test_user", "workspace", "calendar")
+            start = datetime.now() + timedelta(minutes=10)
+            _write_event_md(cal_dir, "2026-06-02 Tee.md", {
+                "title": "Tee",
+                "date": start.strftime("%Y-%m-%d"),
+                "startTime": start.strftime("%H:%M"),
+                "allDay": False,
+                "type": "single",
+                "reminders": [
+                    {"minutes_before": 30, "message": "Wasser aufsetzen: {title}", "notify": True},
+                ],
+            })
+
+            notifications = []
+
+            async def capture(user_id, message):
+                notifications.append(message)
+
+            scheduler = Scheduler(tmpdir)
+            scheduler.register(capture)
+            await scheduler._check_all()
+
+            assert any("Wasser aufsetzen: Tee" in n for n in notifications)
+
 
 class TestSchedulerCallbacks:
     @pytest.mark.asyncio
