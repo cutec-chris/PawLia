@@ -22,6 +22,7 @@ import yaml
 # ---------------------------------------------------------------------------
 
 SETTABLE_SECTIONS = {"interfaces", "tts", "transcription", "skill-config", "agents"}
+VALID_CODING_BACKENDS = {"auto", "opencode", "aider", "llm"}
 SESSION_SETTABLE_SECTIONS = {"agents", "tts", "disabled_skills", "user"}
 VALID_AGENT_PATHS = {"default", "defaults", "chat", "skill_runner", "vision", "compiler"}
 USER_SECTION_FIELDS = {"timezone"}
@@ -584,6 +585,75 @@ _TTS_VOICE_PATHS = {
 }
 
 
+def cmd_coding(args) -> None:
+    """Set the skill-creator coding backend and install its CLI if missing.
+
+    `coding --backend opencode` writes `coding.backend` (global) or the per-skill
+    override `skill-config.skill-creator.coding_backend` (--scope skill-creator),
+    then auto-installs opencode/aider when the CLI is not yet on PATH.
+    """
+    config_path = _find_config()
+    if not config_path:
+        _out({"success": False, "error": "config.yaml not found"})
+        return
+
+    if _PKG_ROOT not in sys.path:
+        sys.path.insert(0, _PKG_ROOT)
+    try:
+        from pawlia.coding import backend_available, install_backend
+    except Exception as exc:
+        _out({"success": False, "error": f"pawlia.coding unavailable: {exc}"})
+        return
+
+    data = _read(config_path)
+
+    if not args.backend:
+        coding = data.get("coding") or {}
+        sc = (data.get("skill-config") or {}).get("skill-creator") or {}
+        _out({
+            "success": True,
+            "coding_backend": coding.get("backend", "auto"),
+            "skill_creator_override": sc.get("coding_backend"),
+            "available": {b: backend_available(b) for b in ("opencode", "aider")},
+        })
+        return
+
+    backend = args.backend.strip().lower()
+    if backend not in VALID_CODING_BACKENDS:
+        _out({"success": False,
+              "error": f"Unknown backend '{backend}'. Choose: {', '.join(sorted(VALID_CODING_BACKENDS))}"})
+        return
+
+    if args.scope == "skill-creator":
+        path = "skill-config.skill-creator.coding_backend"
+    else:
+        path = "coding.backend"
+    _set_path(data, path, backend)
+    _write(config_path, data)
+
+    result = {"success": True, "path": path, "backend": backend,
+              "value_read_back": _get_path(_read(config_path), path)}
+
+    if backend in ("opencode", "aider"):
+        if backend_available(backend):
+            result["install"] = {"ok": True, "already": True}
+        elif args.no_install:
+            result["available"] = False
+            result["warning"] = (f"'{backend}' set but not installed and --no-install given. "
+                                 f"Install it or rebuild the image.")
+        else:
+            inst = install_backend(backend)
+            result["install"] = inst
+            if not inst.get("ok"):
+                result["warning"] = (
+                    f"'{backend}' is set in config but could not be installed automatically "
+                    f"(often the sandbox/permission). Backend falls back to 'llm' until "
+                    f"'{backend}' is on PATH — install it manually or rebuild the image."
+                )
+
+    _out(result)
+
+
 def cmd_set(args) -> None:
     config_path = _find_config()
     if not config_path:
@@ -691,6 +761,14 @@ def main():
     p.add_argument("--user-id", default=None)
     p.add_argument("--session-dir", default=None)
 
+    p = sub.add_parser("coding", help="Set the skill-creator coding backend (opencode|aider|llm|auto) and install it if missing")
+    p.add_argument("--backend", default=None, choices=sorted(VALID_CODING_BACKENDS),
+                   help="Backend to use (omit to show current + availability)")
+    p.add_argument("--scope", default="global", choices=["global", "skill-creator"],
+                   help="global → coding.backend; skill-creator → per-skill override")
+    p.add_argument("--no-install", action="store_true",
+                   help="Do not auto-install a missing CLI backend")
+
     p = sub.add_parser("disabled-skills", help="List, add or remove disabled skills for this session")
     p.add_argument("--add", default=None, metavar="SKILL", help="Disable a skill")
     p.add_argument("--remove", default=None, metavar="SKILL", help="Re-enable a skill")
@@ -706,6 +784,7 @@ def main():
         "show": cmd_show, "get": cmd_get, "set": cmd_set,
         "model": cmd_model, "agent": cmd_agent, "voice": cmd_voice, "private": cmd_private,
         "session": cmd_session, "disabled-skills": cmd_disabled_skills,
+        "coding": cmd_coding,
     }
     try:
         dispatch[args.cmd](args)

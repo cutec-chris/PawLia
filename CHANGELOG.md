@@ -10,6 +10,35 @@ See `agents.md` › "Versioning & Releases (git-flow)".
 
 ## [Unreleased]
 ### Added
+- Coding-backend selection for the skill-creator is now first-class. The new
+  `config.py coding` command (config skill) sets `coding.backend`
+  (`opencode`/`aider`/`llm`/`auto`) — globally or scoped to the skill-creator
+  via `--scope skill-creator` — and **auto-installs the chosen CLI if missing**
+  (`opencode` via npm, `aider` via pip). `config.py coding` without `--backend`
+  shows the current backend and CLI availability.
+- opencode backend is now coupled to PawLia's `coder` model: `_run_opencode`
+  passes `--model <provider>/<model>` and forwards the provider API key as the
+  conventional env var, so opencode uses the same model/auth as PawLia instead
+  of a separate `opencode auth` setup.
+- Both coding CLIs are bundled in the images — `opencode` in the Alpine image,
+  `opencode` + `aider` in the Debian VoIP image (the production build).
+
+### Changed
+- Coding-backend auto-detection now prefers `opencode` over `aider` (was the
+  reverse), since opencode runs a full agentic loop with its own turn budget.
+
+### Fixed
+- Alpine runtime image now installs `bash`. The bash tool and skill harnesses
+  already prefer real `bash` and only fall back to busybox `ash`; without bash
+  installed, bashisms (arrays, `[[ ]]`, brace expansion) failed and the LLM
+  burned many tool-call turns rewriting harnesses to POSIX `sh` — once blowing a
+  single skill-repair session past 60 turns and exhausting the context window.
+- Documented (`agents.md`) that the bubblewrap write-sandbox cannot create a
+  nested user namespace under rootless podman and degrades to a post-hoc,
+  narrow-scope detective scan there — not an isolation boundary. Noted the
+  `seccomp=unconfined` enabler for real enforcement.
+
+### Added
 - Filesystem write-sandbox for skill execution (`pawlia/sandbox.py`). A skill
   may only write under the per-user session dir (`session/<user_id>/` — the
   workspace, `Downloads/`, credentials, memory) or `/tmp` for throwaway

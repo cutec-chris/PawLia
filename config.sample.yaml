@@ -191,6 +191,10 @@ interfaces:
 #   preanswer_warmup_enabled: true    # warm STT + prepare greeting before answering calls
 #   preanswer_warmup_timeout_seconds: 25.0
 #   preanswer_stt_silence_seconds: 0.4
+#   # --- transport / connection ---
+#   connect_timeout_seconds: 45.0     # max wait for ICE/media connection before giving up
+#   hangup_on_media_end: true         # hang up when the media stream ends
+#   jitter_buffer_capacity: 32        # WebRTC inbound audio jitter buffer (frames)
 #   recording:
 #     enabled: false                  # opt-in: record full calls as WAV/FLAC (default: false)
 #                                     # note: always enabled when log level is DEBUG
@@ -303,6 +307,23 @@ attachments:
 skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload
   allow_workspace: true    # load skills from session/<user>/workspace/skills/ (default: true)
+
+# Coding backend the skill-creator uses to write/fix skill scripts.
+#   opencode → `opencode run` CLI (preferred: full agentic loop, own turn budget)
+#   aider    → `aider` CLI
+#   llm      → single in-process LLM call (always available)
+#   auto     → detect in order: opencode → aider → llm (default)
+# opencode/aider are bundled in the prod image; the config skill can also set
+# this and install a missing CLI at runtime: `config.py coding --backend opencode`.
+# When opencode is used it is coupled to the `coder` agent model (passes
+# --model <provider>/<model> + the provider API key), so no separate opencode
+# model/auth setup is needed.
+# coding:
+#   backend: auto
+# Per-skill override (wins over coding.backend):
+#   skill-config:
+#     skill-creator:
+#       coding_backend: opencode
 
 skill-config:
   # searxng:

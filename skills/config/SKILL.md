@@ -1,6 +1,6 @@
 ---
 name: config
-description: Read and write pawlia configuration settings (interfaces, TTS, transcription, agents, skill-config), override session-local agent selection at runtime, and toggle private mode. Use this to enable/disable features, change providers, adjust interface settings, configure skill parameters, change active session models, or enable/disable private mode.
+description: Read and write pawlia configuration settings (interfaces, TTS, transcription, agents, skill-config), override session-local agent selection at runtime, choose the skill-creator coding backend (opencode/aider/llm), and toggle private mode. Use this to enable/disable features, change providers, adjust interface settings, configure skill parameters, change active session models, switch the coding backend (e.g. "use opencode for writing skills" — installs it if missing), or enable/disable private mode.
 license: MIT
 metadata:
   author: Christian Ulrich
@@ -257,6 +257,42 @@ python <scripts_dir>/config.py disabled-skills --remove researcher
 ```
 
 Changes take effect immediately for the current session.
+
+## Coding backend (skill-creator)
+
+Selects which backend the skill-creator uses to write/fix skill scripts:
+`opencode` (preferred — a full agentic coding CLI with its own turn loop),
+`aider` (CLI fallback), `llm` (single in-process LLM call), or `auto`
+(detect: opencode → aider → llm). Use this when the user wants to switch the
+skill-creator to opencode/aider, e.g. "nimm opencode zum Skripte-Schreiben".
+
+Show the current backend and whether the CLIs are installed:
+
+```bash
+python <scripts_dir>/config.py coding
+```
+
+Set a backend (writes `coding.backend` and **auto-installs the CLI if missing**):
+
+```bash
+python <scripts_dir>/config.py coding --backend opencode
+python <scripts_dir>/config.py coding --backend aider
+```
+
+Scope it to just the skill-creator instead of globally
+(`skill-config.skill-creator.coding_backend`), or skip the auto-install:
+
+```bash
+python <scripts_dir>/config.py coding --backend opencode --scope skill-creator
+python <scripts_dir>/config.py coding --backend aider --no-install
+```
+
+When set to `opencode`, the backend is coupled to PawLia's `coder` model — it
+passes `--model <provider>/<model>` and forwards the provider API key — so you
+do not maintain a separate opencode model/auth. The response's `install` field
+reports whether the CLI was already present or just installed; a `warning`
+field appears if the auto-install failed (then the backend falls back to `llm`
+until the CLI is on PATH). The prod image already bundles opencode and aider.
 
 ## Output
 

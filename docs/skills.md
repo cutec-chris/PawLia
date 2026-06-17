@@ -186,11 +186,15 @@ fixing.
 
 | Backend | How | Requirements |
 |---------|-----|-------------|
+| **opencode** | Runs `opencode run --model <provider>/<model> ...` in the skill directory | `opencode` CLI in PATH |
 | **aider** | Runs `aider --message ... --yes` in the skill directory | `aider` CLI in PATH, configured LLM |
-| **opencode** | Runs `opencode run ...` in the skill directory | `opencode` CLI in PATH |
 | **llm** | Direct LLM call via the `coder` model from config | Always available (fallback) |
 
-Auto-detection order: aider > opencode > llm. Override globally or per-skill.
+Auto-detection order: opencode > aider > llm. opencode is preferred because it
+runs a full agentic coding loop with its own turn management. Override globally
+or per-skill. opencode and aider are bundled in the production image; the
+config skill can also install a missing CLI at runtime
+(`config.py coding --backend opencode`).
 
 ### Commands
 
@@ -210,19 +214,23 @@ python <scripts_dir>/creator.py fix --name "my-skill" --error "SyntaxError..." -
 
 ```yaml
 agents:
-  coder: coder              # model for LLM fallback (aider/opencode use their own)
+  coder: coder              # model for the LLM fallback AND opencode (--model)
 
 coding:
-  backend: auto             # auto | aider | opencode | llm
+  backend: auto             # auto | opencode | aider | llm
 
 # Per-skill override:
 skill-config:
   skill-creator:
-    coding_backend: aider
+    coding_backend: opencode
 ```
 
 When `backend: auto` (default), PawLia picks the first available backend from
-the detection order. Set explicitly to skip detection.
+the detection order. Set explicitly to skip detection. The easiest way to
+switch is `config.py coding --backend <name>` (config skill), which writes this
+setting and installs the CLI if it is missing.
 
-The `coder` model is only used by the LLM fallback backend. Aider and opencode
-use their own configured models.
+The `coder` model drives the LLM fallback backend and is also passed to
+opencode as `--model <provider>/<model>` (with the provider API key forwarded),
+so opencode runs on the same model/auth as PawLia. aider uses its own
+configured model.

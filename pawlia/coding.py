@@ -161,11 +161,63 @@ def detect_backend(config: Dict[str, Any]) -> str:
     if configured != "auto":
         return configured
 
-    if shutil.which("aider"):
-        return "aider"
+    # opencode first: it runs a full agentic coding loop with its own turn
+    # management, which is the point of delegating to it instead of the
+    # single-shot llm backend. aider is the secondary CLI fallback.
     if shutil.which("opencode"):
         return "opencode"
+    if shutil.which("aider"):
+        return "aider"
     return "llm"
+
+
+# Install commands for the optional CLI coding backends. opencode ships as an
+# npm package; aider installs into the active Python environment. Both run
+# without root when the npm prefix / venv is user-writable (the prod image
+# bakes them in at build time, so this is mainly a dev/runtime convenience).
+_BACKEND_INSTALL = {
+    "opencode": ["npm", "install", "-g", "opencode-ai"],
+    "aider": [sys.executable, "-m", "pip", "install", "--quiet", "aider-chat"],
+}
+
+
+def backend_available(backend: str) -> bool:
+    """True if the CLI for *backend* is on PATH (llm needs no binary)."""
+    if backend in ("llm", "auto"):
+        return True
+    return shutil.which(backend) is not None
+
+
+def install_backend(backend: str) -> Dict[str, Any]:
+    """Install the CLI for *backend* (opencode|aider). Best-effort.
+
+    Returns ``{"ok": bool, "backend", "already"|"output"|"error"}``. Idempotent:
+    a backend already on PATH returns ``ok=True, already=True`` without running.
+    """
+    if backend not in _BACKEND_INSTALL:
+        return {"ok": False, "backend": backend,
+                "error": f"No installer for backend '{backend}' (opencode|aider only)."}
+    if backend_available(backend):
+        return {"ok": True, "backend": backend, "already": True}
+
+    cmd = _BACKEND_INSTALL[backend]
+    if backend == "opencode" and not shutil.which("npm"):
+        return {"ok": False, "backend": backend,
+                "error": "npm not found — cannot install opencode. Install Node.js/npm first."}
+    logger.info("Installing coding backend %s: %s", backend, " ".join(cmd))
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "backend": backend, "error": "install timed out after 600s"}
+    except Exception as exc:
+        return {"ok": False, "backend": backend, "error": str(exc)}
+    ok = proc.returncode == 0 and backend_available(backend)
+    return {
+        "ok": ok,
+        "backend": backend,
+        "output": (proc.stdout or "")[-1500:],
+        "error": "" if ok else (proc.stderr or proc.stdout or "")[-1500:],
+    }
 
 
 # ── Aider backend ─────────────────────────────────────────────────────
@@ -175,6 +227,7 @@ def _run_backend(
     cmd: list[str],
     cwd: str | None = None,
     files_modified: list[str] | None = None,
+    env: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Run a coding backend subprocess and return a standardised result dict."""
     logger.info("Running %s: %s", backend, " ".join(cmd[:6]) + "...")
@@ -185,6 +238,7 @@ def _run_backend(
             text=True,
             timeout=300,
             cwd=cwd,
+            env=env,
         )
         return {
             "ok": proc.returncode == 0,
@@ -226,15 +280,66 @@ def _run_aider(
     return _run_backend("aider", cmd, cwd=str(skill_path), files_modified=list(existing_files.keys()))
 
 
+# PawLia provider name → the env var opencode expects for that provider's key.
+# Lets opencode authenticate with the same key PawLia already has, without a
+# separate `opencode auth login`. Providers not listed (e.g. local ollama, or
+# a custom OpenAI-compatible endpoint) need no key / must be configured in
+# opencode's own config — we still pass --model so the right model is used.
+_OPENCODE_PROVIDER_ENV = {
+    "groq": "GROQ_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "xai": "XAI_API_KEY",
+}
+
+
+def _opencode_model_target(config: Dict[str, Any]) -> tuple[list[str], Dict[str, str]]:
+    """Resolve PawLia's ``coder`` model to opencode ``--model`` args + key env.
+
+    Returns ``(["--model", "<provider>/<model_id>"], {ENV: key})`` so opencode
+    uses the same model and provider PawLia is configured with. On any failure
+    returns ``([], {})`` and opencode falls back to its own default model.
+    """
+    try:
+        from pawlia.llm import LLMFactory
+
+        factory = LLMFactory(config)
+        selector = factory.default_model_name("coder")
+        model_cfg = factory.get_model_config(selector)
+        model_id = str(model_cfg.get("model") or selector).strip()
+        provider = str(model_cfg.get("provider") or "").strip()
+        if not (model_id and provider):
+            return [], {}
+        env: Dict[str, str] = {}
+        env_var = _OPENCODE_PROVIDER_ENV.get(provider.lower())
+        if env_var:
+            api_key = str(factory.get_provider_config(provider).get("apiKey") or "").strip()
+            if api_key and api_key.lower() not in ("none", "ollama"):
+                env[env_var] = api_key
+        return ["--model", f"{provider}/{model_id}"], env
+    except Exception as exc:  # pragma: no cover - best-effort coupling
+        logger.warning("opencode --model coupling failed, using opencode default: %s", exc)
+        return [], {}
+
+
 def _run_opencode(
     skill_path: Path,
     task_prompt: str,
+    config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run opencode in non-interactive mode."""
+    """Run opencode in non-interactive mode, coupled to PawLia's coder model."""
     cmd = [
         "opencode", "run",
         "--dir", str(skill_path),
     ]
+
+    model_args, env_extra = _opencode_model_target(config)
+    cmd.extend(model_args)
 
     skill_md = skill_path / "SKILL.md"
     if skill_md.is_file():
@@ -246,7 +351,10 @@ def _run_opencode(
 
     cmd.append(task_prompt)
 
-    return _run_backend("opencode", cmd)
+    env = None
+    if env_extra:
+        env = {**os.environ, **env_extra}
+    return _run_backend("opencode", cmd, env=env)
 
 
 # ── LLM backend (fallback) ───────────────────────────────────────────
@@ -350,7 +458,7 @@ def run_implement(
     if backend == "aider":
         return _run_aider(skill_path, task_prompt, existing_files)
     elif backend == "opencode":
-        return _run_opencode(skill_path, task_prompt)
+        return _run_opencode(skill_path, task_prompt, config)
     else:
         return _run_llm(skill_path, task_prompt, config)
 
@@ -388,6 +496,6 @@ def run_fix(
     if backend == "aider":
         return _run_aider(skill_path, task_prompt, existing_files)
     elif backend == "opencode":
-        return _run_opencode(skill_path, task_prompt)
+        return _run_opencode(skill_path, task_prompt, config)
     else:
         return _run_llm(skill_path, task_prompt, config)

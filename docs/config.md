@@ -176,7 +176,7 @@ agents:
   skill_runner: fast    # default for all skill sub-agents
   vision: vision        # used when the user sends an image
   compiler: compiler    # model for compiling SKILL.md → workflow.yaml
-  coder: smart          # model for coding backend LLM fallback (implement/fix)
+  coder: smart          # coding backend model (llm fallback + opencode --model)
   skills:               # per-skill overrides
     searxng: groq-fast,fast
     browser: smart,fast
@@ -261,8 +261,8 @@ voip:
   min_speech_like_ratio: 0.08
   min_consecutive_speechlike_frames: 4
   min_resume_speech_frames: 3
-  vad_max_chunk_seconds: 0  # disabled by default
-  pre_speech_seconds: 0.4
+  vad_max_chunk_seconds: 15  # force-flush after 15s (0 disables)
+  pre_speech_seconds: 0.6
   webrtcvad_enabled: true
   webrtcvad_mode: 2
   webrtcvad_min_voiced_ratio: 0.12
@@ -290,7 +290,7 @@ voip:
 | `voip.min_speech_like_ratio` | Minimum share of frames that must simultaneously be active and speech-like before a chunk is sent to STT |
 | `voip.min_consecutive_speechlike_frames` | Minimum sustained run of speech-like frames required before a chunk is sent to STT |
 | `voip.min_resume_speech_frames` | Consecutive speech-like frames required to break an in-progress pause once silence has already started accumulating. Automatically scaled up in noisy environments so brief noise bursts cannot reset the silence timer |
-| `voip.vad_max_chunk_seconds` | Force-flush an open speech buffer after this many seconds regardless of pause detection. `0` disables the limit (default). Useful as a safety net in environments where noise keeps resetting the silence counter |
+| `voip.vad_max_chunk_seconds` | Force-flush an open speech buffer after this many seconds regardless of pause detection (default `15`). `0` disables the limit. Acts as a safety net in environments where noise keeps resetting the silence counter; in loud environments the noise-coupled endpointing caps the chunk even shorter |
 | `voip.pre_speech_seconds` | Audio lead-in to prepend before detected speech so STT keeps the beginnings of words |
 | `voip.webrtcvad_enabled` | Enable an additional lightweight WebRTC speech detector before sending audio to STT |
 | `voip.webrtcvad_mode` | WebRTC VAD aggressiveness from `0` (lenient) to `3` (strict) |
@@ -305,6 +305,9 @@ voip:
 | `voip.preanswer_warmup_enabled` | Warm STT with silent audio and prepare the LLM/TTS greeting before sending `m.call.answer` |
 | `voip.preanswer_warmup_timeout_seconds` | Maximum time to wait for pre-answer warmup before answering anyway |
 | `voip.preanswer_stt_silence_seconds` | Duration of the silent WAV sent through STT during pre-answer warmup |
+| `voip.connect_timeout_seconds` | Max wait for the ICE/media connection to establish before giving up (default `45`) |
+| `voip.hangup_on_media_end` | Hang up the call when the media stream ends (default `true`) |
+| `voip.jitter_buffer_capacity` | WebRTC inbound-audio jitter buffer size in frames (default `32`) |
 
 ### Adaptive silence detection
 
@@ -447,7 +450,7 @@ workspace:
 | `weekly_squash_time` | `23:30` | Time for weekly squash |
 | `push` | `false` | Push to remote after squash (`--force-with-lease`) |
 
-Auto-commits are throttled to max 1 per 5 minutes. See [automation.md](automation.md#workspace-git-sync) for details.
+Auto-commits are throttled to max 1 per 5 minutes. When `push: true`, the scheduler also pulls after pushing; **on divergence the remote is authoritative — the workspace is `reset --hard` to `origin/HEAD`, discarding diverging local commits.** See [automation.md](automation.md#workspace-git-sync) for details.
 
 ## Skill Configuration
 
@@ -544,22 +547,36 @@ Controls the coding backend used by `skill-creator implement` and `skill-creator
 
 ```yaml
 coding:
-  backend: auto             # auto | aider | opencode | llm
+  backend: auto             # auto | opencode | aider | llm
 ```
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `backend` | `auto` | `auto` picks the first available (aider > opencode > llm), or set explicitly |
+| `backend` | `auto` | `auto` picks the first available (opencode > aider > llm), or set explicitly |
 
 Per-skill override:
 
 ```yaml
 skill-config:
   skill-creator:
-    coding_backend: aider   # force aider for all skill-creator operations
+    coding_backend: opencode   # force opencode for all skill-creator operations
 ```
 
-The `agents.coder` model is used by the LLM fallback backend only. Aider and opencode use their own model configuration. See [skills.md](skills.md#coding-backend) for details.
+The easiest way to switch is the config skill, which also installs the CLI if
+it is missing:
+
+```
+config.py coding --backend opencode               # global
+config.py coding --backend aider --scope skill-creator
+config.py coding                                   # show current + availability
+```
+
+The `agents.coder` model is used by the LLM fallback backend, **and** by
+opencode: when `backend: opencode`, PawLia passes `--model <provider>/<model>`
+plus the provider API key, so opencode runs on the same `coder` model/auth
+(no separate `opencode auth` needed). aider uses its own model configuration.
+opencode and aider are bundled in the production image. See
+[skills.md](skills.md#coding-backend) for details.
 
 ## Skill Installation
 

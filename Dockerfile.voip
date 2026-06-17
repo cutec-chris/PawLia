@@ -55,6 +55,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Optional coding backends for the skill-creator (config: coding.backend).
+# Baked in so prod always has them; the config skill can also install at
+# runtime when missing. opencode is the preferred agentic backend; aider is
+# the CLI fallback.
+RUN npm install -g opencode-ai \
+    && pip install --no-cache-dir aider-chat
+
 WORKDIR /app
 COPY constraints.txt constraints.txt
 ENV PIP_CONSTRAINT=/app/constraints.txt

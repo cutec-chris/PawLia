@@ -345,10 +345,10 @@ workspace:
 
 ### How it works
 
-1. **Auto-commit** — every scheduler tick (60s), uncommitted changes are committed. Throttled to max 1 commit per 5 minutes to avoid noise.
-2. **Daily squash** — at the configured time (default 23:00), all commits from today are squashed into one `Daily: YYYY-MM-DD` commit.
-3. **Weekly squash** — on the configured day (default Sunday) at the configured time (default 23:30), all commits from this week are squashed into one `Week: YYYY-Www` commit.
-4. **Push** — if `push: true` and a remote is configured, pushes after each squash using `--force-with-lease`.
+1. **Auto-commit** — every scheduler tick (60s), uncommitted changes are committed. Throttled to max 1 commit per 5 minutes to avoid noise. Files whose names contain characters git cannot represent are auto-renamed first; if a path still cannot be represented, the commit is skipped that tick rather than failing.
+2. **Push + pull** — when `push: true` and a remote is configured, after committing the scheduler pushes, then pulls. The pull is `merge --ff-only`; on divergence (local and remote histories disagree) **the remote becomes authoritative — the workspace is `reset --hard` to `origin/HEAD`, discarding diverging local commits.** This keeps multi-device sync simple but means the remote always wins. Both push and pull are throttled to once per 5 minutes. Do not hand-edit the remote history out of band if you have local changes you want to keep.
+3. **Daily squash** — at the configured time (default 23:00), all commits from today are squashed into one `Daily: YYYY-MM-DD` commit.
+4. **Weekly squash** — on the configured day (default Sunday) at the configured time (default 23:30), all commits from this week are squashed into one `Week: YYYY-Www` commit. After a squash the scheduler pushes with `--force-with-lease`.
 
 ### Setting up a remote
 

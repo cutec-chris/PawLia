@@ -31,6 +31,8 @@ FROM alpine:3.20
 #   python3   — interpreter
 #   py3-olm   — E2EE (visible to venv via --system-site-packages)
 #   nodejs/npm — AgentSkills
+#   bash      — skill harnesses & the bash tool run under real bash; busybox
+#               ash lacks arrays/[[ ]]/brace-expansion and caused LLM thrashing
 RUN apk add --no-cache \
         python3 \
         py3-olm \
@@ -41,9 +43,16 @@ RUN apk add --no-cache \
         openssh-client \
         libffi \
         bubblewrap \
+        bash \
         git
 
 WORKDIR /app
+
+# Optional coding backend for the skill-creator (config: coding.backend).
+# opencode is npm-based (no native build) so it installs cleanly on musl.
+# aider is left to the Debian image (Dockerfile.voip) — its deps are painful
+# to build on musl; the config skill can still attempt a runtime install.
+RUN npm install -g opencode-ai
 
 # Copy the venv from the builder
 COPY --from=builder /venv /venv

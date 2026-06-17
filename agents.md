@@ -187,10 +187,13 @@ skills/
 `config.yaml`. The session-level `workspace/config.yaml` can override them per
 skill; `app.py` merges session over global when building the skill context.
 
-**Write access**: Skill directories are read-only at runtime (enforced by the
-bash write sandbox, see Tools). Skills that generate files — notably
-skill-creator — write into the user's workspace instead; a fallback guard
-detects and reports stray writes outside the allowed paths.
+**Write access**: Skills may only write under `session/<user_id>/` and `/tmp`;
+skill directories are out of bounds. When bubblewrap can create a nested user
+namespace this is *enforced* (read-only root); under rootless podman it cannot,
+so it degrades to a post-hoc detective scan of `/app/skills` + `/app/pawlia`
+that reports stray writes but does not prevent them (see Tools › Write sandbox).
+Skills that generate files — notably skill-creator — write into the user's
+workspace instead.
 
 **Credentials** (`pawlia/credentials.py`): Per-user credential store at
 `session/.credentials/{user_id}.json` — deliberately **outside** the
@@ -203,6 +206,18 @@ The ChatAgent sees skills as OpenAI function specs (name + description + query p
 
 SKILL.md supports variable substitution: `<user_id>`, `<session_dir>`, `<scripts_dir>`.
 
+**Coding backend** (`pawlia/coding.py`): `skill-creator`'s `implement`/`fix`
+delegate script writing/debugging to a coding backend selected by `coding.backend`
+(`opencode` | `aider` | `llm` | `auto`) or the per-skill override
+`skill-config.skill-creator.coding_backend`. `auto` detects in order
+**opencode → aider → llm**. opencode and aider run as subprocesses (own agentic
+loop / turn budget); `llm` is a single in-process call via the `coder` model.
+opencode is coupled to the `coder` model — it is launched with
+`--model <provider>/<model>` and the provider API key forwarded as the
+conventional env var, so it needs no separate `opencode auth`. Both CLIs are
+bundled in the images; the config skill switches the backend and installs a
+missing CLI at runtime via `config.py coding --backend <name>`.
+
 ## Tools (`pawlia/tools/`)
 
 | Tool | Name | Purpose |
@@ -211,10 +226,23 @@ SKILL.md supports variable substitution: `<user_id>`, `<session_dir>`, `<scripts
 | `AttachFileTool` | `attach_file` | Send a file to the user. Not in the ToolRegistry — passed to ChatAgent as `direct_tools` (`app.py`) and executed inline; queues bytes on `agent.pending_attachments`, which each interface delivers (Matrix: into the active thread). Paths resolve relative to the workspace; absolute paths are symlink-resolved and validated against allowed roots (workspace, Downloads, /tmp, `attachments.extra_allowed_roots`). Size limit `attachments.max_outgoing_bytes` (default 25 MB). |
 
 **Write sandbox** (`pawlia/sandbox.py`): Bash commands run under a bubblewrap
-write-sandbox when unprivileged user namespaces are available — read-only root
-with only `session/<user_id>/` and `/tmp` bind-mounted writable. Without bwrap,
-a fallback takes an mtime snapshot before execution and reports stray writes
-afterwards. Skill directories are therefore read-only at runtime.
+write-sandbox when bubblewrap can create a nested user namespace — read-only
+root with only `session/<user_id>/` and `/tmp` bind-mounted writable. This is
+the only mode that actually *prevents* out-of-bounds writes.
+
+**Caveat — rootless podman:** under rootless podman (the production deployment
+on thalia) the container already runs inside a mapped user namespace, and
+bubblewrap cannot create a nested one — `bwrap` fails with `Operation not
+permitted` and `bwrap_available()` returns `False`. The sandbox then degrades
+to a **detective fallback**: an mtime snapshot taken before execution, compared
+afterwards to report stray writes. Note its limits — it is *post-hoc* (the
+write has already happened, it is only flagged, not reverted) and it only scans
+`/app/skills` and `/app/pawlia` (`bash.py`), so writes elsewhere (e.g. other
+users' session dirs, `/etc`) are invisible to it. **Do not rely on it as an
+isolation boundary in prod.** To get real enforcement under rootless podman,
+run the pawlia container with `security_opt: ["seccomp=unconfined"]` (or a
+custom profile that permits `clone3`/`unshare` with `CLONE_NEWUSER`), which
+unblocks the nested-userns `clone3` that the default seccomp profile rejects.
 
 **Note**: `ReminderTool` and the tools in `files_tools.py` (ReadFile/ListFiles/GrepFiles, delegating to the files skill script) exist in code but are not registered in the App. Reminders are managed directly by the Scheduler.
 
@@ -322,7 +350,7 @@ Background asyncio task that runs every 60 seconds and scans all user sessions f
 - **Conversation summarization**: After 5 min idle (`IDLE_SUMMARIZE_MIN`). Soft `"tokens"` and legacy `"exchange_limit"`/`"repetition"` triggers fire here.
 - **Background tasks** (`/background`): After 10 min idle (`IDLE_BACKGROUND_MIN`).
 - **Memory indexing** (RAG backend): After configurable idle time, default 20 min (`IDLE_MEMORY_MIN`, override via `skill-config.memory.idle_minutes`).
-- **Workspace git auto-commit** (when `workspace-git.enabled`): throttled to max 1 commit per 5 minutes; daily and weekly squashes run at the configured time.
+- **Workspace git auto-commit** (when `workspace-git.enabled`): throttled to max 1 commit per 5 minutes; invalid-character paths are auto-renamed (commit skipped if still unrepresentable); daily and weekly squashes run at the configured time. When `push` is on, the scheduler pushes then pulls (`--ff-only`); on divergence the remote is authoritative (`reset --hard origin/HEAD`, discarding local commits). See `pawlia/workspace_git.py`.
 
 The scheduler provides LLM priority gating via `acquire_llm()` / `release_llm()` to block background tasks during active chat sessions. Interfaces register async callbacks via `scheduler.register(callback)` for proactive message delivery.
 

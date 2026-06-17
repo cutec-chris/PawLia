@@ -107,7 +107,23 @@ Commands use `//` as prefix instead of `/`:
 
 ### VoIP (optional)
 
-PawLia can accept Matrix voice calls using WebRTC. Requires `aiortc` to be installed (included in the Docker image). Configure a STUN server and a TTS provider:
+PawLia accepts Matrix voice calls over two transport paths, chosen automatically per call:
+
+- **Legacy 1:1 WebRTC** (`m.call.*`, e.g. Element Web/Desktop) — requires `aiortc` (included in the Docker image) and a STUN server.
+- **MatrixRTC / Element X** (`org.matrix.msc3401.call`, LiveKit SFU) — used by Element X and other MatrixRTC clients. Requires the `livekit` python package (in the VoIP image). **Enabled by default whenever `livekit` is importable**; the LiveKit focus (SFU) URL is taken from `interfaces.matrix.matrixrtc.focus_url`, else discovered from the homeserver's `.well-known` `rtc_foci`, else from the oldest call member's membership event.
+
+Disable the MatrixRTC path or pin a focus URL under `interfaces.matrix.matrixrtc`:
+
+```yaml
+interfaces:
+  matrix:
+    matrixrtc:
+      enabled: true                       # join Element X / MatrixRTC calls (default: true when livekit is available)
+      focus_url: https://rtc.example.org  # optional; else from .well-known rtc_foci / membership
+      e2ee: true                          # end-to-end encrypt media (Phase 2)
+```
+
+The VAD / endpointing / AGC pipeline and the TTS path below are shared by both transports. Configure a STUN server (legacy path) and a TTS provider:
 
 ```yaml
 interfaces:
