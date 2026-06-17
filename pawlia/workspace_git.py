@@ -18,7 +18,7 @@ from datetime import datetime
 logger = logging.getLogger("pawlia.workspace_git")
 
 COMMIT_COOLDOWN = 300  # seconds — max 1 commit per 5 minutes
-PULL_COOLDOWN = 3600  # seconds — max 1 pull per hour
+PULL_COOLDOWN = 300  # seconds — max 1 pull per 5 minutes
 
 
 def _run(cmd: list[str], cwd: str, quiet: bool = False) -> tuple[int, str]:

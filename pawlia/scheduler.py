@@ -600,19 +600,16 @@ class Scheduler:
         if not ensure_repo(workspace):
             return
 
-        # Commit local changes FIRST so they are never destroyed by pull's
-        # hard reset on divergence — they remain recoverable via the reflog.
+        # Commit → push → pull order: push local commits to remote before
+        # pulling, so ff-only always works and reset --hard never discards work.
         committed = auto_commit(workspace)
 
-        # Pull from remote (throttled to 1/h inside pull) — remote always wins
-        # on divergence (ff-only, else reset --hard to origin/HEAD).
         if self._git_push:
+            if committed:
+                push(workspace)
+            # Pull after push so remote already contains our changes and
+            # ff-only merge succeeds without needing a hard reset.
             pull(workspace)
-
-        # Push if we produced local commits (no-op after a hard-reset pull,
-        # since local then equals remote).
-        if committed and self._git_push:
-            push(workspace)
 
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
@@ -872,9 +869,12 @@ def _interpolate_event_text(message: str, event: dict) -> str:
 def _next_occurrence(fire_at: datetime, recurrence: str) -> datetime:
     """Calculate the next occurrence for a recurring reminder."""
     rec = recurrence.lower().strip()
-    if "day" in rec:
-        return fire_at + timedelta(days=1)
-    elif "week" in rec:
+    # Check weekly first: explicit "weekly", RRULE FREQ=WEEKLY, "every week",
+    # or any weekday name (mon/tue/wed/thu/fri/sat/sun) — must come before
+    # the "day" check to avoid "monday"/"wednesday" matching as daily.
+    _weekly = ("weekly", "freq=weekly", "byday=", "every week",
+               "mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    if any(kw in rec for kw in _weekly):
         return fire_at + timedelta(weeks=1)
     elif "month" in rec:
         month = fire_at.month % 12 + 1

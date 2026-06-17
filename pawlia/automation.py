@@ -370,6 +370,8 @@ class JobRunner:
                 if notify is True:
                     output = result if result else "erledigt"
                     await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{output}")
+                elif notify == "output_only" and result:
+                    await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{result}")
 
             except Exception as e:
                 logger.error("Job '%s' failed for %s: %s", job_name, user_id, e)
