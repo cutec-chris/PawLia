@@ -62,13 +62,49 @@ _CHAR_TRANS = str.maketrans({'"': "'", ':': '-', '<': '(', '>': ')', '|': '-',
                               '?': '', '*': ''})
 
 
+def _git_unquote(raw: str) -> str:
+    """Decode git's C-string path quoting (applied when paths contain non-ASCII or specials)."""
+    if not (raw.startswith('"') and raw.endswith('"')):
+        return raw
+    raw = raw[1:-1]
+    result = bytearray()
+    i = 0
+    while i < len(raw):
+        c = raw[i]
+        if c == '\\' and i + 1 < len(raw):
+            n = raw[i + 1]
+            if n == '\\':
+                result.append(ord('\\'))
+                i += 2
+            elif n == '"':
+                result.append(ord('"'))
+                i += 2
+            elif n == 'n':
+                result.append(10)
+                i += 2
+            elif n == 't':
+                result.append(9)
+                i += 2
+            elif '0' <= n <= '7' and i + 3 < len(raw):
+                result.append(int(raw[i + 1:i + 4], 8))
+                i += 4
+            else:
+                result.append(ord(c))
+                i += 1
+        else:
+            result.append(ord(c))
+            i += 1
+    return result.decode('utf-8', errors='replace')
+
+
 def _scan_problematic_paths(workspace: str) -> list[str]:
     """Return all tracked or untracked paths with invalid filename characters."""
     bad: list[str] = []
     rc, out = _git(workspace, "ls-files", "--cached", "--others", "--modified",
                    quiet=True)
     if rc == 0 and out:
-        for path in out.splitlines():
+        for raw in out.splitlines():
+            path = _git_unquote(raw)
             if _INVALID_PATH_CHARS.search(path):
                 bad.append(path)
     return bad
