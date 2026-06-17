@@ -794,6 +794,15 @@ class CallCore:
             logger.error("call %s: missing dependency: %s", self.call_id[:8], e)
             return None
 
+        # Peak-normalize to prevent hard-clipping when AGC has over-boosted the signal.
+        # Clipped audio causes STT to produce hallucinations/garbage.
+        max_amp = float(np.max(np.abs(pcm))) if len(pcm) else 0.0
+        if max_amp > 1.0:
+            logger.debug(
+                "call %s: normalizing transcription PCM (max_amp=%.2f)", self.call_id[:8], max_amp
+            )
+            pcm = pcm / max_amp
+
         if logger.isEnabledFor(logging.DEBUG):
             try:
                 import wave

@@ -51,8 +51,7 @@ class _FakeVad:
 
 @pytest.mark.asyncio
 async def test_process_speech_uses_call_system_prompt():
-    pcm = MagicMock()
-    pcm.__len__.return_value = 48000
+    pcm = np.zeros(48000, dtype=np.float32)
 
     app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     client = SimpleNamespace(room_typing=AsyncMock())
@@ -105,8 +104,7 @@ async def test_process_speech_uses_call_system_prompt():
 
 @pytest.mark.asyncio
 async def test_process_speech_ignores_standalone_stt_hallucination():
-    pcm = MagicMock()
-    pcm.__len__.return_value = 48000
+    pcm = np.zeros(48000, dtype=np.float32)
 
     app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     client = SimpleNamespace(room_typing=AsyncMock())
