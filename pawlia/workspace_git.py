@@ -58,6 +58,8 @@ def _config_get(workspace: str, key: str) -> str:
 
 
 _INVALID_PATH_CHARS = re.compile(r'[<>:"|?*]')
+_CHAR_TRANS = str.maketrans({'"': "'", ':': '-', '<': '(', '>': ')', '|': '-',
+                              '?': '', '*': ''})
 
 
 def _scan_problematic_paths(workspace: str) -> list[str]:
@@ -70,6 +72,58 @@ def _scan_problematic_paths(workspace: str) -> list[str]:
             if _INVALID_PATH_CHARS.search(path):
                 bad.append(path)
     return bad
+
+
+def _fix_path_component(name: str) -> str:
+    fixed = name.translate(_CHAR_TRANS)
+    fixed = re.sub(r'-{2,}', '-', fixed)
+    return fixed or '_'
+
+
+def _fix_problematic_paths(workspace: str) -> int:
+    """Rename files with invalid characters in-place. Returns count of renamed files."""
+    bad = _scan_problematic_paths(workspace)
+    if not bad:
+        return 0
+
+    renamed = 0
+    for rel_path in bad:
+        parts = rel_path.replace('\\', '/').split('/')
+        fixed_parts = [_fix_path_component(p) for p in parts]
+        if fixed_parts == parts:
+            continue
+        fixed_rel = '/'.join(fixed_parts)
+
+        src = os.path.join(workspace, rel_path)
+        dst = os.path.join(workspace, fixed_rel)
+
+        if not os.path.exists(src):
+            continue
+
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+        if os.path.exists(dst) and os.path.abspath(src) != os.path.abspath(dst):
+            base, ext = os.path.splitext(fixed_rel)
+            fixed_rel = f"{base}_1{ext}"
+            dst = os.path.join(workspace, fixed_rel)
+            if os.path.exists(dst):
+                logger.warning("Cannot rename %s: target already exists", rel_path)
+                continue
+
+        # git mv for tracked files; fall back to os.rename for untracked
+        rc, _ = _git(workspace, "mv", "--", rel_path, fixed_rel, quiet=True)
+        if rc == 0:
+            logger.info("git mv (invalid chars): %s → %s", rel_path, fixed_rel)
+            renamed += 1
+        else:
+            try:
+                os.rename(src, dst)
+                logger.info("Renamed (invalid chars): %s → %s", rel_path, fixed_rel)
+                renamed += 1
+            except OSError as e:
+                logger.warning("Failed to rename %s: %s", rel_path, e)
+
+    return renamed
 
 
 def _ensure_identity(workspace: str) -> None:
@@ -114,7 +168,7 @@ def _ensure_protect_config(workspace: str) -> None:
     if bad:
         logger.warning(
             "Workspace has %d file(s) with characters invalid on Android "
-            "(<> : \" | ? *). These will fail on checkout. Renaming suggested: %s",
+            "(<> : \" | ? *). Will auto-rename on next commit: %s",
             len(bad), bad[:5],
         )
 
@@ -161,12 +215,13 @@ def auto_commit(workspace: str) -> bool:
     if rc != 0 or not status:
         return False
 
-    # Refuse commit if files with invalid chars are staged
+    # Auto-rename files with invalid characters, then bail if any remain
+    _fix_problematic_paths(workspace)
     bad = _scan_problematic_paths(workspace)
     if bad:
         logger.warning(
-            "Skipping auto-commit: %d file(s) with invalid characters "
-            "(<> : \" | ? *). Rename them first: %s",
+            "Skipping auto-commit: %d file(s) with invalid characters still "
+            "could not be renamed: %s",
             len(bad), bad[:5],
         )
         return False
