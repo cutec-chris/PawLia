@@ -687,6 +687,113 @@ async def test_process_speech_does_not_interrupt_for_non_meaningful_barge_in():
 
 
 @pytest.mark.asyncio
+async def test_process_speech_discards_non_keyword_speech_while_thinking():
+    """While thinking (hold tone, not speaking) non-keyword speech is side
+    conversation and must be discarded, not queued for the next turn."""
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-think-discard",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-think-discard",
+        client=client,
+        app=app,
+        cfg={},
+        agent=MagicMock(),
+        send_cb=send_cb,
+    )
+    # Bot is thinking: hold tone playing but no TTS yet.
+    session._transport = SimpleNamespace(
+        interrupt=MagicMock(),
+        stop_after_current_sentence=MagicMock(),
+        stop_hold=MagicMock(),
+        is_playing=True,
+        is_tts_playing=False,
+    )
+    session._cancel_active_response = AsyncMock()
+    session._pending_transcripts = []
+
+    with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="schatz wo ist die fernbedienung")):
+        await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
+
+    assert session._pending_transcripts == []
+    session._cancel_active_response.assert_not_awaited()
+    send_cb.assert_awaited_once_with("~~🎙️ *schatz wo ist die fernbedienung*~~ *(verworfen)*")
+
+
+@pytest.mark.asyncio
+async def test_process_speech_queues_while_thinking_when_configured():
+    """With queue_speech_while_thinking enabled, non-keyword speech during the
+    thinking phase is queued for the next response ("nachreichen")."""
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    send_cb = AsyncMock()
+    session = CallSession(
+        call_id="call-think-queue",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-think-queue",
+        client=client,
+        app=app,
+        cfg={},
+        agent=MagicMock(),
+        send_cb=send_cb,
+    )
+    session.QUEUE_SPEECH_WHILE_THINKING = True
+    session._transport = SimpleNamespace(
+        interrupt=MagicMock(),
+        stop_after_current_sentence=MagicMock(),
+        stop_hold=MagicMock(),
+        is_playing=True,
+        is_tts_playing=False,
+    )
+    session._cancel_active_response = AsyncMock()
+    session._pending_transcripts = []
+
+    with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="und kauf bitte milch")):
+        await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
+
+    assert session._pending_transcripts == ["und kauf bitte milch"]
+    send_cb.assert_awaited_once_with("🎙️ *und kauf bitte milch*")
+
+
+@pytest.mark.asyncio
+async def test_process_speech_keyword_interrupts_even_while_thinking():
+    """A keyword (e.g. 'pawlia'/'stop') interrupts regardless of thinking state."""
+    app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
+    client = SimpleNamespace(room_typing=AsyncMock())
+    session = CallSession(
+        call_id="call-think-kw",
+        room_id="!room:test",
+        caller_id="@user:test",
+        thread_id="thread-think-kw",
+        client=client,
+        app=app,
+        cfg={},
+        agent=MagicMock(),
+        send_cb=AsyncMock(),
+    )
+    session._transport = SimpleNamespace(
+        interrupt=MagicMock(),
+        stop_after_current_sentence=MagicMock(),
+        stop_hold=MagicMock(),
+        is_playing=True,
+        is_tts_playing=False,
+    )
+    session._cancel_active_response = AsyncMock()
+    session._queue_transcript_response = AsyncMock()
+
+    with patch.object(session, "_transcribe_speech", new=AsyncMock(return_value="stop pawlia")):
+        await session._process_speech(np.zeros(4800, dtype=np.float32), 48000, interrupt_playback=True)
+
+    session._transport.stop_after_current_sentence.assert_called_once()
+    session._cancel_active_response.assert_awaited_once()
+    session._queue_transcript_response.assert_awaited_once_with("stop pawlia")
+
+
+@pytest.mark.asyncio
 async def test_process_speech_starts_hold_before_queueing_response():
     app = SimpleNamespace(config={}, llm=SimpleNamespace(audio_model_info=MagicMock(return_value=None)))
     client = SimpleNamespace(room_typing=AsyncMock())

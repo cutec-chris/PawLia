@@ -188,6 +188,9 @@ interfaces:
 #   agc_max_gain: 12.0                # upper cap for AGC amplification
 #   agc_smoothing: 0.15               # how quickly AGC reacts (higher = faster)
 #   bargein_rms_threshold: 0.05       # raw RMS to interrupt TTS playback
+#   queue_speech_while_thinking: false # while PawLia is thinking (hold tone), speech without an
+#                                      # interrupt keyword (halt/stop/warte/moment/pause/pawlia) is
+#                                      # discarded as side conversation. Set true to queue it instead.
 #   preanswer_warmup_enabled: true    # warm STT + prepare greeting before answering calls
 #   preanswer_warmup_timeout_seconds: 25.0
 #   preanswer_stt_silence_seconds: 0.4

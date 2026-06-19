@@ -10,6 +10,14 @@ See `agents.md` › "Versioning & Releases (git-flow)".
 
 ## [Unreleased]
 ### Added
+- Skill runner detects a skill whose **own script keeps crashing** with the same
+  traceback (same file:line:exception, even across varied surrounding commands)
+  and stops after `_ABORT_REPEATED_ERROR` (3) occurrences instead of inventing
+  manual workarounds for the rest of the turn budget. It returns a repair offer
+  so PawLia asks the user whether to hand the broken skill to the `skill-creator`
+  for repair. `skill-creator` itself is exempt (no self-repair loop). Detection
+  reads the tool *result text*, since the bash tool reports `ok=True` even on a
+  non-zero exit.
 - Coding-backend selection for the skill-creator is now first-class. The new
   `config.py coding` command (config skill) sets `coding.backend`
   (`opencode`/`aider`/`llm`/`auto`) — globally or scoped to the skill-creator
@@ -28,6 +36,18 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   reverse), since opencode runs a full agentic loop with its own turn budget.
 
 ### Fixed
+- VoIP: while PawLia is *thinking* (hold tone, not yet speaking), speech without
+  an interrupt keyword (`halt`/`stop`/`warte`/`moment`/`pause`/`pawlia` …) is
+  discarded again as side conversation instead of being queued into the next
+  turn — so a room conversation no longer derails an in-progress task. A
+  regression from the hold-tone fix (`a26a9db`). Re-enable the queueing
+  ("nachreichen") behaviour with `voip.queue_speech_while_thinking: true`.
+- Skill tool-result truncation no longer fights the files-read pagination: a
+  `files read` page is now bounded by bytes (10 kB) and the skill runner's
+  result cap raised to match (16 kB), so a single page survives intact. Before,
+  150-line pages exceeded the 4 kB cap, the model saw "[Tool output truncated]"
+  and re-read the same range in a loop (observed: 8 LLM turns for one 358-line
+  file).
 - Alpine runtime image now installs `bash`. The bash tool and skill harnesses
   already prefer real `bash` and only fall back to busybox `ash`; without bash
   installed, bashisms (arrays, `[[ ]]`, brace expansion) failed and the LLM

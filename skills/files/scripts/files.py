@@ -411,6 +411,14 @@ def cmd_list(args) -> None:
 
 _DEFAULT_READ_LIMIT = 150
 _QUERY_CONTEXT_LINES = 3
+# A single read page must survive the skill runner's tool-result cap
+# (pawlia/agents/skill_runner.py: MAX_RESULT) intact. If a page is truncated
+# there, the model reads "[Tool output truncated]" and re-reads the same range
+# in a loop (observed: 8 LLM turns for one 358-line file). Lines can be
+# arbitrarily long, so a line count alone cannot guarantee the page fits — we
+# also cap the returned content by bytes, leaving headroom for the JSON
+# envelope and escaping. Keep this comfortably below MAX_RESULT.
+_READ_BYTE_BUDGET = 10_000
 
 
 def _filter_by_query(lines: list, query: str) -> tuple:
@@ -499,8 +507,16 @@ def cmd_read(args) -> None:
 
     offset = max(0, args.offset or 0)
     limit = args.limit if args.limit is not None else _DEFAULT_READ_LIMIT
-    sliced = "".join(lines[offset:offset + limit])
-    returned = max(0, min(total - offset, limit))
+    window = lines[offset:offset + limit]
+    sliced = "".join(window)
+    # Bound the page by bytes so it survives the skill-runner tool-result cap
+    # without a truncation marker (which would make the model re-read in a
+    # loop). Drop trailing lines until it fits; always return at least one line
+    # so progress is guaranteed, and let next_offset/has_more drive pagination.
+    while len(sliced.encode("utf-8")) > _READ_BYTE_BUDGET and len(window) > 1:
+        window = window[:-1]
+        sliced = "".join(window)
+    returned = len(window)
     result = {
         "success": True,
         "filename": args.filename,

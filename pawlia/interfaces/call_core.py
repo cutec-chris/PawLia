@@ -290,6 +290,12 @@ class CallCore:
     NET_RECOVER_MESSAGE = "📶 Verbindung wieder stabil."
     JITTER_BUFFER_CAPACITY = 32
     RESPONSE_DELAY_SECONDS = 1.2
+    # While the agent is *thinking* (hold tone playing, not yet speaking),
+    # speech that lacks an interrupt keyword is discarded by default — so a
+    # side conversation (e.g. talking to someone else in the room) does not
+    # get captured and fed into the next turn. Set True to instead queue such
+    # speech for the next response ("nachreichen"-Modus).
+    QUEUE_SPEECH_WHILE_THINKING = False
 
     def __init__(
         self,
@@ -450,6 +456,9 @@ class CallCore:
         self.JITTER_BUFFER_CAPACITY = get_int_config(
             voip_cfg, "jitter_buffer_capacity", self.JITTER_BUFFER_CAPACITY,
             context=ctx, minimum=2)
+        self.QUEUE_SPEECH_WHILE_THINKING = get_bool_config(
+            voip_cfg, "queue_speech_while_thinking",
+            self.QUEUE_SPEECH_WHILE_THINKING, context=ctx)
 
     # ------------------------------------------------------------------
     # Public API
@@ -1280,11 +1289,16 @@ class CallCore:
                     await self._queue_transcript_response(text)
                 elif self._transport and self._transport.is_tts_playing:
                     await self._send_discarded_transcript(text)
-                else:
+                elif self.QUEUE_SPEECH_WHILE_THINKING:
                     logger.info("call %s: speech during hold (bot thinking), queueing: %s",
                                 self.call_id[:8], text)
                     await self._send_cb(f"🎙️ *{text}*")
                     self._pending_transcripts.append(text)
+                else:
+                    # Bot is thinking (hold tone, not speaking). Without an
+                    # interrupt keyword this is treated as side conversation and
+                    # discarded, so it isn't fed into the next turn.
+                    await self._send_discarded_transcript(text)
                 return
 
             if self._transport:

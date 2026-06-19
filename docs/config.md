@@ -253,6 +253,7 @@ voip:
   silence_threshold: 0.018
   silence_seconds: 2.2  # default — silence that ends a chunk
   bargein_rms_threshold: 0.05  # raw RMS that interrupts TTS playback
+  queue_speech_while_thinking: false  # discard non-keyword speech while thinking (default)
   min_speech_seconds: 0.4
   min_active_speech_ratio: 0.12
   min_consecutive_speech_frames: 8
@@ -296,6 +297,7 @@ voip:
 | `voip.webrtcvad_mode` | WebRTC VAD aggressiveness from `0` (lenient) to `3` (strict) |
 | `voip.webrtcvad_min_voiced_ratio` | Minimum share of frames WebRTC VAD must classify as voiced before a chunk is sent to STT |
 | `voip.webrtcvad_min_consecutive_frames` | Minimum sustained run of WebRTC-voiced frames required before a chunk is sent to STT |
+| `voip.queue_speech_while_thinking` | While PawLia is *thinking* (hold tone playing, not yet speaking), speech that lacks an interrupt keyword (`halt`/`stop`/`stopp`/`wait`/`warte`/`moment`/`sekunde`/`pause`/`pawlia`) is discarded as side conversation by default (`false`), so chatter in the room isn't fed into the next turn. Set `true` to queue such speech for the next response ("nachreichen") instead. Keyword speech always interrupts; speech while PawLia is *speaking* is always discarded unless it carries a keyword |
 | `voip.call_inactivity_seconds` | Hang up the VoIP call when no speech chunk has been sent to STT for this many seconds |
 | `voip.response_delay_seconds` | Minimum quiet time after the latest caller speech before PawLia starts answering. The actual delay scales up automatically with long monologues (see adaptive response delay below) |
 | `voip.agc_window_seconds` | How long PawLia keeps automatic gain control active after recent speech / call activity |

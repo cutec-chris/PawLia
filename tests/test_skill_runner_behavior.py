@@ -276,3 +276,78 @@ async def test_context_overflow_aborts_loop_with_outcome(make_skill_runner):
     assert "übergelaufen" in result.lower()
     # Aborted after a few overflow turns, not after the full turn budget.
     assert fake.calls <= 6
+
+
+class _BrokenScriptLLM:
+    """Runs the skill's own (crashing) script every turn, varying the surrounding
+    command so the identical-tool-call breaker can't catch it — only the
+    repeated-error-signature breaker should."""
+
+    model_name = "broken"
+    model = "broken"
+    temperature = 0.0
+    last_invoke_context_skipped = False
+
+    def __init__(self, script_path):
+        self.calls = 0
+        self.script_path = script_path
+
+    def invoke(self, messages, **kwargs):
+        self.calls += 1
+        msg = AIMessage(content="")
+        msg.tool_calls = [{
+            "id": f"c{self.calls}", "name": "bash",
+            # Different command text each turn (--try N), same broken script.
+            "args": {"command": f"python3 {self.script_path} --try {self.calls}"},
+            "type": "tool_call",
+        }]
+        return msg
+
+    async def ainvoke(self, messages, **kwargs):
+        return self.invoke(messages, **kwargs)
+
+    def bind_tools(self, *args, **kwargs):
+        return self
+
+    def set_on_fallback(self, callback):
+        pass
+
+
+async def test_broken_own_script_aborts_and_offers_repair(make_skill_runner, session_dir):
+    # The skill's own script crashes with the same traceback every turn.
+    script = session_dir / "broken.py"
+    script.write_text("import totally_missing_module_xyz  # noqa\n", encoding="utf-8")
+    llm = _BrokenScriptLLM(str(script))
+    runner = make_skill_runner(llm=llm, name="weatherish")
+
+    result = await runner.run("get the weather")
+
+    # Offers a skill-creator repair for the named skill instead of flailing.
+    assert "skill-creator" in result.lower()
+    assert "weatherish" in result
+    assert "defekt" in result.lower()
+    # Stopped at the 3rd identical crash, well before the turn budget.
+    assert llm.calls <= 4
+
+
+def test_broken_skill_note_skips_skill_creator(make_skill_runner):
+    # skill-creator is the repair tool; offering to repair it with itself loops.
+    runner = make_skill_runner(llm=ScriptedLLM(), name="skill-creator")
+    runner._error_sig_counts = {"creator.py:5:ModuleNotFoundError": 9}
+    assert runner._broken_skill_note() is None
+
+
+def test_broken_skill_note_fires_at_threshold_for_normal_skill(make_skill_runner):
+    runner = make_skill_runner(llm=ScriptedLLM(), name="weatherish")
+    runner._broken_error_excerpt = "weather.py, Zeile 22 — ModuleNotFoundError: No module named 'ha'"
+    runner._broken_failing_command = "python3 weather.py --location Biederitz"
+    # Below threshold → no offer yet.
+    runner._error_sig_counts = {"weather.py:22:ModuleNotFoundError": 2}
+    assert runner._broken_skill_note() is None
+    # At threshold → repair offer naming the skill and skill-creator.
+    runner._error_sig_counts = {"weather.py:22:ModuleNotFoundError": 3}
+    note = runner._broken_skill_note()
+    assert note is not None
+    assert "skill-creator" in note.lower()
+    assert "weatherish" in note
+    assert "ha" in note

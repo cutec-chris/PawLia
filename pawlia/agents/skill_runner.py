@@ -76,12 +76,24 @@ class SkillRunnerAgent(BaseAgent):
 
     MAX_TOOL_TURNS = 30
     MAX_RETRIES = 2
+    # Max chars of a single tool result fed back to the model. Large enough that
+    # one paginated files read page (capped at _READ_BYTE_BUDGET=10 kB content,
+    # plus JSON envelope/escaping) survives intact — otherwise the model sees a
+    # truncation marker and re-reads the same range in a loop. The full raw
+    # output is always in the Docker logs for debugging.
+    MAX_RESULT = 16_000
     # No-progress circuit breakers. Without these a model can grind for the
     # full turn budget re-reading the same files / bloating the context until
     # every call overflows — burning tokens and never reporting back.
     _MAX_CONSECUTIVE_OVERFLOW = 3   # turns the prompt couldn't be made to fit
     _NUDGE_SAME_TOOL_CALL = 4       # identical tool call repeats → nudge once
     _ABORT_SAME_TOOL_CALL = 6       # identical tool call repeats → give up
+    # The skill's own script crashing with the same traceback N times means the
+    # script is broken, not that the model is choosing badly — so the identical-
+    # tool-call breaker above never catches it (the model keeps trying *different*
+    # commands around the same broken script). Stop early and offer a repair
+    # instead of burning the whole turn budget on manual workarounds.
+    _ABORT_REPEATED_ERROR = 3
 
     def __init__(
         self,
@@ -122,6 +134,12 @@ class SkillRunnerAgent(BaseAgent):
         self._load_credentials()
         self.on_step = None  # Optional[Callable[[str], Awaitable[None]]]
         self._directives: List[str] = []  # collected __directive__ lines from tool output
+        # Track repeated crashes of the skill's own script (see
+        # _ABORT_REPEATED_ERROR). Keyed by error signature → count.
+        self._error_sig_counts: Dict[str, int] = {}
+        self._broken_error_excerpt: str = ""
+        self._broken_failing_command: str = ""
+        self._broken_skill: bool = False
 
         # Bind real tools to the LLM
         tool_specs = tool_registry.get_specs()
@@ -163,6 +181,10 @@ class SkillRunnerAgent(BaseAgent):
         a chance to recover from them.
         """
         self._directives.clear()
+        self._error_sig_counts.clear()
+        self._broken_error_excerpt = ""
+        self._broken_failing_command = ""
+        self._broken_skill = False
         for attempt in range(1, self.MAX_RETRIES + 1):
             result = await self._attempt(query)
             if result.strip():
@@ -370,6 +392,18 @@ class SkillRunnerAgent(BaseAgent):
                 if not result.ok:
                     has_error = True
                     retryable_error = retryable_error or result.retryable
+            # Broken-skill circuit breaker: the skill's own script keeps crashing
+            # with the same traceback. Stop and offer a repair instead of letting
+            # the model invent more workarounds.
+            broken_note = self._broken_skill_note()
+            if broken_note:
+                abort_note = broken_note
+                self.logger.warning(
+                    "skill '%s': eigenes Skript %d× mit gleichem Fehler abgestürzt — "
+                    "Loop abgebrochen, Reparatur angeboten",
+                    self.skill.name, max(self._error_sig_counts.values(), default=0),
+                )
+                break
             if retryable_error:
                 messages.append(HumanMessage(content=self._retry_guidance()))
         else:
@@ -380,6 +414,10 @@ class SkillRunnerAgent(BaseAgent):
         if abort_note:
             # Always leave a traceable outcome so on_skill_done posts something
             # to the thread instead of the run vanishing silently.
+            if self._broken_skill:
+                # Already a complete, model-facing repair instruction — return it
+                # verbatim so chat asks the user about a skill-creator repair.
+                return abort_note
             prefix = f"⚠ {self.skill.name} gestoppt: {abort_note}"
             return f"{prefix}\n\n{result_text}".strip() if result_text.strip() else prefix
         return result_text
@@ -429,11 +467,14 @@ class SkillRunnerAgent(BaseAgent):
                 clean_lines.append(line)
         result_str = "\n".join(clean_lines)
 
-        # Keep tool results small enough for the model context window.
-        # The LLM rarely needs more than a few hundred chars — just success
-        # status, paths, and key fields.  The full raw output is in the
-        # Docker logs if ever needed for debugging.
-        MAX_RESULT = 4_000
+        # Record crashes of the skill's own script so the loop can give up early
+        # and offer a repair instead of flailing through manual workarounds.
+        self._record_error_signature(result_str, tc_args)
+
+        # Keep tool results bounded for the model context window. The cap lives
+        # on the class (MAX_RESULT) so it stays in sync with the files skill's
+        # read-page byte budget — see the constant's comment.
+        MAX_RESULT = self.MAX_RESULT
         if len(result_str) > MAX_RESULT:
             omitted = len(result_str) - MAX_RESULT
             result_str = result_str[:MAX_RESULT].rstrip()
@@ -441,6 +482,74 @@ class SkillRunnerAgent(BaseAgent):
 
         messages.append(ToolMessage(content=result_str, tool_call_id=tc_id))
         return result
+
+    _TRACEBACK_FILE_RE = re.compile(r'File "([^"]+)", line (\d+)')
+
+    def _record_error_signature(self, result_str: str, tc_args: Dict[str, Any]) -> None:
+        """Count repeated crashes of the skill's *own* script.
+
+        Targets Python tracebacks whose frames point inside this skill's
+        directory — i.e. the skill's script itself is broken, not a transient
+        external error. A signature is ``script.py:line:ExceptionType`` so the
+        same crash counts even when the model varies the surrounding command.
+        """
+        if "Traceback (most recent call last)" not in result_str:
+            return
+        frames = self._TRACEBACK_FILE_RE.findall(result_str)
+        if not frames:
+            return
+        skill_dir = os.path.abspath(self.skill.skill_path or "")
+        scripts_dir = os.path.abspath(self.skill.scripts_dir or "") if self.skill.scripts_dir else ""
+        in_skill = [
+            (path, line) for path, line in frames
+            if (skill_dir and skill_dir in os.path.abspath(path))
+            or (scripts_dir and scripts_dir in os.path.abspath(path))
+        ]
+        if not in_skill:
+            return
+        path, line = in_skill[-1]  # deepest frame inside the skill
+        last_line = ""
+        for ln in reversed(result_str.strip().splitlines()):
+            if ln.strip():
+                last_line = ln.strip()
+                break
+        exc_type = last_line.split(":", 1)[0].strip()[:60]
+        sig = f"{os.path.basename(path)}:{line}:{exc_type}"
+        self._error_sig_counts[sig] = self._error_sig_counts.get(sig, 0) + 1
+        # Remember a short, human-readable excerpt + the failing command for the
+        # repair offer (latest occurrence wins).
+        self._broken_error_excerpt = f"{os.path.basename(path)}, Zeile {line} — {last_line[:160]}"
+        cmd = tc_args.get("command") if isinstance(tc_args, dict) else None
+        if isinstance(cmd, str) and cmd.strip():
+            self._broken_failing_command = cmd.strip()[:200]
+
+    def _broken_skill_note(self) -> Optional[str]:
+        """Return a repair-offer note if the skill's own script keeps crashing.
+
+        Returns ``None`` when the threshold isn't reached, or for skill-creator
+        itself (it is the repair tool — offering to repair it with itself would
+        loop).
+        """
+        if self.skill.name == "skill-creator":
+            return None
+        worst = max(self._error_sig_counts.values(), default=0)
+        if worst < self._ABORT_REPEATED_ERROR:
+            return None
+        self._broken_skill = True
+        parts = [
+            f"Die Skill »{self.skill.name}« scheint defekt — derselbe Fehler trat "
+            f"{worst}× auf:",
+            self._broken_error_excerpt or "wiederholter Skript-Fehler",
+        ]
+        if self._broken_failing_command:
+            parts.append(f"Fehlgeschlagener Befehl: {self._broken_failing_command}")
+        parts.append(
+            "Versuche NICHT, den Fehler manuell zu umgehen. Frag den Nutzer, ob du "
+            f"die Skill »{self.skill.name}« vom skill-creator reparieren lassen sollst. "
+            "Wenn der Nutzer zustimmt, ruf die Skill »skill-creator« mit Skillname und "
+            "der Fehlermeldung als Reparatur-Auftrag auf."
+        )
+        return "\n".join(parts)
 
     @staticmethod
     def _retry_guidance() -> str:
