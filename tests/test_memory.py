@@ -638,6 +638,38 @@ class TestBootstrapCopying:
             assert not os.path.exists(os.path.join(ws, "bootstrap.md")), \
                 "bootstrap.md should be removed once identity files and timezone are set"
 
+    def test_bootstrap_reinstated_when_graduated_without_timezone(self):
+        """Self-heal: a session that graduated under older onboarding (no
+        timezone persisted, bootstrap.md already gone) must have bootstrap.md
+        re-instated so the timezone gets collected. The scheduler relies on it.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mm = MemoryManager(tmpdir)
+            mm.load_session("u_legacy")
+            ws = mm._workspace_dir("u_legacy")
+
+            # Customize identity files but never configure a timezone, and
+            # simulate the old code having deleted bootstrap.md prematurely.
+            for fname in ("soul.md", "identity.md", "user.md"):
+                with open(os.path.join(ws, fname), "w") as f:
+                    f.write(f"# Custom {fname}\n- fully customized\n")
+            bootstrap_path = os.path.join(ws, "bootstrap.md")
+            if os.path.exists(bootstrap_path):
+                os.remove(bootstrap_path)
+
+            mm2 = MemoryManager(tmpdir)
+            mm2.load_session("u_legacy")
+
+            assert os.path.exists(bootstrap_path), \
+                "bootstrap.md must be re-instated when a graduated session lacks a timezone"
+
+            # And once the timezone is set, it graduates for good.
+            mm2._update_session_config("u_legacy", "user", {"timezone": "Europe/Berlin"})
+            mm3 = MemoryManager(tmpdir)
+            mm3.load_session("u_legacy")
+            assert not os.path.exists(bootstrap_path), \
+                "bootstrap.md should be removed again once the timezone is configured"
+
 
 class TestSystemPromptIdentityFiles:
     """Verify soul.md, identity.md, and user.md are all present in the prompt."""

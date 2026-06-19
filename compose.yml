@@ -43,6 +43,13 @@ services:
       dockerfile: Dockerfile.voip
     restart: unless-stopped
     network_mode: host
+    environment:
+      # Make the container's wall-clock match the users' region. With an empty
+      # TZ the container runs in UTC, so the scheduler's server-local fallback
+      # (and bash `date` in skills) is +2h off in summer — reminders fire late.
+      # Setting it here means server time == user time, so times never need
+      # "un-bending". Per-user timezones still override this via user.timezone.
+      - TZ=Europe/Berlin
     labels:
       autoheal: "true"
     healthcheck:

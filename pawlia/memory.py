@@ -280,7 +280,7 @@ class MemoryManager:
                 src = os.path.join(prompts_dir, identity_map[ws_name])
                 if os.path.exists(src):
                     shutil.copy2(src, dst)
-        elif os.path.exists(bootstrap_dst):
+        else:
             # All identity files exist — check if they've been customized
             all_customized = True
             for ws_name, tmpl_name in identity_map.items():
@@ -294,9 +294,24 @@ class MemoryManager:
             has_timezone = bool(
                 (self._read_session_config(user_id).get("user") or {}).get("timezone")
             )
+            bootstrap_exists = os.path.exists(bootstrap_dst)
             if all_customized and has_timezone:
-                os.remove(bootstrap_dst)
-                self.logger.info("Bootstrap complete — removed bootstrap.md")
+                if bootstrap_exists:
+                    os.remove(bootstrap_dst)
+                    self.logger.info("Bootstrap complete — removed bootstrap.md")
+            elif all_customized and not has_timezone and not bootstrap_exists:
+                # Self-heal: this session graduated under an older onboarding
+                # that never persisted a timezone into the session config. The
+                # scheduler then falls back to server time and reminders fire in
+                # the wrong zone. Re-instate bootstrap.md so onboarding collects
+                # the timezone before doing anything else.
+                bootstrap_src = os.path.join(prompts_dir, "bootstrap.md")
+                if os.path.exists(bootstrap_src):
+                    shutil.copy2(bootstrap_src, bootstrap_dst)
+                    self.logger.info(
+                        "Re-instated bootstrap.md — identity complete but no "
+                        "timezone configured; onboarding must finish it"
+                    )
 
     @staticmethod
     def _strip_frontmatter(text: str) -> str:
