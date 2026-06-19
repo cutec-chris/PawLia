@@ -97,6 +97,17 @@ class AttachFileTool(Tool):
         tmp_root = os.path.realpath("/tmp")
         if tmp_root not in allowed_roots:
             allowed_roots.append(tmp_root)
+        # Some skill scripts write output to <session_root>/Downloads/ rather
+        # than the workspace sub-tree (using PAWLIA_SESSION_DIR+PAWLIA_USER_ID
+        # without the trailing workspace/ component).  Allow that directory so
+        # attach_file can serve those artefacts without re-running the skill.
+        user_id = (context or {}).get("user_id", "")
+        if session_dir and user_id:
+            session_downloads = os.path.realpath(
+                os.path.join(session_dir, user_id, "Downloads")
+            )
+            if session_downloads not in allowed_roots:
+                allowed_roots.append(session_downloads)
 
         max_bytes = int((context or {}).get("max_outgoing_bytes") or 26214400)
 

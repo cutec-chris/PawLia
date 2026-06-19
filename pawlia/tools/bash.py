@@ -157,6 +157,10 @@ class BashTool(Tool):
                 env["PAWLIA_USER_ID"] = context["user_id"]
             if context.get("session_dir"):
                 env["PAWLIA_SESSION_DIR"] = context["session_dir"]
+            if context.get("session_dir") and context.get("user_id"):
+                env["PAWLIA_WORKSPACE"] = os.path.join(
+                    context["session_dir"], context["user_id"], "workspace"
+                )
             if context.get("config_path"):
                 env["PAWLIA_CONFIG_PATH"] = context["config_path"]
             if context.get("skill_config"):
