@@ -117,13 +117,22 @@ class BaseAgent(ABC):
             try:
                 response = await run_sync_in_thread(_call)
                 reasoning = (response.additional_kwargs or {}).get("reasoning_content", "")
-                if reasoning:
+                # Only embed reasoning when the model returned plain text (no tool
+                # calls). When tool_calls are present the content field is typically
+                # empty and some providers (e.g. GLM) reject non-null content
+                # alongside tool_calls. In that case just strip reasoning_content
+                # from additional_kwargs so it doesn't pollute the next API call.
+                if reasoning and not response.tool_calls:
                     new_kwargs = {k: v for k, v in (response.additional_kwargs or {}).items()
                                   if k != "reasoning_content"}
                     response = response.model_copy(update={
                         "content": f"<think>{reasoning}</think>" + (response.content or ""),
                         "additional_kwargs": new_kwargs,
                     })
+                elif reasoning:
+                    new_kwargs = {k: v for k, v in (response.additional_kwargs or {}).items()
+                                  if k != "reasoning_content"}
+                    response = response.model_copy(update={"additional_kwargs": new_kwargs})
                 return response, messages
             except Exception as exc:
                 category, detail = classify_error(exc)

@@ -393,12 +393,7 @@ class SkillRunnerAgent(BaseAgent):
                 )
                 self.logger.warning("skill '%s': %s — Loop abgebrochen", self.skill.name, abort_note)
                 break
-            if consecutive_silent >= self._NUDGE_SILENT_TURNS and not silent_nudged:
-                silent_nudged = True
-                self.logger.info(
-                    "skill '%s': %d stille Schritte — einmaliger Nudge", self.skill.name, consecutive_silent
-                )
-                messages.append(HumanMessage(content=self._repeat_guidance()))
+            do_silent_nudge = consecutive_silent >= self._NUDGE_SILENT_TURNS and not silent_nudged
 
             # No-progress circuit breaker: detect the model repeating the exact
             # same tool call (e.g. re-reading one file). Nudge once, then abort.
@@ -413,18 +408,31 @@ class SkillRunnerAgent(BaseAgent):
                 )
                 self.logger.warning("skill '%s': %s — Loop abgebrochen", self.skill.name, abort_note)
                 break
-            if worst >= self._NUDGE_SAME_TOOL_CALL and not repeat_nudged:
-                repeat_nudged = True
-                self.logger.info(
-                    "skill '%s': identischer Tool-Aufruf %d× — einmaliger Nudge", self.skill.name, worst
-                )
-                messages.append(HumanMessage(content=self._repeat_guidance()))
+            do_repeat_nudge = worst >= self._NUDGE_SAME_TOOL_CALL and not repeat_nudged
 
+            # Execute tool calls BEFORE appending any nudge HumanMessage.
+            # _sanitize_messages resets known_tool_ids on any non-AI/ToolMessage,
+            # so a HumanMessage inserted between the AIMessage(tool_calls) and the
+            # resulting ToolMessages would cause those ToolMessages to be dropped.
             for tc in response.tool_calls:
                 result = await self._execute_tool_call(tc, messages)
                 if not result.ok:
                     has_error = True
                     retryable_error = retryable_error or result.retryable
+
+            # Append nudges after ToolMessages are already in the message list.
+            if do_silent_nudge:
+                silent_nudged = True
+                self.logger.info(
+                    "skill '%s': %d stille Schritte — einmaliger Nudge", self.skill.name, consecutive_silent
+                )
+                messages.append(HumanMessage(content=self._silent_guidance()))
+            elif do_repeat_nudge:
+                repeat_nudged = True
+                self.logger.info(
+                    "skill '%s': identischer Tool-Aufruf %d× — einmaliger Nudge", self.skill.name, worst
+                )
+                messages.append(HumanMessage(content=self._repeat_guidance()))
             # Broken-skill circuit breaker: the skill's own script keeps crashing
             # with the same traceback. Stop and offer a repair instead of letting
             # the model invent more workarounds.
@@ -595,6 +603,16 @@ class SkillRunnerAgent(BaseAgent):
             "ausgeführt, ohne Fortschritt. Wiederhole ihn nicht erneut. Arbeite "
             "mit dem Ergebnis, das du bereits hast, oder gib jetzt dein "
             "abschließendes Ergebnis aus."
+        )
+
+    @staticmethod
+    def _silent_guidance() -> str:
+        return (
+            "Du führst seit mehreren Schritten Tool-Aufrufe aus, ohne ein "
+            "sichtbares Zwischenergebnis oder eine Einschätzung zu formulieren. "
+            "Wenn du bereits genug Informationen gesammelt hast, gib jetzt dein "
+            "abschließendes Ergebnis aus. Wenn noch etwas fehlt, erkläre kurz "
+            "was und führe dann den nächsten gezielten Schritt aus."
         )
 
     @staticmethod
