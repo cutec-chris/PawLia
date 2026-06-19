@@ -18,7 +18,7 @@ license: MIT
 metadata:
   author: Christian Ulrich
   version: "3.2"
-  max_tool_turns: 60
+  max_tool_turns: 30
 ---
 
 # Skill Creator
@@ -278,6 +278,13 @@ If `creator.py init` fails with a "refusing to overwrite" error, pass `--force`
 ## Fixing / Auditing an Existing Skill
 
 Three phases with hard stop-gates. Do not blur them.
+
+### Phase 0 — Early exit (1 tool call)
+
+Before diagnosing, do a single targeted read or grep for the requested
+change. **If the target file already contains the requested state, report
+"already correct — no changes needed" and stop immediately.** Do not
+continue to Phase 1.
 
 ### Phase 1 — Diagnose (≤5 tool calls)
 

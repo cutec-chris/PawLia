@@ -88,6 +88,13 @@ class SkillRunnerAgent(BaseAgent):
     _MAX_CONSECUTIVE_OVERFLOW = 3   # turns the prompt couldn't be made to fit
     _NUDGE_SAME_TOOL_CALL = 4       # identical tool call repeats → nudge once
     _ABORT_SAME_TOOL_CALL = 6       # identical tool call repeats → give up
+    # Silent-tool-call circuit breaker: if the model issues N consecutive turns
+    # whose visible content is empty (all reasoning hidden in <think> blocks or
+    # the model just emits tool calls with no intermediate narration) it is
+    # likely stuck in a verification / exploration loop.  Nudge it once at
+    # _NUDGE_SILENT_TURNS; abort at _ABORT_SILENT_TURNS.
+    _NUDGE_SILENT_TURNS = 6         # consecutive silent tool-call turns → nudge
+    _ABORT_SILENT_TURNS = 10        # consecutive silent tool-call turns → abort
     # The skill's own script crashing with the same traceback N times means the
     # script is broken, not that the model is choosing badly — so the identical-
     # tool-call breaker above never catches it (the model keeps trying *different*
@@ -309,11 +316,13 @@ class SkillRunnerAgent(BaseAgent):
         total_tool_calls = len(first_response.tool_calls)
         max_turns = self.skill.max_tool_turns or self.max_tool_turns
         consecutive_overflow = 0
+        consecutive_silent = 0   # turns where tool calls were made with no visible content
         sig_counts: Dict[str, int] = {}
         for tc in first_response.tool_calls:
             sig = self._tool_call_signature(tc)
             sig_counts[sig] = sig_counts.get(sig, 0) + 1
         repeat_nudged = False
+        silent_nudged = False
         abort_note = ""
         for _turn in range(1, max_turns):
             response, messages = await self._invoke(messages, llm=self.bound_llm)
@@ -366,6 +375,30 @@ class SkillRunnerAgent(BaseAgent):
             has_error = False
             retryable_error = False
             total_tool_calls += len(response.tool_calls)
+
+            # Silent-tool-call circuit breaker: if the model issues tool calls
+            # with no visible content for several turns in a row it is likely
+            # stuck in an exploration / verification loop (all reasoning hidden
+            # inside <think> blocks or simply absent).  Nudge once; abort if
+            # it continues without producing output.
+            visible = self.strip_thinking(response.content or "").strip()
+            if response.tool_calls and not visible:
+                consecutive_silent += 1
+            else:
+                consecutive_silent = 0
+            if consecutive_silent >= self._ABORT_SILENT_TURNS:
+                abort_note = (
+                    f"Kein Fortschritt — {consecutive_silent} aufeinanderfolgende "
+                    f"Schritte ohne sichtbaren Output bis Schritt {_turn}."
+                )
+                self.logger.warning("skill '%s': %s — Loop abgebrochen", self.skill.name, abort_note)
+                break
+            if consecutive_silent >= self._NUDGE_SILENT_TURNS and not silent_nudged:
+                silent_nudged = True
+                self.logger.info(
+                    "skill '%s': %d stille Schritte — einmaliger Nudge", self.skill.name, consecutive_silent
+                )
+                messages.append(HumanMessage(content=self._repeat_guidance()))
 
             # No-progress circuit breaker: detect the model repeating the exact
             # same tool call (e.g. re-reading one file). Nudge once, then abort.
