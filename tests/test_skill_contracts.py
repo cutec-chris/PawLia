@@ -110,6 +110,60 @@ def test_read_with_query_returns_only_matching_context(tmp_path):
     assert "skipped" in result["content"]  # non-matching stretches collapsed
 
 
+def test_read_page_fits_skill_runner_result_cap_for_huge_files(tmp_path):
+    """Invariant: a single read page must JSON-serialize within the skill
+    runner's tool-result cap, for arbitrarily large files AND long lines.
+
+    If a page exceeds the cap, the runner appends a truncation marker and the
+    model re-reads the same range in a loop (the 8-turn-for-one-file pathology).
+    This guards the scaling case, not just a happy-path small read.
+    """
+    from pawlia.agents.skill_runner import SkillRunnerAgent
+
+    ws = _workspace(tmp_path)
+    # 5000 lines, and every line very long, so neither the line-count limit nor
+    # naive truncation alone keeps the page under the cap — only the byte budget.
+    big = "\n".join("x" * 300 for _ in range(5000))
+    (ws / "huge.txt").write_text(big, encoding="utf-8")
+
+    offset = 0
+    pages = 0
+    total_lines_seen = 0
+    while True:
+        result = _files(tmp_path, "read", "--filename", "huge.txt",
+                        "--offset", str(offset))
+        assert result["success"] is True
+        # The exact payload the runner would feed to the model.
+        serialized = json.dumps(result)
+        assert len(serialized) <= SkillRunnerAgent.MAX_RESULT, (
+            f"page at offset {offset} serializes to {len(serialized)} chars, "
+            f"exceeding MAX_RESULT={SkillRunnerAgent.MAX_RESULT}"
+        )
+        assert result["lines_returned"] >= 1  # always make progress
+        total_lines_seen += result["lines_returned"]
+        pages += 1
+        if not result.get("has_more"):
+            break
+        offset = result["next_offset"]
+        assert pages < 5000  # pagination must terminate
+
+    assert total_lines_seen == 5000  # every line is reachable across pages
+
+
+def test_read_small_file_returns_in_one_page(tmp_path):
+    """A normal-sized file must not be split — otherwise the model paginates
+    needlessly, the very behavior that inflated latency."""
+    ws = _workspace(tmp_path)
+    (ws / "small.py").write_text("\n".join(f"line {i}" for i in range(120)),
+                                 encoding="utf-8")
+
+    result = _files(tmp_path, "read", "--filename", "small.py")
+
+    assert result["success"] is True
+    assert result.get("has_more") is not True
+    assert result["lines_returned"] == 120
+
+
 def test_delete_removes_the_file(tmp_path):
     ws = _workspace(tmp_path)
     (ws / "junk.md").write_text("bye", encoding="utf-8")
