@@ -869,20 +869,23 @@ def _interpolate_event_text(message: str, event: dict) -> str:
 def _next_occurrence(fire_at: datetime, recurrence: str) -> datetime:
     """Calculate the next occurrence for a recurring reminder."""
     rec = recurrence.lower().strip()
-    # Check weekly first: explicit "weekly", RRULE FREQ=WEEKLY, "every week",
-    # or any weekday name (mon/tue/wed/thu/fri/sat/sun) — must come before
-    # the "day" check to avoid "monday"/"wednesday" matching as daily.
-    _weekly = ("weekly", "freq=weekly", "byday=", "every week",
-               "mon", "tue", "wed", "thu", "fri", "sat", "sun")
-    if any(kw in rec for kw in _weekly):
-        return fire_at + timedelta(weeks=1)
-    elif "month" in rec:
+    # Monthly must be checked before the weekly weekday scan: the "mon"
+    # weekday abbreviation is a substring of "month", so "every month"
+    # would otherwise match the weekly branch.
+    if "month" in rec:
         month = fire_at.month % 12 + 1
         year = fire_at.year + (1 if month == 1 else 0)
         try:
             return fire_at.replace(year=year, month=month)
         except ValueError:
             return fire_at.replace(year=year, month=month, day=28)
+    # Weekly: explicit "weekly", RRULE FREQ=WEEKLY, "every week", or any
+    # weekday name (mon/tue/wed/thu/fri/sat/sun) — must come before the
+    # "day" check to avoid "monday"/"wednesday" matching as daily.
+    _weekly = ("weekly", "freq=weekly", "byday=", "every week",
+               "mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    if any(kw in rec for kw in _weekly):
+        return fire_at + timedelta(weeks=1)
     return fire_at + timedelta(days=1)
 
 
