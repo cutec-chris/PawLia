@@ -115,7 +115,16 @@ class BaseAgent(ABC):
         retries = 0
         while True:
             try:
-                return await run_sync_in_thread(_call), messages
+                response = await run_sync_in_thread(_call)
+                reasoning = (response.additional_kwargs or {}).get("reasoning_content", "")
+                if reasoning:
+                    new_kwargs = {k: v for k, v in (response.additional_kwargs or {}).items()
+                                  if k != "reasoning_content"}
+                    response = response.model_copy(update={
+                        "content": f"<think>{reasoning}</think>" + (response.content or ""),
+                        "additional_kwargs": new_kwargs,
+                    })
+                return response, messages
             except Exception as exc:
                 category, detail = classify_error(exc)
 

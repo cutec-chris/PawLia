@@ -274,7 +274,10 @@ def _make_status_done(event_id: str, skill_name: str, steps: int, initial_query:
         if clean.startswith("[Report from"):
             # Skip header lines until we find actual content
             for line in clean.splitlines():
-                if line.strip() and not line.startswith("[") and not line.startswith("---"):
+                if (line.strip()
+                        and not line.startswith("[")
+                        and not line.startswith("---")
+                        and not line.lower().startswith("trust:")):
                     clean = line
                     break
         first_line = clean.splitlines()[0].strip() if clean.splitlines() else ""
