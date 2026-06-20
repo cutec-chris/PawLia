@@ -402,9 +402,11 @@ class MatrixRTCSession(CallCore):
     """A single Element X call.  Unlike :class:`CallSession` there is no SDP
     offer/answer; ``start`` joins the LiveKit room directly."""
 
-    def __init__(self, *args, on_leave: Optional[Callable] = None, **kwargs) -> None:
+    def __init__(self, *args, on_leave: Optional[Callable] = None,
+                 on_announce: Optional[Callable] = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._on_leave = on_leave  # async () -> None : redact our membership
+        self._on_leave = on_leave    # async () -> None : redact our membership
+        self._on_announce = on_announce  # async () -> None : post membership event
 
     async def start(self, focus_url: str, slot_id: str = "") -> bool:
         """Fetch LiveKit creds, join the room, start the audio/agent pipeline."""
@@ -439,6 +441,11 @@ class MatrixRTCSession(CallCore):
         # Same warmup contract as the aiortc path: block only until the first
         # greeting sentence is ready, then join (no silence after connect).
         await self._run_preanswer_warmup()
+
+        # Announce our membership after warmup, immediately before joining LiveKit,
+        # so Element X shows "ringing" during warmup instead of "waiting for media".
+        if self._on_announce:
+            await self._on_announce()
 
         self._transport = transport
         ok = await transport.start(creds["url"], creds["jwt"])
@@ -609,6 +616,11 @@ class MatrixRTCManager:
             async def _on_leave() -> None:
                 await self._redact_membership(room_id)
 
+            _furl, _sid = focus_url, slot_id
+
+            async def _on_announce() -> None:
+                await self._post_membership(room_id, _furl, _sid)
+
             session = MatrixRTCSession(
                 call_id=call_id,
                 room_id=room_id,
@@ -620,6 +632,7 @@ class MatrixRTCManager:
                 agent=agent,
                 send_cb=_send_cb,
                 on_leave=_on_leave,
+                on_announce=_on_announce,
             )
             self._sessions[room_id] = session
 
@@ -630,9 +643,6 @@ class MatrixRTCManager:
                     )
                 )
 
-            # Announce our own membership so the human's client sees the bot in
-            # the call, then join the SFU.
-            await self._post_membership(room_id, focus_url, slot_id)
             ok = await session.start(focus_url, slot_id)
             if not ok:
                 self._sessions.pop(room_id, None)
