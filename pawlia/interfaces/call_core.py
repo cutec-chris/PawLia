@@ -335,6 +335,12 @@ class CallCore:
         # transport waits on this before sending the SDP answer, so there is audio
         # ready to play the moment media connects (no silence after pickup).
         self._greeting_first_sentence_ready = asyncio.Event()
+        # Greeting sentences are synthesized incrementally during warmup and
+        # streamed to the transport as soon as media connects — playing sentence 1
+        # immediately instead of waiting for the whole greeting to be ready.
+        self._greeting_pcm: List["np.ndarray"] = []
+        self._greeting_pcm_flushed = 0
+        self._greeting_audio_started = False
         self._greeting_task: Optional[asyncio.Task] = None
         self._pending_response_task: Optional[asyncio.Task] = None
         self._pending_transcripts: List[str] = []
@@ -593,6 +599,27 @@ class CallCore:
         except Exception as e:
             logger.warning("call %s: STT warmup failed: %s", self.call_id[:8], e)
 
+    def _flush_greeting_pcm(self) -> None:
+        """Enqueue any greeting sentences synthesized so far, once media is up.
+
+        Safe to call repeatedly from both ``_prepare_greeting`` (as each sentence
+        becomes ready) and ``_send_greeting`` (once media connects).  Plays
+        sentence 1 the instant media is connected instead of waiting for the
+        whole greeting, and stops the hold tone on the first flushed sentence.
+        """
+        if self._greeting_sent:
+            return
+        media = getattr(self._transport, "media_connected", None)
+        if not self._transport or media is None or not media.is_set():
+            return
+        while self._greeting_pcm_flushed < len(self._greeting_pcm):
+            pcm = self._greeting_pcm[self._greeting_pcm_flushed]
+            self._transport.enqueue_pcm_float32(pcm)
+            self._greeting_pcm_flushed += 1
+            if not self._greeting_audio_started:
+                self._greeting_audio_started = True
+                self._transport.stop_hold()
+
     async def _prepare_greeting(self) -> None:
         if self._greeting_sent or self._prepared_greeting is not None:
             return
@@ -611,7 +638,6 @@ class CallCore:
                 "If speaking German and there is no explicit preference, use informal 'du', not formal 'Sie'. "
                 "Keep it to one or two sentences.]"
             )
-            prepared_pcm: List["np.ndarray"] = []
 
             async def _on_sentence(sentence: str) -> None:
                 sentence = _for_tts(sentence) or ""
@@ -624,10 +650,13 @@ class CallCore:
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info("call %s: prepared greeting TTS (%d samples): %s",
                                     self.call_id[:8], len(tts_pcm), sentence[:60])
-                        prepared_pcm.append(tts_pcm)
+                        self._greeting_pcm.append(tts_pcm)
                         # Unblock the pre-answer wait as soon as the first sentence
                         # has audio: the answer can go out now and play without gaps.
                         self._greeting_first_sentence_ready.set()
+                        # Stream this sentence to the transport immediately if media
+                        # is already connected (no waiting for the full greeting).
+                        self._flush_greeting_pcm()
                 except Exception as e:
                     logger.warning("call %s: greeting TTS warmup failed: %s", self.call_id[:8], e)
 
@@ -638,7 +667,7 @@ class CallCore:
                 on_sentence=_on_sentence,
                 allow_skills=False,
             )
-            self._prepared_greeting = (response, prepared_pcm)
+            self._prepared_greeting = (response, self._greeting_pcm)
             logger.info("call %s: greeting prepared", self.call_id[:8])
         except asyncio.CancelledError:
             raise
@@ -649,27 +678,37 @@ class CallCore:
         if self._greeting_sent:
             return
         task = self._prepare_greeting_task
-        if self._prepared_greeting is None and task and not task.done():
+
+        # Start playing the greeting sentences that are already synthesized right
+        # now (sentence 1 the moment media connects), then await the rest of the
+        # warmup task instead of blocking on the whole greeting up front.
+        self._flush_greeting_pcm()  # push whatever is ready now
+        if task is not None and self._prepared_greeting is None and not task.done():
             try:
                 await task
-            except (asyncio.CancelledError, Exception) as e:
-                if isinstance(e, asyncio.CancelledError):
-                    raise
-                logger.warning("call %s: awaiting greeting warmup failed: %s", self.call_id[:8], e)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("call %s: awaiting greeting warmup failed: %s",
+                               self.call_id[:8], e)
+        self._flush_greeting_pcm()  # push any sentences finished while awaiting
 
         if self._prepared_greeting is not None:
-            response, prepared_pcm = self._prepared_greeting
-            if self._transport:
-                for tts_pcm in prepared_pcm:
-                    self._transport.enqueue_pcm_float32(tts_pcm)
-                if prepared_pcm:
-                    self._transport.stop_hold()
+            response, _ = self._prepared_greeting
             await self._send_cb(response)
             self._greeting_sent = True
             self._mark_activity()
             self._agc.activate()
             await self._send_status("Telefonat verbunden")
             logger.info("call %s: prepared greeting sent", self.call_id[:8])
+            return
+
+        # A warmup greeting was already (partially) played but its text response
+        # never materialized — don't re-synthesize a fresh greeting on top of it.
+        if self._greeting_audio_started:
+            self._greeting_sent = True
+            self._mark_activity()
+            self._agc.activate()
             return
 
         try:

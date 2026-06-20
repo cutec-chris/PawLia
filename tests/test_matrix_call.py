@@ -1362,11 +1362,18 @@ async def test_send_greeting_waits_for_existing_prepare_task():
         send_cb=send_cb,
     )
     pcm = np.ones(480, dtype=np.float32)
-    session._transport = SimpleNamespace(enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock())
+    media = asyncio.Event()
+    media.set()
+    session._transport = SimpleNamespace(
+        enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock(),
+        media_connected=media)
 
     async def _prepare_later():
         await asyncio.sleep(0)
-        session._prepared_greeting = ("Hallo, ich bin da.", [pcm])
+        # Greeting PCM is streamed via self._greeting_pcm (flushed incrementally);
+        # _prepared_greeting carries the text response.
+        session._greeting_pcm.append(pcm)
+        session._prepared_greeting = ("Hallo, ich bin da.", session._greeting_pcm)
 
     session._prepare_greeting_task = asyncio.create_task(_prepare_later())
 
@@ -1393,7 +1400,8 @@ async def test_deferred_greeting_plays_prepared_audio_when_ready():
         send_cb=send_cb,
     )
     pcm = np.ones(480, dtype=np.float32)
-    session._prepared_greeting = ("Hallo, ich bin da.", [pcm])
+    session._greeting_pcm = [pcm]
+    session._prepared_greeting = ("Hallo, ich bin da.", session._greeting_pcm)
     session._transport = SimpleNamespace(
         enqueue_pcm_float32=MagicMock(),
         stop_hold=MagicMock(),
