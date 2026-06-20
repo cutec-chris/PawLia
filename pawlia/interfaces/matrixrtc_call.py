@@ -544,6 +544,7 @@ class MatrixRTCManager:
         if not self.available():
             return
         etype = getattr(event, "type", None)
+        logger.debug("matrixrtc: unknown event type=%s sender=%s", etype, getattr(event, "sender", "?"))
         if etype not in RTC_MEMBER_EVENT_TYPES:
             return
         sender = getattr(event, "sender", None)
@@ -552,6 +553,7 @@ class MatrixRTCManager:
 
         content = getattr(event, "content", None) or getattr(event, "source", {}).get("content")
         room_id = room.room_id
+        logger.debug("matrixrtc: rtc member event content keys=%s", list((content or {}).keys()))
 
         if is_active_membership(content):
             if room_id in self._sessions or room_id in self._joining:
