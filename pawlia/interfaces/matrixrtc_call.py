@@ -438,12 +438,14 @@ class MatrixRTCSession(CallCore):
         if hold_pcm is not None:
             transport.set_hold_audio(hold_pcm)
 
-        # Same warmup contract as the aiortc path: block only until the first
-        # greeting sentence is ready, then join (no silence after connect).
-        await self._run_preanswer_warmup()
+        # Start greeting preparation immediately (runs concurrently with LiveKit join).
+        self._ensure_prepare_greeting_task()
 
-        # Announce our membership after warmup, immediately before joining LiveKit,
-        # so Element X shows "ringing" during warmup instead of "waiting for media".
+        # Early-media approach: announce membership and join LiveKit immediately so
+        # Element X clears "waiting for media" as fast as possible. If hold audio is
+        # configured it plays during warmup; the greeting stops it once ready.
+        # This matches the Element Classic experience where the caller hears audio
+        # (hold/ring tone) while the bot prepares its greeting.
         if self._on_announce:
             await self._on_announce()
 
@@ -452,6 +454,14 @@ class MatrixRTCSession(CallCore):
         if not ok:
             self._transport = None
             return False
+
+        # Play hold audio during warmup so the caller hears something immediately.
+        if hold_pcm is not None:
+            self._transport.start_hold()
+
+        # Wait until the first greeting sentence is ready, then stop hold and
+        # let the greeting play immediately (no silence gap after warmup).
+        await self._run_preanswer_warmup()
 
         # No SDP answer to send; "answered" == joined.
         await self.mark_answer_sent()
