@@ -213,6 +213,8 @@ class TestPull:
             with tempfile.TemporaryDirectory() as other_parent:
                 other = os.path.join(other_parent, "other")
                 _git(other_parent, "clone", "-q", remote, other)
+                _git(other, "config", "user.name", "test")
+                _git(other, "config", "user.email", "test@test")
                 _write(other, "remote_only.md", "from remote")
                 _git(other, "add", "-A")
                 _git(other, "commit", "-m", "remote advance")
@@ -233,6 +235,8 @@ class TestPull:
             with tempfile.TemporaryDirectory() as other_parent:
                 other = os.path.join(other_parent, "other")
                 _git(other_parent, "clone", "-q", remote, other)
+                _git(other, "config", "user.name", "test")
+                _git(other, "config", "user.email", "test@test")
                 _write(other, "remote_change.md", "remote wins")
                 _git(other, "add", "-A")
                 _git(other, "commit", "-m", "remote change")
