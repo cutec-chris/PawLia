@@ -11,6 +11,11 @@
         ░▓▓█
 ```
 
+[![CI](http://192.168.177.105:1080/chris/thalia/actions/workflows/ci.yml/badge.svg)](http://192.168.177.105:1080/chris/thalia/actions/workflows/ci.yml)
+<!-- When mirrored to GitHub, add (swap owner/repo):
+[![CI](https://github.com/<owner>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/ci.yml)
+-->
+
 **A lightweight, open-source AI assistant built for small language models (e.g. Qwen 3.5 4b).**
 
 PawLia brings persistent memory, multi-user sessions, and extensible skills to (not only) local AI — no cloud API required.
