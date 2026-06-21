@@ -50,7 +50,13 @@ jobs:
     - name: Run tests
       run: |
         cd $GITHUB_WORKSPACE
-        python -m pytest tests/ -v
+        python -m pytest tests/ -v --cov=pawlia --cov-report=xml --cov-report=html
+
+    - name: Generate coverage badge
+      if: always()
+      run: |
+        python3 -m pip install 'genbadge[coverage]' --break-system-packages
+        genbadge coverage -i coverage.xml -o coverage-badge.svg
 
     - name: Upload test results
       if: always()
@@ -59,5 +65,8 @@ jobs:
         name: test-results
         path: |
           .pytest_cache
+          coverage.xml
+          coverage-badge.svg
+          htmlcov
           **/test-*.xml
           **/pytest-*.txt
