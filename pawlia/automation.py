@@ -8,7 +8,8 @@ Data sources (Obsidian-native):
 
 Execution:
   - Checklist items: triggered relative to an event start time or on creation
-  - Scheduled jobs: triggered by cron expressions, executed by LLM
+  - Scheduled jobs: triggered by cron expressions; run a deterministic script
+    (preferred, silent unless it prints) or an LLM instruction (trivial cases)
   - Task reminders: triggered by due date offsets
 """
 
@@ -23,11 +24,52 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 import yaml
 
+from pawlia import sandbox
+from pawlia.config import resolve_config_path
 from pawlia.utils import load_json, resolve_script, save_json
 
 logger = logging.getLogger("pawlia.automation")
 
 NotifyFn = Callable[[str, str], Coroutine[Any, Any, None]]
+
+# A script (or instruction) that prints exactly this marker is treated as
+# "nothing to report" — same as empty output. Lets a job stay silent when there
+# is nothing worth a notification (e.g. a thunderstorm monitor on a calm day).
+SILENT_SENTINEL = "PAWLIA_SILENT"
+
+
+def _strip_sentinel(output: str) -> str:
+    """Return the output with the silent sentinel removed.
+
+    Empty result means "say nothing". A bare sentinel (optionally surrounded by
+    whitespace) collapses to empty so the job stays silent.
+    """
+    if output is None:
+        return ""
+    stripped = output.strip()
+    if stripped == SILENT_SENTINEL:
+        return ""
+    return stripped
+
+
+def _success_notification(notify: "bool | str", output: str) -> Optional[str]:
+    """Decide the notification body for a *successful* run, or ``None`` for silence.
+
+    Failures are surfaced separately by the caller (always loud), so this only
+    governs the success path.
+
+    ``notify`` modes:
+      - ``True``         → always send (empty output becomes "erledigt")
+      - ``"output_only"``→ send only when there is real output (silent on empty)
+      - ``"error"`` / ``False`` → nothing on success
+    """
+    body = _strip_sentinel(output)
+
+    if notify is True:
+        return body if body else "erledigt"
+    if notify == "output_only":
+        return body if body else None
+    return None
 
 
 def _parse_offset(offset: str) -> timedelta:
@@ -127,9 +169,30 @@ class ScriptExecutor:
         if params:
             env["AUTOMATION_PARAMS"] = json.dumps(params, ensure_ascii=False)
 
+        # Make the automation harness importable regardless of cwd, and tell it
+        # where the LLM config lives so ``llm_call`` can reach a provider.
+        pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = pkg_root + (os.pathsep + existing_pp if existing_pp else "")
+        config_path = resolve_config_path()
+        if config_path:
+            env["PAWLIA_CONFIG_PATH"] = config_path
+
         ext = os.path.splitext(script_path)[1]
         interpreter = _INTERPRETERS.get(ext, "python")
         cmd = [interpreter, script_path]
+
+        # Sandbox the script the same way skill scripts run: read-only root,
+        # only the user's session dir + /tmp writable. Network stays available
+        # (weather/transit APIs). Degrade to an unsandboxed run when bubblewrap
+        # is unavailable (some container runtimes disable user namespaces).
+        if sandbox.bwrap_available():
+            writable = sandbox.writable_roots(session_dir, user_id)
+            cmd = sandbox.wrap_argv(cmd, writable)
+        else:
+            logger.warning(
+                "bubblewrap unavailable — running script %s unsandboxed", script_path
+            )
 
         proc: Optional[asyncio.subprocess.Process] = None
         try:
@@ -317,7 +380,12 @@ class ChecklistProcessor:
 # ---------------------------------------------------------------------------
 
 class JobRunner:
-    """Executes scheduled jobs by running the instruction through the LLM."""
+    """Executes scheduled jobs.
+
+    A job runs either a deterministic ``script`` (preferred — it stays silent
+    unless it prints something) or, for trivial cases, a natural-language
+    ``instruction`` through the LLM.
+    """
 
     def __init__(self, session_dir: str, notify: NotifyFn, app: Any = None):
         self.session_dir = session_dir
@@ -340,14 +408,15 @@ class JobRunner:
             if not force_run and not self._is_due(job, now):
                 continue
 
+            script = job.get("script", "")
             instruction = job.get("instruction", "")
             job_name = job.get("name", "Job")
 
-            if not instruction:
-                logger.warning("Job '%s' has no instruction, skipping", job_name)
+            if not script and not instruction:
+                logger.warning("Job '%s' has neither script nor instruction, skipping", job_name)
                 continue
 
-            if not self._app:
+            if not script and not self._app:
                 logger.error("Job '%s': no app reference, cannot execute", job_name)
                 continue
 
@@ -357,21 +426,34 @@ class JobRunner:
                 job.pop("force_run", None)
                 save_json(jobs_path, jobs)
 
-            logger.info("Running job '%s' for %s via LLM", job_name, user_id)
+            # Script jobs stay silent unless they print something; instruction
+            # jobs (the LLM always produces text) default to always delivering.
+            notify = job.get("notify", "output_only" if script else True)
 
             try:
-                runner = self._app.run_instruction(instruction, user_id)
-                result = await runner.run(instruction, thread_id=None)
+                if script:
+                    logger.info("Running job '%s' for %s via script %s", job_name, user_id, script)
+                    script_path = resolve_script(self.session_dir, user_id, script)
+                    run_result = await ScriptExecutor.run(
+                        script_path, job.get("params", {}),
+                        user_id=user_id, session_dir=self.session_dir,
+                    )
+                    if not run_result["success"]:
+                        # Surface script failures through the error path below.
+                        raise RuntimeError(run_result.get("error") or "Script fehlgeschlagen")
+                    result_text = run_result.get("output", "")
+                else:
+                    logger.info("Running job '%s' for %s via LLM", job_name, user_id)
+                    runner = self._app.run_instruction(instruction, user_id)
+                    result_text = await runner.run(instruction, thread_id=None)
+
                 job["last_run"] = now.isoformat()
                 job["last_result"] = "success"
                 changed = True
 
-                notify = job.get("notify", True)
-                if notify is True:
-                    output = result if result else "erledigt"
-                    await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{output}")
-                elif notify == "output_only" and result:
-                    await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{result}")
+                body = _success_notification(notify, result_text or "")
+                if body is not None:
+                    await self._notify(user_id, f"\u2699\ufe0f {job_name}:\n{body}")
 
             except Exception as e:
                 logger.error("Job '%s' failed for %s: %s", job_name, user_id, e)
@@ -379,10 +461,9 @@ class JobRunner:
                 job["last_result"] = "failed"
                 changed = True
 
-                notify = job.get("notify", True)
-                if notify is True or notify == "error":
-                    await self._notify(user_id,
-                        f"\u26a0\ufe0f Job '{job_name}' fehlgeschlagen: {str(e)[:200]}")
+                # Failures are always loud \u2014 a broken monitor must not fail silently.
+                await self._notify(user_id,
+                    f"\u26a0\ufe0f Job '{job_name}' fehlgeschlagen: {str(e)[:200]}")
 
         if changed:
             save_json(jobs_path, jobs)
@@ -772,18 +853,33 @@ def create_checklist_item(
 def create_job(
     name: str,
     schedule: str,
-    instruction: str,
-    notify: bool | str = True,
+    instruction: str = "",
+    notify: "bool | str | None" = None,
+    script: str = "",
+    params: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create a job definition.
 
-    ``notify``: True = always deliver output, False = never, "error" = only on failure.
+    A job runs either a ``script`` (deterministic, preferred) or an
+    ``instruction`` (LLM). ``notify``:
+      - True          = always deliver output (empty becomes "erledigt")
+      - "output_only" = deliver only when there is output (silent on empty)
+      - "error"       = deliver only on failure
+      - False         = never deliver on success (failures are always surfaced)
+
+    When ``notify`` is left ``None`` the default depends on the kind: script
+    jobs default to "output_only" (stay silent on a quiet day), instruction
+    jobs default to True.
     """
+    if notify is None:
+        notify = "output_only" if script else True
     return {
         "id": f"job-{uuid.uuid4().hex[:8]}",
         "name": name,
         "schedule": schedule,
         "instruction": instruction,
+        "script": script,
+        "params": params or {},
         "notify": notify,
         "enabled": True,
         "created_at": datetime.now().isoformat(),

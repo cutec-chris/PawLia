@@ -180,7 +180,8 @@ def test_organizer_run_job_forces_run_and_returns_the_instruction(tmp_path, caps
     mod.cmd_add_job(argparse.Namespace(
         user_id="u1", session_dir=str(tmp_path), name="Morgenbericht",
         schedule="08:00", instruction="Erstelle einen Morgenbericht",
-        no_notify=False, notify_on_error=False,
+        script="", params="", no_notify=False, notify_on_error=False,
+        notify_on_output=False,
     ))
     job_id = json.loads(capsys.readouterr().out)["job_id"]
 
@@ -316,7 +317,8 @@ def test_organizer_add_job_rejects_bad_cron(tmp_path, capsys):
         mod.cmd_add_job(argparse.Namespace(
             user_id="u1", session_dir=str(tmp_path), name="Bad",
             schedule="60 * * * *", instruction="x",
-            no_notify=False, notify_on_error=False,
+            script="", params="", no_notify=False, notify_on_error=False,
+            notify_on_output=False,
         ))
     result = json.loads(capsys.readouterr().out)
     assert result["success"] is False
@@ -328,7 +330,8 @@ def test_organizer_add_job_accepts_cron(tmp_path, capsys):
     mod.cmd_add_job(argparse.Namespace(
         user_id="u1", session_dir=str(tmp_path), name="WeekdayMorning",
         schedule="30 8 * * 1-5", instruction="Morgenbericht",
-        no_notify=False, notify_on_error=False,
+        script="", params="", no_notify=False, notify_on_error=False,
+        notify_on_output=False,
     ))
     result = json.loads(capsys.readouterr().out)
     assert result["success"] is True

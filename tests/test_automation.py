@@ -13,13 +13,18 @@ from datetime import datetime, timedelta
 
 import pytest
 
+import json
+
 from pawlia.automation import (
     ChecklistProcessor,
     JobRunner,
     ScriptExecutor,
+    SILENT_SENTINEL,
     _load_state,
     _parse_offset,
     _save_state,
+    _strip_sentinel,
+    _success_notification,
     create_checklist_item,
     create_job,
 )
@@ -268,3 +273,107 @@ def test_create_job_has_prefixed_id_and_is_enabled():
 
 def test_create_job_ids_are_unique():
     assert create_job("a", "9:00", "x")["id"] != create_job("b", "9:00", "y")["id"]
+
+
+# ---- _strip_sentinel / _success_notification ------------------------------
+@pytest.mark.parametrize("raw,expected", [
+    ("", ""),
+    ("   \n ", ""),
+    (SILENT_SENTINEL, ""),
+    (f"  {SILENT_SENTINEL}  ", ""),
+    ("Gewitter um 16:00", "Gewitter um 16:00"),
+    (f"{SILENT_SENTINEL} aber doch was", f"{SILENT_SENTINEL} aber doch was"),  # only a *bare* marker silences
+])
+def test_strip_sentinel(raw, expected):
+    assert _strip_sentinel(raw) == expected
+
+
+@pytest.mark.parametrize("notify,output,expected", [
+    (True, "", "erledigt"),            # always deliver; empty becomes erledigt
+    (True, "hi", "hi"),
+    ("output_only", "", None),         # silent on empty — the monitor case
+    ("output_only", SILENT_SENTINEL, None),
+    ("output_only", "Warnung", "Warnung"),
+    ("error", "hi", None),             # nothing on success
+    (False, "hi", None),
+])
+def test_success_notification(notify, output, expected):
+    assert _success_notification(notify, output) == expected
+
+
+# ---- create_job script defaults -------------------------------------------
+def test_create_job_script_defaults_to_output_only():
+    job = create_job("Gewitter", "interval:1h", script="gewitter.py", params={"city": "X"})
+    assert job["script"] == "gewitter.py"
+    assert job["params"] == {"city": "X"}
+    assert job["notify"] == "output_only"   # script jobs stay silent by default
+    assert job["instruction"] == ""
+
+
+def test_create_job_instruction_defaults_to_true():
+    job = create_job("Daily", "9:00", instruction="do it")
+    assert job["notify"] is True
+    assert job["script"] == ""
+
+
+# ---- JobRunner script branch (end to end) ---------------------------------
+def _write_script_job(tmp_path, user, body, *, notify=None, params=None):
+    """Drop a script in automations/ and register a due job pointing at it."""
+    autodir = tmp_path / user / "automations"
+    autodir.mkdir(parents=True, exist_ok=True)
+    (autodir / "mon.py").write_text(body, encoding="utf-8")
+    job = create_job("Monitor", "interval:1m", script="mon.py",
+                     notify=notify, params=params)
+    (autodir / "jobs.json").write_text(json.dumps([job]), encoding="utf-8")
+    return job
+
+
+async def _run_jobs(tmp_path, user):
+    notifications = []
+
+    async def capture(uid, msg):
+        notifications.append(msg)
+
+    await JobRunner(str(tmp_path), capture, app=None).process_user(user)
+    return notifications
+
+
+@pytest.mark.asyncio
+async def test_script_job_stays_silent_on_empty_output(tmp_path):
+    _write_script_job(tmp_path, "u1", "pass\n")  # prints nothing
+    assert await _run_jobs(tmp_path, "u1") == []
+
+
+@pytest.mark.asyncio
+async def test_script_job_stays_silent_on_sentinel(tmp_path):
+    _write_script_job(tmp_path, "u1", f"print({SILENT_SENTINEL!r})\n")
+    assert await _run_jobs(tmp_path, "u1") == []
+
+
+@pytest.mark.asyncio
+async def test_script_job_notifies_on_real_output(tmp_path):
+    _write_script_job(tmp_path, "u1", "print('Gewitterwarnung 16:00')\n")
+    notes = await _run_jobs(tmp_path, "u1")
+    assert len(notes) == 1
+    assert "Gewitterwarnung 16:00" in notes[0]
+
+
+@pytest.mark.asyncio
+async def test_script_job_failure_is_always_loud(tmp_path):
+    # Even with output_only (the silent default), a crash must surface.
+    _write_script_job(tmp_path, "u1", "import sys; sys.exit(2)\n")
+    notes = await _run_jobs(tmp_path, "u1")
+    assert len(notes) == 1
+    assert "fehlgeschlagen" in notes[0]
+
+
+@pytest.mark.asyncio
+async def test_script_job_receives_params(tmp_path):
+    body = (
+        "import os, json\n"
+        "p = json.loads(os.environ['AUTOMATION_PARAMS'])\n"
+        "print(f\"Stadt {p['city']}\")\n"
+    )
+    _write_script_job(tmp_path, "u1", body, params={"city": "Magdeburg"})
+    notes = await _run_jobs(tmp_path, "u1")
+    assert any("Stadt Magdeburg" in n for n in notes)

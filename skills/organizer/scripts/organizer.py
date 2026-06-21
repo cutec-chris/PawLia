@@ -1255,17 +1255,35 @@ def cmd_add_job(args) -> None:
     if not ok:
         _out({"success": False, "error": f"Ungültiger Schedule: {err}"})
         return
+    if not args.script and not args.instruction:
+        _out({"success": False, "error": "Job braucht --script oder --instruction."})
+        return
+    params: dict = {}
+    if args.params:
+        try:
+            parsed = json.loads(args.params)
+            if not isinstance(parsed, dict):
+                raise ValueError("params must be a JSON object")
+            params = parsed
+        except (ValueError, TypeError) as e:
+            _out({"success": False, "error": f"Ungültige --params (JSON-Objekt erwartet): {e}"})
+            return
     if args.no_notify:
         notify: bool | str = False
     elif args.notify_on_error:
         notify = "error"
+    elif args.notify_on_output:
+        notify = "output_only"
     else:
-        notify = True
+        # Script jobs stay silent on a quiet day; instruction jobs always deliver.
+        notify = "output_only" if args.script else True
     job = {
         "id": f"job-{uuid.uuid4().hex[:8]}",
         "name": args.name,
         "schedule": args.schedule,
         "instruction": args.instruction,
+        "script": args.script,
+        "params": params,
         "notify": notify,
         "enabled": True,
         "created_at": datetime.now().isoformat(),
@@ -1422,10 +1440,19 @@ def main():
     p = sub.add_parser("add-job")
     _base(p)
     p.add_argument("--name", required=True)
-    p.add_argument("--instruction", required=True)
+    p.add_argument("--instruction", default="",
+                   help="Natural-language instruction run via the LLM (trivial jobs)")
+    p.add_argument("--script", default="",
+                   help="Script in workspace/.scripts/ run deterministically (preferred)")
+    p.add_argument("--params", default="",
+                   help="JSON dict passed to the script as AUTOMATION_PARAMS")
     p.add_argument("--schedule", required=True)
-    p.add_argument("--no-notify", action="store_true")
-    p.add_argument("--notify-on-error", action="store_true")
+    p.add_argument("--no-notify", action="store_true",
+                   help="Never deliver output (failures are still surfaced)")
+    p.add_argument("--notify-on-error", action="store_true",
+                   help="Deliver only on failure")
+    p.add_argument("--notify-on-output", action="store_true",
+                   help="Deliver only when there is output (silent on empty) — default for --script")
 
     # list-jobs
     p = sub.add_parser("list-jobs")

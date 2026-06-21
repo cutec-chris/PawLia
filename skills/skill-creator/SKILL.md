@@ -128,6 +128,37 @@ Do not teach skills to pass config values around as ordinary model-generated
 arguments. The model should provide user intent (`query`, `limit`, `project`),
 while the system supplies deployment config.
 
+## Automation scripts (scheduled jobs)
+
+When the task is a **scheduled automation** (built via the `automation` skill —
+thunderstorm alert, train-delay watch, morning digest), build a standalone
+script, not an LLM instruction. The scheduler runs it deterministically and
+delivers whatever it prints; printing nothing → the user hears nothing.
+
+Use the harness `pawlia.automation_harness` (always importable inside a job):
+
+```python
+#!/usr/bin/env python
+from pawlia.automation_harness import get_params, emit, silent, llm_call, log
+
+params = get_params()                 # the job's --params dict
+# 1. Deterministic gate: decide whether there is anything to report.
+if nothing_to_report:
+    silent()                          # print nothing → no notification
+else:
+    # 2. Optional: curate/phrase with the LLM, only when needed.
+    emit(llm_call("Fasse zusammen: ...") if needs_llm else "kurze Meldung")
+```
+
+Skeleton rules:
+- **Gate first, deterministically.** The decision to notify is plain code, never an LLM call.
+- **`emit()` only when there is something to say.** Empty/whitespace = silent.
+- **`llm_call()` sparingly** — a monitor often needs it never; a digest needs it once.
+- **Fail loud:** let exceptions propagate (non-zero exit); the scheduler surfaces failures.
+- **Write the script to `workspace/.scripts/<name>.py`** — the only place job scripts resolve from.
+- **Test before registering:** run it with a representative `AUTOMATION_PARAMS` and confirm the
+  silent case prints nothing and the alert case prints exactly the message.
+
 ## Filesystem rules — where a skill may write
 
 **Hard rule: a skill may only create or modify files under two roots.**
