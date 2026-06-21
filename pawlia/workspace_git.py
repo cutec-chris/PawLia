@@ -170,6 +170,7 @@ def _ensure_identity(workspace: str) -> None:
         _git(workspace, "config", "user.email", "pawlia@localhost")
 
 
+# Vault-internal files that must never sync (paths relative to workspace root).
 _GITIGNORE_PATTERNS = [
     ".obsidian/workspace.json",
     ".obsidian/workspace-mobile.json",
@@ -180,21 +181,68 @@ _GITIGNORE_PATTERNS = [
     "wiki/log.md",
 ]
 
+# Developer/runtime cruft a skill can drop anywhere in the tree (npm packages,
+# Python bytecode, virtualenvs, tool caches). Gitignore matches these at any
+# depth, so e.g. skills/<name>/node_modules is covered. Kept deliberately
+# unambiguous so a real note/folder is never ignored by accident.
+_GITIGNORE_CRUFT = [
+    "node_modules/",
+    "__pycache__/",
+    "*.py[cod]",
+    ".venv/",
+    "venv/",
+    "*.egg-info/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".DS_Store",
+]
+
 
 def _ensure_gitignore(workspace: str) -> None:
-    """Ensure all required patterns are present in the workspace .gitignore."""
+    """Ensure all required ignore patterns are present, then untrack anything
+    that is now ignored.
+
+    The untrack step cleans up cruft a skill committed *before* the pattern
+    existed (e.g. a node_modules tree shipped with a third-party skill) — it
+    walks the index, not just the freshly added patterns, so nested paths at
+    any depth are caught. It is a no-op when nothing ignored is tracked.
+    """
     gitignore = os.path.join(workspace, ".gitignore")
-    existing = set()
+    patterns = _GITIGNORE_PATTERNS + _GITIGNORE_CRUFT
+    existing: list[str] = []
     if os.path.exists(gitignore):
         with open(gitignore, encoding="utf-8") as f:
-            existing = {line.rstrip("\n") for line in f}
-    missing = [p for p in _GITIGNORE_PATTERNS if p not in existing]
+            existing = [line.rstrip("\n") for line in f]
+    existing_set = set(existing)
+    missing = [p for p in patterns if p not in existing_set]
     if missing:
         with open(gitignore, "a", encoding="utf-8") as f:
+            if existing and existing[-1] != "":
+                f.write("\n")
             for p in missing:
                 f.write(p + "\n")
-        for p in missing:
-            _git(workspace, "rm", "--cached", "--ignore-unmatch", "-q", p)
+
+    _untrack_ignored(workspace)
+
+
+def _untrack_ignored(workspace: str) -> None:
+    """Remove from the index every tracked file that current ignore rules match.
+
+    Files stay on disk (``--cached``); they are dropped from version control on
+    the next commit. Batched to keep the argument list bounded.
+    """
+    rc, out = _git(workspace, "ls-files", "-z", "--cached", "--ignored",
+                   "--exclude-standard", quiet=True)
+    if rc != 0 or not out:
+        return
+    paths = [p for p in out.split("\0") if p]
+    if not paths:
+        return
+    for i in range(0, len(paths), 100):
+        _git(workspace, "rm", "--cached", "--ignore-unmatch", "-q", "--",
+             *paths[i:i + 100])
+    logger.info("Untracked %d now-ignored file(s) in %s", len(paths), workspace)
 
 
 def _ensure_protect_config(workspace: str) -> None:

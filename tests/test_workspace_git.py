@@ -45,6 +45,40 @@ class TestEnsureRepo:
             ensure_repo(ws)
             assert os.path.isdir(os.path.join(ws, ".git"))
 
+    def test_fresh_init_never_commits_skill_cruft(self):
+        with tempfile.TemporaryDirectory() as ws:
+            os.makedirs(os.path.join(ws, "skills", "bahn", "node_modules", "dep"))
+            _write(ws, "skills/bahn/node_modules/dep/a.js", "x")
+            _write(ws, "note.md", "keep")
+            ensure_repo(ws)
+            tracked = _git(ws, "ls-files").stdout
+            assert "note.md" in tracked
+            assert "node_modules" not in tracked
+
+    def test_untracks_cruft_committed_before_pattern_existed(self):
+        with tempfile.TemporaryDirectory() as ws:
+            # Skill committed WITH cruft, before our gitignore ran.
+            os.makedirs(os.path.join(ws, "skills", "bahn", "node_modules", "dep"))
+            os.makedirs(os.path.join(ws, "skills", "bahn", "__pycache__"))
+            _write(ws, "skills/bahn/node_modules/dep/a.js", "x")
+            _write(ws, "skills/bahn/__pycache__/m.pyc", "x")
+            _write(ws, "skills/bahn/SKILL.md", "# bahn")
+            _git(ws, "init")
+            _git(ws, "config", "user.email", "t@t")
+            _git(ws, "config", "user.name", "t")
+            _git(ws, "add", "-A")
+            _git(ws, "commit", "-m", "with cruft")
+
+            ensure_repo(ws)
+            _git(ws, "commit", "-m", "cleanup")
+
+            tracked = _git(ws, "ls-files").stdout
+            assert "node_modules" not in tracked
+            assert "__pycache__" not in tracked
+            assert "skills/bahn/SKILL.md" in tracked
+            # Files stay on disk — only untracked, not deleted.
+            assert os.path.exists(os.path.join(ws, "skills", "bahn", "node_modules", "dep", "a.js"))
+
 
 class TestAutoCommit:
     def test_commits_changes(self):
