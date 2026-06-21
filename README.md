@@ -11,7 +11,7 @@
         ░▓▓█
 ```
 
-[![CI](http://192.168.177.105:1080/chris/thalia/actions/workflows/ci.yml/badge.svg)](http://192.168.177.105:1080/chris/thalia/actions/workflows/ci.yml)
+[![CI](http://192.168.177.105:1080/chris/thalia/actions/workflows/ci.yml/badge.svg)](http://192.168.177.105:1080/chris/thalia/actions?workflow=ci.yml)
 <!-- When mirrored to GitHub, add (swap owner/repo):
 [![CI](https://github.com/<owner>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/ci.yml)
 -->
