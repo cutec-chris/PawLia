@@ -297,13 +297,37 @@ _OPENCODE_PROVIDER_ENV = {
     "xai": "XAI_API_KEY",
 }
 
+# Provider names opencode-1.x ships with as built-in providers. If the resolved
+# PawLia coder model targets one of these, we forward --model so the user gets
+# the same model they would get from PawLia directly. Anything else (e.g.
+# local `ollama`, custom OpenAI-compatible endpoints, or providers added by
+# opencode plugins) we leave alone and let opencode use its own default model
+# (``opencode/big-pickle``) — otherwise opencode aborts with
+# ``ProviderModelNotFoundError``.
+_OPENCODE_NATIVE_PROVIDERS = {
+    "opencode",
+    "anthropic",
+    "google",
+    "gemini",
+    "openai",
+    "groq",
+    "mistral",
+    "deepseek",
+    "xai",
+}
+
 
 def _opencode_model_target(config: Dict[str, Any]) -> tuple[list[str], Dict[str, str]]:
     """Resolve PawLia's ``coder`` model to opencode ``--model`` args + key env.
 
     Returns ``(["--model", "<provider>/<model_id>"], {ENV: key})`` so opencode
-    uses the same model and provider PawLia is configured with. On any failure
-    returns ``([], {})`` and opencode falls back to its own default model.
+    uses the same model and provider PawLia is configured with. The provider
+    must be one opencode ships natively (see ``_OPENCODE_NATIVE_PROVIDERS``) —
+    for everything else (local ollama, custom OpenAI-compatible endpoints,
+    plugin-only providers) we return ``([], {})`` and let opencode use its
+    own default model. This avoids ``ProviderModelNotFoundError`` from
+    opencode when PawLia's coder chain points at a provider opencode does
+    not know about. On any other failure returns ``([], {})`` as well.
     """
     try:
         from pawlia.llm import LLMFactory
@@ -314,6 +338,13 @@ def _opencode_model_target(config: Dict[str, Any]) -> tuple[list[str], Dict[str,
         model_id = str(model_cfg.get("model") or selector).strip()
         provider = str(model_cfg.get("provider") or "").strip()
         if not (model_id and provider):
+            return [], {}
+        if provider.lower() not in _OPENCODE_NATIVE_PROVIDERS:
+            logger.info(
+                "opencode: pawlia coder provider %r is not a built-in opencode "
+                "provider; falling back to opencode default model",
+                provider,
+            )
             return [], {}
         env: Dict[str, str] = {}
         env_var = _OPENCODE_PROVIDER_ENV.get(provider.lower())
@@ -332,29 +363,94 @@ def _run_opencode(
     task_prompt: str,
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run opencode in non-interactive mode, coupled to PawLia's coder model."""
+    """Run opencode in non-interactive mode, coupled to PawLia's coder model.
+
+    Uses ``--format json`` so opencode emits a stream of JSON events on stdout
+    (one per line) instead of the default formatted output. JSON mode also lets
+    us extract the files opencode actually edited from ``tool_use`` events, and
+    lets the model reply in clean text we can return to callers.
+
+    In opencode-1.x, passing ``--file`` together with a positional message
+    argument confuses the CLI parser and the message is interpreted as a file
+    path (``File not found: <msg>``). We work around this by inlining the
+    contents of ``SKILL.md`` and the patterns reference into the task prompt
+    itself, so the model gets the same context without needing ``--file``.
+    """
     cmd = [
         "opencode", "run",
+        "--format", "json",
         "--dir", str(skill_path),
     ]
 
     model_args, env_extra = _opencode_model_target(config)
     cmd.extend(model_args)
 
+    context_blocks: list[str] = []
     skill_md = skill_path / "SKILL.md"
     if skill_md.is_file():
-        cmd.extend(["--file", str(skill_md)])
+        try:
+            context_blocks.append(
+                f"=== {skill_md.name} ===\n{skill_md.read_text(encoding='utf-8', errors='replace')}"
+            )
+        except OSError:
+            pass
 
     conventions = _references_dir() / "patterns.md"
     if conventions.is_file():
-        cmd.extend(["--file", str(conventions)])
+        try:
+            context_blocks.append(
+                f"=== {conventions.name} ===\n{conventions.read_text(encoding='utf-8', errors='replace')}"
+            )
+        except OSError:
+            pass
 
-    cmd.append(task_prompt)
+    prompt = task_prompt
+    if context_blocks:
+        prompt = (
+            "The following context files describe the conventions and the skill "
+            "you are working on. Treat them as authoritative.\n\n"
+            + "\n\n".join(context_blocks)
+            + "\n\n--- task ---\n"
+            + task_prompt
+        )
+    cmd.append(prompt)
 
     env = None
     if env_extra:
         env = {**os.environ, **env_extra}
-    return _run_backend("opencode", cmd, env=env)
+    result = _run_backend("opencode", cmd, env=env)
+
+    # Parse JSON event stream for any tools/files opencode actually edited,
+    # so callers can verify the skill files were touched.
+    edited: list[str] = []
+    text_parts: list[str] = []
+    for line in (result.get("output") or "").splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        evt_type = evt.get("type")
+        part = evt.get("part") or {}
+        if evt_type == "text":
+            t = part.get("text")
+            if isinstance(t, str) and t.strip():
+                text_parts.append(t)
+        elif evt_type == "tool_use":
+            inp = part.get("input") or {}
+            for key in ("filePath", "path", "filepath", "file_path"):
+                val = inp.get(key)
+                if isinstance(val, str) and val:
+                    edited.append(val)
+                    break
+    if edited:
+        result["files_modified"] = sorted(set(edited))
+    if text_parts:
+        # Concatenate assistant text replies so callers see the model's answer.
+        result["output"] = "\n".join(text_parts)[-3000:]
+    return result
 
 
 # ── LLM backend (fallback) ───────────────────────────────────────────
