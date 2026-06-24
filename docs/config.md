@@ -303,6 +303,7 @@ voip:
 | `voip.incomplete_grace_base` | Semantic endpointing: when `response_delay_seconds` has elapsed but the accumulated transcript still trails off mid-thought (a dangling conjunction/preposition/article/filler or a trailing comma, German + English), PawLia holds the reply back this many extra seconds instead of answering half a sentence (default `2.0`). `0` disables semantic endpointing |
 | `voip.incomplete_grace_growth` | Additional incomplete-transcript grace granted per second the caller has already been speaking — a long, complex sentence earns longer thinking pauses (default `0.15`) |
 | `voip.incomplete_grace_max` | Hard cap on the total incomplete-transcript grace, so a dangling fragment can never stall the turn indefinitely (default `8.0`) |
+| `voip.tts_prebuffer_sentences` | Number of synthesized reply sentences to cache before starting playback (default `2`), flushed together so the playback queue has enough lead to absorb the next sentence's synthesis latency — removes the audible gap after the first sentence. Further sentences stream in during playback. `1` disables prebuffering (play each sentence as soon as it is ready) |
 | `voip.agc_window_seconds` | How long PawLia keeps automatic gain control active after recent speech / call activity |
 | `voip.agc_target_rms` | Target loudness AGC tries to normalize incoming audio toward for VAD decisions |
 | `voip.agc_max_gain` | Upper amplification cap AGC may apply to quiet incoming audio |

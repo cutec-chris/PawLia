@@ -307,6 +307,13 @@ class CallCore:
     INCOMPLETE_GRACE_BASE = 2.0
     INCOMPLETE_GRACE_GROWTH = 0.15
     INCOMPLETE_GRACE_MAX = 8.0
+    # TTS playback prebuffer: cache this many synthesized sentences before
+    # starting playback, so the playback queue has enough lead to absorb the
+    # per-sentence synthesis latency of the *next* sentences — otherwise there is
+    # an audible gap after the first sentence while sentence 2 is still being
+    # synthesized. Sentences beyond the prebuffer are streamed in as they finish,
+    # during playback. 1 disables prebuffering (play each sentence as ready).
+    TTS_PREBUFFER_SENTENCES = 2
     # While the agent is *thinking* (hold tone playing, not yet speaking),
     # speech that lacks an interrupt keyword is discarded by default — so a
     # side conversation (e.g. talking to someone else in the room) does not
@@ -480,6 +487,9 @@ class CallCore:
         self.INCOMPLETE_GRACE_MAX = get_float_config(
             voip_cfg, "incomplete_grace_max", self.INCOMPLETE_GRACE_MAX,
             context=ctx, minimum=0.0)
+        self.TTS_PREBUFFER_SENTENCES = get_int_config(
+            voip_cfg, "tts_prebuffer_sentences", self.TTS_PREBUFFER_SENTENCES,
+            context=ctx, minimum=1)
         self.CONNECT_TIMEOUT_SECONDS = get_float_config(
             voip_cfg, "connect_timeout_seconds", self.CONNECT_TIMEOUT_SECONDS,
             context=ctx, minimum=1.0)
@@ -956,11 +966,22 @@ class CallCore:
         typing_task = asyncio.create_task(self._keep_typing())
         try:
             first_sentence_received = False
+            prebuffer: List["np.ndarray"] = []
+            playback_started = False
+            prebuffer_target = max(1, self.TTS_PREBUFFER_SENTENCES)
             call_prompt = self._agent.build_system_prompt(
                 mode="call", thread_id=self.thread_id, extra_context=self._call_extra_context())
 
+            def _begin_playback(pcms: List["np.ndarray"]) -> None:
+                nonlocal first_sentence_received, playback_started
+                playback_started = True
+                for pcm in pcms:
+                    self._transport.enqueue_pcm_float32(pcm)
+                if not first_sentence_received:
+                    first_sentence_received = True
+                    self._transport.stop_hold()
+
             async def _on_sentence(sentence: str) -> None:
-                nonlocal first_sentence_received
                 if not self._transport:
                     return
                 current_task = asyncio.current_task()
@@ -978,10 +999,18 @@ class CallCore:
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info("call %s: TTS sentence (%d samples): %s",
                                     self.call_id[:8], len(tts_pcm), sentence[:60])
-                        self._transport.enqueue_pcm_float32(tts_pcm)
-                        if not first_sentence_received:
-                            first_sentence_received = True
-                            self._transport.stop_hold()
+                        if playback_started:
+                            self._transport.enqueue_pcm_float32(tts_pcm)
+                        else:
+                            # Hold playback until prebuffer_target sentences are
+                            # cached, then flush them together — this gives the
+                            # queue enough lead that the next sentence's synthesis
+                            # finishes before playback drains, so there is no gap
+                            # after the first sentence.
+                            prebuffer.append(tts_pcm)
+                            if len(prebuffer) >= prebuffer_target:
+                                _begin_playback(prebuffer)
+                                prebuffer.clear()
                 except Exception as e:
                     logger.warning("call %s: TTS sentence failed: %s", self.call_id[:8], e)
 
@@ -1004,6 +1033,12 @@ class CallCore:
                 on_skill_start=_on_skill_start,
                 on_skill_done=_on_skill_done,
             )
+            # The response had fewer than prebuffer_target sentences, so the
+            # prebuffer never tripped — flush what was cached, otherwise a short
+            # reply would stay stuck and never play.
+            if prebuffer and self._transport:
+                _begin_playback(prebuffer)
+                prebuffer.clear()
         finally:
             typing_task.cancel()
             if self._transport:

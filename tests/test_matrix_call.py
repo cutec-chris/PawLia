@@ -1736,3 +1736,93 @@ async def test_preanswer_deadline_zero_falls_back_to_warmup_timeout():
     start = loop.time()
     await asyncio.wait_for(session._run_preanswer_warmup(), timeout=2.0)
     assert loop.time() - start < 1.0  # bounded by the (short) warmup timeout
+
+
+# --- TTS playback prebuffer --------------------------------------------------
+# Playing each sentence the instant it is synthesized leaves an audible gap
+# after the first sentence while sentence 2 is still being synthesized. The
+# prebuffer caches TTS_PREBUFFER_SENTENCES sentences before starting playback
+# (flushing them together), then streams the rest in during playback.
+
+def _prebuffer_session(call_id, prebuffer):
+    session = _make_call_session(call_id)
+    session.TTS_PREBUFFER_SENTENCES = prebuffer
+    session._keep_typing = AsyncMock(return_value=None)
+    enqueued = []
+    session._transport = SimpleNamespace(
+        start_hold=MagicMock(),
+        stop_hold=MagicMock(),
+        enqueue_pcm_float32=lambda pcm: enqueued.append(pcm),
+        is_playing=False,
+    )
+    session._agent.build_system_prompt.return_value = "P"
+    return session, enqueued
+
+
+@pytest.mark.asyncio
+async def test_tts_prebuffer_holds_first_sentence_then_flushes_pair():
+    session, enqueued = _prebuffer_session("call-prebuf", prebuffer=2)
+    seen = {}
+
+    async def fake_synth(sentence, *a, **k):
+        return [sentence]
+
+    async def fake_run_streamed(text, *, on_sentence, **kwargs):
+        await on_sentence("Erster Satz.")
+        seen["after_1"] = len(enqueued)          # still held — no gap-prone solo play
+        await on_sentence("Zweiter Satz.")
+        seen["after_2"] = len(enqueued)          # prebuffer trips → both flushed
+        await on_sentence("Dritter Satz.")
+        seen["after_3"] = len(enqueued)          # streamed during playback
+        return "voll"
+
+    session._agent.run_streamed = fake_run_streamed
+    with patch("pawlia.tts.synthesize_pcm", new=fake_synth):
+        await session._respond_to_transcript("hi", announce_transcript=False)
+
+    assert seen == {"after_1": 0, "after_2": 2, "after_3": 3}
+    session._transport.stop_hold.assert_called()  # hold released when playback starts
+
+
+@pytest.mark.asyncio
+async def test_tts_prebuffer_flushes_short_reply_after_stream_ends():
+    """A reply shorter than the prebuffer target must still play (flushed once
+    the stream completes), not stay stuck in the prebuffer forever."""
+    session, enqueued = _prebuffer_session("call-prebuf-short", prebuffer=2)
+
+    async def fake_synth(sentence, *a, **k):
+        return [sentence]
+
+    async def fake_run_streamed(text, *, on_sentence, **kwargs):
+        await on_sentence("Nur ein Satz.")
+        return "voll"
+
+    session._agent.run_streamed = fake_run_streamed
+    with patch("pawlia.tts.synthesize_pcm", new=fake_synth):
+        await session._respond_to_transcript("hi", announce_transcript=False)
+
+    assert len(enqueued) == 1
+    session._transport.stop_hold.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_tts_prebuffer_one_plays_each_sentence_immediately():
+    """TTS_PREBUFFER_SENTENCES == 1 restores the stream-as-ready behaviour."""
+    session, enqueued = _prebuffer_session("call-prebuf-off", prebuffer=1)
+    seen = {}
+
+    async def fake_synth(sentence, *a, **k):
+        return [sentence]
+
+    async def fake_run_streamed(text, *, on_sentence, **kwargs):
+        await on_sentence("Erster Satz.")
+        seen["after_1"] = len(enqueued)          # plays at once, no prebuffering
+        await on_sentence("Zweiter Satz.")
+        seen["after_2"] = len(enqueued)
+        return "voll"
+
+    session._agent.run_streamed = fake_run_streamed
+    with patch("pawlia.tts.synthesize_pcm", new=fake_synth):
+        await session._respond_to_transcript("hi", announce_transcript=False)
+
+    assert seen == {"after_1": 1, "after_2": 2}

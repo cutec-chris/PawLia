@@ -190,6 +190,10 @@ interfaces:
 #   incomplete_grace_base: 2.0         # base extra wait for an unfinished transcript (0 = disable)
 #   incomplete_grace_growth: 0.15      # +grace per second already spoken
 #   incomplete_grace_max: 8.0          # hard cap so a dangling fragment never stalls the turn
+#   tts_prebuffer_sentences: 2         # cache this many synthesized sentences before starting
+#                                       # playback (flushed together), then stream the rest in
+#                                       # during playback — removes the gap after the first
+#                                       # sentence while sentence 2 is still synthesizing. 1 = off
 #   agc_window_seconds: 15.0          # keep AGC active this long after bot/user activity
 #   agc_target_rms: 0.10              # target loudness used for VAD normalization (bot active)
 #   agc_quiet_target_rms: 0.06        # target loudness when bot is idle (boosts quiet speech)
