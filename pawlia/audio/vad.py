@@ -49,6 +49,40 @@ _STT_HALLUCINATION_SUBSTR_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Words that almost never end a finished spoken turn — when a transcript ends on
+# one of these (or a comma), the caller is mid-thought and a trailing pause is a
+# *thinking* pause, not an endpoint. Used by ``looks_like_incomplete_utterance``
+# to hold the response back instead of replying to half a sentence. Kept high
+# precision (dangling function words only) so a sentence ending in a content
+# word ("...kauf bitte Milch") is never misread as unfinished. Bilingual:
+# the caller may speak German or English.
+_CONTINUATION_WORDS = frozenset({
+    # --- German ---
+    # coordinating / subordinating conjunctions
+    "und", "oder", "aber", "sondern", "denn", "doch", "sowie", "bzw",
+    "beziehungsweise", "weil", "dass", "daß", "ob", "obwohl", "damit", "sodass",
+    "während", "bevor", "nachdem", "falls", "sobald", "indem", "als", "wenn",
+    "wie", "wo", "wer", "was", "welche", "welcher", "welches",
+    # prepositions
+    "mit", "für", "von", "zu", "zur", "zum", "im", "in", "an", "am", "auf",
+    "bei", "beim", "nach", "über", "unter", "vor", "durch", "gegen", "ohne",
+    "um", "aus", "seit", "bis", "wegen", "trotz", "gegenüber",
+    # dangling articles / determiners / possessives
+    "der", "die", "das", "dem", "den", "des", "ein", "eine", "einen", "einem",
+    "einer", "eines", "kein", "keine", "keinen", "mein", "dein", "sein", "ihr",
+    "unser", "euer",
+    # fillers / discourse markers
+    "also", "äh", "ähm", "ehm", "öh", "naja", "halt", "quasi", "sozusagen",
+    "zwar", "nämlich",
+    # --- English ---
+    "and", "or", "but", "so", "because", "that", "which", "who", "if", "when",
+    "while", "since", "although", "though", "unless", "whereas",
+    "with", "for", "from", "to", "of", "in", "on", "at", "by", "about",
+    "into", "onto", "over", "under", "through", "between", "without",
+    "the", "a", "an", "my", "your", "his", "her", "their", "our", "its",
+    "like", "well", "um", "uh", "uhm", "basically", "actually",
+})
+
 
 def _build_webrtc_vad(mode: int):
     """Create a WebRTC VAD instance when the optional dependency is available."""
@@ -638,3 +672,35 @@ class SpeechDetector:
         if _STANDALONE_STT_HALLUCINATION_RE.fullmatch(normalized):
             return True
         return bool(_STT_HALLUCINATION_SUBSTR_RE.search(normalized))
+
+    @staticmethod
+    def looks_like_incomplete_utterance(text: str) -> bool:
+        """Return True when a transcript looks like a mid-thought fragment.
+
+        Pure-text semantic endpointing: reply timers in the call pipeline are
+        time-based, so a thinking pause after an unfinished clause ("...und das
+        liegt daran, dass") would otherwise trigger a reply to half a sentence.
+        This lets the caller hold the response back until the thought is closed.
+
+        High precision by design — only the strongest dangling-fragment signals
+        fire, so a complete sentence ending in a content word ("...kauf bitte
+        Milch") is never misread as unfinished:
+
+          1. a trailing comma (a comma never ends a spoken turn);
+          2. the last word is a dangling function word (conjunction, preposition,
+             article, filler) from :data:`_CONTINUATION_WORDS`.
+
+        Signal 2 only applies once the utterance has at least three words, so a
+        short standalone reply ("ja", "naja", "well") stays complete. Missing
+        terminal punctuation alone is *not* a signal — Whisper drops it even on
+        finished sentences, which would over-hold.
+        """
+        normalized = " ".join((text or "").strip().split())
+        if not normalized:
+            return False
+        if normalized.endswith(","):
+            return True
+        words = re.findall(r"\b[\wäöüß']+\b", normalized, flags=re.UNICODE)
+        if len(words) < 3:
+            return False
+        return words[-1].lower() in _CONTINUATION_WORDS

@@ -574,3 +574,45 @@ def test_high_noise_cap_bounds_the_wait_end_to_end():
     assert loud == pytest.approx(d.HIGH_NOISE_MAX_CHUNK_SECONDS, abs=0.3)
     assert quiet == pytest.approx(MAX_CHUNK_SECONDS, abs=0.3)
     assert loud < quiet
+
+
+# --- semantic endpointing: incomplete-utterance heuristic --------------------
+# Reply timers in the call pipeline are time-based, so a thinking pause after an
+# unfinished clause would reply to half a sentence. looks_like_incomplete_utterance
+# lets the pipeline hold back. High precision by design: only dangling function
+# words / trailing commas fire, so a sentence ending in a content word is never
+# misread as unfinished (which would over-hold and feel laggy).
+
+@pytest.mark.parametrize("text", [
+    "und das liegt daran, dass",          # trailing subordinating conjunction (DE)
+    "ich hätte gern einen Termin mit",    # trailing preposition (DE)
+    "kannst du mir bitte die",            # trailing article (DE)
+    "ich wollte nur kurz sagen, also",    # trailing filler (DE)
+    "kauf bitte Milch, Eier,",            # trailing comma mid-list
+    "so the thing is that",               # trailing conjunction (EN)
+    "I would like to book a table for",   # trailing preposition (EN)
+    "can you please send me the",         # trailing article (EN)
+])
+def test_incomplete_utterance_detected(text):
+    assert SpeechDetector.looks_like_incomplete_utterance(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "kauf bitte Milch.",                  # complete, terminal punctuation
+    "ich brauche einen neuen Termin",     # complete, ends on content word, no punct
+    "ja",                                 # short standalone reply
+    "nein danke",                         # short standalone reply
+    "well",                               # short EN filler standalone (< 3 words)
+    "please send the report tomorrow",    # complete EN, ends on content word
+    "that's all for now",                 # complete EN
+    "",                                   # empty
+    "   ",                                # whitespace only
+])
+def test_complete_utterance_not_flagged(text):
+    assert SpeechDetector.looks_like_incomplete_utterance(text) is False
+
+
+def test_incomplete_heuristic_is_bilingual_and_case_insensitive():
+    """The trailing-word check ignores case and covers both languages."""
+    assert SpeechDetector.looks_like_incomplete_utterance("ICH GEHE NACH HAUSE UND") is True
+    assert SpeechDetector.looks_like_incomplete_utterance("I AM GOING HOME AND") is True

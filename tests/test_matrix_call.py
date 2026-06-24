@@ -1659,3 +1659,29 @@ def test_active_session_for_room():
 
     assert mgr.active_session_for_room("!room:test") is live
     assert mgr.active_session_for_room("!nope:test") is None
+
+
+# --- semantic endpointing: incomplete-utterance grace scaling ----------------
+# The grace granted to an unfinished transcript must grow with how long the
+# caller has been speaking (a long monologue earns longer thinking pauses) yet
+# stay hard-capped so a dangling fragment can never stall the turn forever.
+
+def test_incomplete_grace_grows_with_speech_then_caps():
+    session = _make_call_session("call-grace")
+    session._speech_detector.last_speech_duration = 0.0
+    short = session._incomplete_grace_seconds()
+    session._speech_detector.last_speech_duration = 10.0
+    mid = session._incomplete_grace_seconds()
+    session._speech_detector.last_speech_duration = 1e6
+    huge = session._incomplete_grace_seconds()
+    assert short == pytest.approx(session.INCOMPLETE_GRACE_BASE, abs=1e-6)
+    assert mid > short                                  # grows with speech
+    assert huge <= session.INCOMPLETE_GRACE_MAX + 1e-6  # bounded for any input
+    assert huge == pytest.approx(session.INCOMPLETE_GRACE_MAX, abs=1e-6)
+
+
+def test_incomplete_grace_disabled_is_zero():
+    session = _make_call_session("call-grace-off")
+    session.INCOMPLETE_GRACE_BASE = 0.0
+    session._speech_detector.last_speech_duration = 100.0
+    assert session._incomplete_grace_seconds() == 0.0

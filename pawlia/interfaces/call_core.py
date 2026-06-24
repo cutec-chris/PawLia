@@ -290,6 +290,16 @@ class CallCore:
     NET_RECOVER_MESSAGE = "📶 Verbindung wieder stabil."
     JITTER_BUFFER_CAPACITY = 32
     RESPONSE_DELAY_SECONDS = 1.2
+    # Semantic endpointing: when the reply timer elapses but the accumulated
+    # transcript still looks like a mid-thought fragment (see
+    # SpeechDetector.looks_like_incomplete_utterance), hold the response back a
+    # little longer rather than reply to half a sentence. The extra grace grows
+    # with how long the caller has already been speaking — a long, complex
+    # monologue earns longer thinking pauses — but is hard-capped so a dangling
+    # fragment can never stall the turn indefinitely. Set base 0 to disable.
+    INCOMPLETE_GRACE_BASE = 2.0
+    INCOMPLETE_GRACE_GROWTH = 0.15
+    INCOMPLETE_GRACE_MAX = 8.0
     # While the agent is *thinking* (hold tone playing, not yet speaking),
     # speech that lacks an interrupt keyword is discarded by default — so a
     # side conversation (e.g. talking to someone else in the room) does not
@@ -450,6 +460,15 @@ class CallCore:
             self.PREANSWER_STT_SILENCE_SECONDS, context=ctx, minimum=0.05)
         self.RESPONSE_DELAY_SECONDS = get_float_config(
             voip_cfg, "response_delay_seconds", self.RESPONSE_DELAY_SECONDS,
+            context=ctx, minimum=0.0)
+        self.INCOMPLETE_GRACE_BASE = get_float_config(
+            voip_cfg, "incomplete_grace_base", self.INCOMPLETE_GRACE_BASE,
+            context=ctx, minimum=0.0)
+        self.INCOMPLETE_GRACE_GROWTH = get_float_config(
+            voip_cfg, "incomplete_grace_growth", self.INCOMPLETE_GRACE_GROWTH,
+            context=ctx, minimum=0.0)
+        self.INCOMPLETE_GRACE_MAX = get_float_config(
+            voip_cfg, "incomplete_grace_max", self.INCOMPLETE_GRACE_MAX,
             context=ctx, minimum=0.0)
         self.CONNECT_TIMEOUT_SECONDS = get_float_config(
             voip_cfg, "connect_timeout_seconds", self.CONNECT_TIMEOUT_SECONDS,
@@ -813,6 +832,19 @@ class CallCore:
             base += min((noise_ratio - 1.5) * 0.5, 1.5)
         return base
 
+    def _incomplete_grace_seconds(self) -> float:
+        """Extra wait granted when the pending transcript looks unfinished.
+
+        Grows with how long the caller has already been speaking — a long,
+        complex sentence earns longer thinking pauses — but is hard-capped at
+        INCOMPLETE_GRACE_MAX so a dangling fragment can never stall the turn
+        forever. Returns 0 when disabled (INCOMPLETE_GRACE_BASE == 0)."""
+        if self.INCOMPLETE_GRACE_BASE <= 0.0:
+            return 0.0
+        dur = max(0.0, self._speech_detector.last_speech_duration)
+        grace = self.INCOMPLETE_GRACE_BASE + dur * self.INCOMPLETE_GRACE_GROWTH
+        return min(grace, self.INCOMPLETE_GRACE_MAX)
+
     async def _cancel_active_response(self) -> None:
         pending = self._pending_response_task
         current = asyncio.current_task()
@@ -982,8 +1014,15 @@ class CallCore:
     async def _delayed_pending_response(self) -> None:
         try:
             response_delay = self._compute_response_delay()
+            max_incomplete_grace = self._incomplete_grace_seconds()
+            waited_incomplete = 0.0
             while not self._done.is_set():
                 idle_for = time.monotonic() - self._last_user_speech_at
+                if self._speaking or idle_for < response_delay:
+                    # Caller resumed (or never paused long enough) — reset the
+                    # incomplete-grace budget so a fresh fragment gets the full
+                    # allowance again rather than inheriting a spent one.
+                    waited_incomplete = 0.0
                 if not self._speaking and idle_for >= response_delay:
                     tts_playing = False
                     if self._transport:
@@ -991,6 +1030,22 @@ class CallCore:
                     if tts_playing:
                         await asyncio.sleep(0.2)
                         continue
+                    # Semantic endpointing: the reply timer elapsed, but if the
+                    # accumulated transcript still trails off mid-thought, hold
+                    # back a little longer instead of replying to half a
+                    # sentence. Bounded by max_incomplete_grace so a dangling
+                    # fragment can never stall the turn indefinitely.
+                    if waited_incomplete < max_incomplete_grace:
+                        pending_text = " ".join(self._pending_transcripts)
+                        if self._speech_detector.looks_like_incomplete_utterance(pending_text):
+                            logger.info(
+                                "call %s: transcript looks unfinished, holding "
+                                "(%.1f/%.1fs grace): %s",
+                                self.call_id[:8], waited_incomplete,
+                                max_incomplete_grace, pending_text[-40:])
+                            await asyncio.sleep(0.3)
+                            waited_incomplete += 0.3
+                            continue
                     break
                 await asyncio.sleep(0.2)
             if self._done.is_set() or not self._pending_transcripts:

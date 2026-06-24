@@ -182,6 +182,14 @@ interfaces:
 #   webrtcvad_min_consecutive_frames: 4
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
 #   response_delay_seconds: 2.5       # wait this long after speech ends before replying
+#   # --- semantic endpointing: when response_delay_seconds elapses but the
+#   #     accumulated transcript still trails off mid-thought (dangling
+#   #     conjunction/preposition/article/filler or a trailing comma, DE+EN),
+#   #     hold the reply back instead of answering half a sentence. The extra
+#   #     grace grows with how long the caller has been speaking but is capped.
+#   incomplete_grace_base: 2.0         # base extra wait for an unfinished transcript (0 = disable)
+#   incomplete_grace_growth: 0.15      # +grace per second already spoken
+#   incomplete_grace_max: 8.0          # hard cap so a dangling fragment never stalls the turn
 #   agc_window_seconds: 15.0          # keep AGC active this long after bot/user activity
 #   agc_target_rms: 0.10              # target loudness used for VAD normalization (bot active)
 #   agc_quiet_target_rms: 0.06        # target loudness when bot is idle (boosts quiet speech)

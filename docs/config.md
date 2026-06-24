@@ -300,6 +300,9 @@ voip:
 | `voip.queue_speech_while_thinking` | While PawLia is *thinking* (hold tone playing, not yet speaking), speech that lacks an interrupt keyword (`halt`/`stop`/`stopp`/`wait`/`warte`/`moment`/`sekunde`/`pause`/`pawlia`) is discarded as side conversation by default (`false`), so chatter in the room isn't fed into the next turn. Set `true` to queue such speech for the next response ("nachreichen") instead. Keyword speech always interrupts; speech while PawLia is *speaking* is always discarded unless it carries a keyword |
 | `voip.call_inactivity_seconds` | Hang up the VoIP call when no speech chunk has been sent to STT for this many seconds |
 | `voip.response_delay_seconds` | Minimum quiet time after the latest caller speech before PawLia starts answering. The actual delay scales up automatically with long monologues (see adaptive response delay below) |
+| `voip.incomplete_grace_base` | Semantic endpointing: when `response_delay_seconds` has elapsed but the accumulated transcript still trails off mid-thought (a dangling conjunction/preposition/article/filler or a trailing comma, German + English), PawLia holds the reply back this many extra seconds instead of answering half a sentence (default `2.0`). `0` disables semantic endpointing |
+| `voip.incomplete_grace_growth` | Additional incomplete-transcript grace granted per second the caller has already been speaking — a long, complex sentence earns longer thinking pauses (default `0.15`) |
+| `voip.incomplete_grace_max` | Hard cap on the total incomplete-transcript grace, so a dangling fragment can never stall the turn indefinitely (default `8.0`) |
 | `voip.agc_window_seconds` | How long PawLia keeps automatic gain control active after recent speech / call activity |
 | `voip.agc_target_rms` | Target loudness AGC tries to normalize incoming audio toward for VAD decisions |
 | `voip.agc_max_gain` | Upper amplification cap AGC may apply to quiet incoming audio |
