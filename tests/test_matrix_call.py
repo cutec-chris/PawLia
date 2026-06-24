@@ -1366,7 +1366,7 @@ async def test_send_greeting_waits_for_existing_prepare_task():
     media.set()
     session._transport = SimpleNamespace(
         enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock(),
-        media_connected=media)
+        start_hold=MagicMock(), media_connected=media)
 
     async def _prepare_later():
         await asyncio.sleep(0)
@@ -1381,6 +1381,9 @@ async def test_send_greeting_waits_for_existing_prepare_task():
 
     session._transport.enqueue_pcm_float32.assert_called_once_with(pcm)
     session._transport.stop_hold.assert_called_once()
+    # Answered before the greeting was ready, so the gap is covered by the hold
+    # tone until the first prepared sentence flushes.
+    session._transport.start_hold.assert_called_once()
     send_cb.assert_any_call("Hallo, ich bin da.")
     assert session._greeting_sent is True
 
@@ -1685,3 +1688,51 @@ def test_incomplete_grace_disabled_is_zero():
     session.INCOMPLETE_GRACE_BASE = 0.0
     session._speech_detector.last_speech_duration = 100.0
     assert session._incomplete_grace_seconds() == 0.0
+
+
+# --- pre-answer pickup decoupled from greeting readiness ---------------------
+# A slow/cold LLM+TTS used to delay the answer until the first greeting sentence
+# was synthesized (~9s observed), long enough that callers hung up before
+# connecting. The pickup now waits at most PREANSWER_ANSWER_DEADLINE_SECONDS and
+# answers regardless; the greeting streams in afterwards under the hold tone.
+
+@pytest.mark.asyncio
+async def test_preanswer_answers_within_deadline_when_greeting_slow():
+    session = _make_call_session("call-deadline")
+    session.PREANSWER_ANSWER_DEADLINE_SECONDS = 0.15
+    session.PREANSWER_WARMUP_TIMEOUT_SECONDS = 10.0
+    session._warm_stt_with_silence = AsyncMock()
+    session._ensure_prepare_greeting_task = MagicMock()
+    # greeting readiness is never signalled — must not block past the deadline
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await asyncio.wait_for(session._run_preanswer_warmup(), timeout=2.0)
+    elapsed = loop.time() - start
+    assert elapsed < 1.0  # answered at ~deadline, not the 10s warmup timeout
+    session._ensure_prepare_greeting_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_preanswer_answers_immediately_when_greeting_ready():
+    session = _make_call_session("call-ready")
+    session.PREANSWER_ANSWER_DEADLINE_SECONDS = 5.0
+    session._warm_stt_with_silence = AsyncMock()
+    session._ensure_prepare_greeting_task = MagicMock()
+    session._greeting_first_sentence_ready.set()
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await asyncio.wait_for(session._run_preanswer_warmup(), timeout=1.0)
+    assert loop.time() - start < 0.5  # returns at once, no deadline wait
+
+
+@pytest.mark.asyncio
+async def test_preanswer_deadline_zero_falls_back_to_warmup_timeout():
+    session = _make_call_session("call-deadline-off")
+    session.PREANSWER_ANSWER_DEADLINE_SECONDS = 0.0
+    session.PREANSWER_WARMUP_TIMEOUT_SECONDS = 0.15
+    session._warm_stt_with_silence = AsyncMock()
+    session._ensure_prepare_greeting_task = MagicMock()
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await asyncio.wait_for(session._run_preanswer_warmup(), timeout=2.0)
+    assert loop.time() - start < 1.0  # bounded by the (short) warmup timeout

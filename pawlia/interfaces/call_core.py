@@ -276,6 +276,13 @@ class CallCore:
     BARGEIN_RMS_THRESHOLD = 0.05
     PREANSWER_WARMUP_ENABLED = True
     PREANSWER_WARMUP_TIMEOUT_SECONDS = 25.0
+    # Answer the call once the greeting's first sentence is ready, but never
+    # block longer than this short deadline before picking up — a slow LLM/TTS
+    # (cold ollama) otherwise delays the answer by ~9s and the caller hangs up
+    # before it ever connects. On deadline we answer anyway; the greeting keeps
+    # synthesizing in the background and streams in under the hold tone once
+    # ready. Set 0 to fall back to waiting the full warmup timeout.
+    PREANSWER_ANSWER_DEADLINE_SECONDS = 2.5
     PREANSWER_STT_SILENCE_SECONDS = 0.4
     CONNECT_TIMEOUT_SECONDS = 45.0
     HANGUP_ON_MEDIA_END = True
@@ -452,6 +459,9 @@ class CallCore:
         self.PREANSWER_WARMUP_ENABLED = get_bool_config(
             voip_cfg, "preanswer_warmup_enabled", self.PREANSWER_WARMUP_ENABLED,
             context=ctx)
+        self.PREANSWER_ANSWER_DEADLINE_SECONDS = get_float_config(
+            voip_cfg, "preanswer_answer_deadline_seconds",
+            self.PREANSWER_ANSWER_DEADLINE_SECONDS, context=ctx, minimum=0.0)
         self.PREANSWER_WARMUP_TIMEOUT_SECONDS = get_float_config(
             voip_cfg, "preanswer_warmup_timeout_seconds",
             self.PREANSWER_WARMUP_TIMEOUT_SECONDS, context=ctx, minimum=0.1)
@@ -546,14 +556,15 @@ class CallCore:
     # ------------------------------------------------------------------
 
     async def _run_preanswer_warmup(self) -> None:
-        """Block until the first greeting sentence is ready, then return.
+        """Wait briefly for the first greeting sentence, then answer regardless.
 
-        Answering only when the first sentence's TTS audio is prepared avoids the
-        awkward silence after pickup (the greeting plays immediately once media
-        connects), while keeping the answer fast enough that the caller's ICE
-        timeout does not fire: we wait for the *first* sentence, not the whole
-        greeting, and STT warmup + the remaining sentences continue in the
-        background.  On timeout we answer anyway rather than dropping the call.
+        Answering once the first sentence's TTS audio is prepared avoids an
+        awkward silence after pickup, but only up to a short deadline
+        (PREANSWER_ANSWER_DEADLINE_SECONDS): a slow LLM/TTS would otherwise delay
+        the answer until the caller has already hung up. Past the deadline we
+        pick up anyway — the greeting keeps synthesizing in the background and
+        streams in under the hold tone once ready (see _send_greeting). STT
+        warmup also continues in the background.
         """
         if not self.PREANSWER_WARMUP_ENABLED:
             return
@@ -562,17 +573,22 @@ class CallCore:
         # it in the background without blocking the answer.
         asyncio.create_task(self._warm_stt_with_silence())
         self._ensure_prepare_greeting_task()
+        deadline = self.PREANSWER_ANSWER_DEADLINE_SECONDS
+        if deadline <= 0.0:
+            deadline = self.PREANSWER_WARMUP_TIMEOUT_SECONDS
+        else:
+            deadline = min(deadline, self.PREANSWER_WARMUP_TIMEOUT_SECONDS)
         try:
             await asyncio.wait_for(
                 self._greeting_first_sentence_ready.wait(),
-                timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+                timeout=deadline,
             )
             logger.info("call %s: first greeting sentence ready in %.1fs, answering",
                         self.call_id[:8], time.monotonic() - started)
         except asyncio.TimeoutError:
-            logger.warning("call %s: greeting not ready after %.1fs; answering anyway"
-                           " (greeting continues in background)",
-                           self.call_id[:8], self.PREANSWER_WARMUP_TIMEOUT_SECONDS)
+            logger.info("call %s: answering after %.1fs without greeting ready"
+                        " (greeting continues in background under hold tone)",
+                        self.call_id[:8], deadline)
 
     def _ensure_prepare_greeting_task(self) -> asyncio.Task:
         task = self._prepare_greeting_task
@@ -703,6 +719,11 @@ class CallCore:
         # warmup task instead of blocking on the whole greeting up front.
         self._flush_greeting_pcm()  # push whatever is ready now
         if task is not None and self._prepared_greeting is None and not task.done():
+            # Answered before the greeting finished synthesizing (short answer
+            # deadline): cover the gap with the hold tone instead of dead air.
+            # _flush_greeting_pcm stops the hold on the first ready sentence.
+            if self._transport and not self._greeting_audio_started:
+                self._transport.start_hold()
             try:
                 await task
             except asyncio.CancelledError:

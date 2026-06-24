@@ -200,6 +200,11 @@ interfaces:
 #                                      # interrupt keyword (halt/stop/warte/moment/pause/pawlia) is
 #                                      # discarded as side conversation. Set true to queue it instead.
 #   preanswer_warmup_enabled: true    # warm STT + prepare greeting before answering calls
+#   preanswer_answer_deadline_seconds: 2.5 # answer once the greeting's 1st sentence is ready,
+#                                       # but never block longer than this before picking up
+#                                       # (slow LLM/TTS otherwise delays the answer and the
+#                                       #  caller hangs up; greeting streams in under the hold
+#                                       #  tone once ready). 0 = wait the full warmup timeout
 #   preanswer_warmup_timeout_seconds: 25.0
 #   preanswer_stt_silence_seconds: 0.4
 #   # --- transport / connection ---

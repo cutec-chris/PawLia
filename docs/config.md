@@ -308,6 +308,7 @@ voip:
 | `voip.agc_max_gain` | Upper amplification cap AGC may apply to quiet incoming audio |
 | `voip.agc_smoothing` | How quickly AGC adapts toward the target loudness (`1.0` = very fast) |
 | `voip.preanswer_warmup_enabled` | Warm STT with silent audio and prepare the LLM/TTS greeting before sending `m.call.answer` |
+| `voip.preanswer_answer_deadline_seconds` | Answer the call once the greeting's first sentence is ready, but never block longer than this before picking up (default `2.5`). A slow/cold LLM or TTS otherwise delays the answer by several seconds and the caller hangs up before connecting; past the deadline PawLia answers anyway and the greeting streams in under the hold tone once ready. `0` falls back to waiting the full `preanswer_warmup_timeout_seconds` |
 | `voip.preanswer_warmup_timeout_seconds` | Maximum time to wait for pre-answer warmup before answering anyway |
 | `voip.preanswer_stt_silence_seconds` | Duration of the silent WAV sent through STT during pre-answer warmup |
 | `voip.connect_timeout_seconds` | Max wait for the ICE/media connection to establish before giving up (default `45`) |
