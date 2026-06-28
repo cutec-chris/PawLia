@@ -143,11 +143,13 @@ interfaces:
 #   silence_threshold: 0.018          # frame RMS above this counts as speech (after AGC)
 #   silence_emphasis_factor: 2.0      # base multiplier for adaptive threshold
 #                                       # (auto-scaled down to 1.2 in noisy environments)
-#   silence_seconds: 1.8              # base trailing silence that ends a chunk
+#   silence_seconds: 1.8              # QUIET-environment trailing silence that ends a chunk
+#                                       # (the STT-send timeout for quiet rooms; the loud
+#                                       #  trail is high_noise_silence_seconds_max, independent)
 #   silence_growth_per_sec: 0.12      # +pause tolerance per second already spoken
 #                                       # (long sentences with thinking pauses aren't chopped;
 #                                       #  short replies still close at silence_seconds; 0 = off)
-#   silence_seconds_max: 3.0          # cap for the grown pause tolerance
+#   silence_seconds_max: 3.0          # cap for the grown pause tolerance (quiet only)
 #   min_speech_seconds: 0.4           # shorter chunks are discarded early
 #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
 #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
@@ -158,9 +160,14 @@ interfaces:
 #                                       # noise that energy/spectral gates miss
 #   min_speech_like_ratio: 0.08       # active + speech-like frame ratio required
 #   min_consecutive_speechlike_frames: 4
-#   speech_pause_ratio: 0.25          # frame below this fraction of the running speech
-#                                       # level counts as a pause even if spectrally
-#                                       # speech-like — lets chunks close in wind (0 = off)
+#   speech_pause_ratio: 0.25          # QUIET-environment relative-energy pause: a frame
+#                                       # below this fraction of the running speech level
+#                                       # counts as a pause even if spectrally speech-like.
+#                                       # Set 0 to switch it OFF in quiet rooms — a quiet
+#                                       # chunk then closes only on the silence trail, never
+#                                       # on a soft mid-sentence trail-off (fixes "cuts me
+#                                       # off in a quiet room"). Loud is unaffected: it uses
+#                                       # high_noise_pause_ratio independently.
 #   min_resume_speech_frames: 3       # consecutive speech-like frames to break a running pause
 #                                       # (auto-scaled up in noisy environments — see adaptive silence)
 #   vad_max_chunk_seconds: 15          # force-flush open speech buffer after this many seconds
@@ -170,9 +177,10 @@ interfaces:
 #   #     above stop working (noise fills the gaps, the silence counter never
 #   #     advances, chunks run to vad_max_chunk_seconds). These switch to a more
 #   #     aggressive endpoint while loud; quiet calls are untouched.
-#   high_noise_pause_ratio: 0.40       # stronger relative-pause fraction used instead of
-#                                       # speech_pause_ratio while loud (== speech_pause_ratio to opt out)
-#   high_noise_silence_seconds_max: 1.8 # clamp pause tolerance + suppress adaptive growth while loud
+#   high_noise_pause_ratio: 0.40       # LOUD-environment relative-pause fraction, independent of
+#                                       # speech_pause_ratio (0 = off in loud only)
+#   high_noise_silence_seconds_max: 1.8 # LOUD-environment silence trail — flat (no adaptive growth),
+#                                       # fully independent of the quiet silence_seconds
 #   high_noise_max_chunk_seconds: 8    # shorter force-flush cap while loud — bounds the worst-case
 #                                       # wait when no pause is detectable (0 = no extra cap)
 #   pre_speech_seconds: 0.6           # prepend this much audio before detected speech (onset safety)

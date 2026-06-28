@@ -179,7 +179,13 @@ class SpeechDetector:
     # shorter max-chunk cap — trading the (already impossible) clean capture of a
     # long monologue for a bounded, responsive reply. Quiet/local calls keep the
     # patient values, so long sentences with thinking pauses are not chopped.
-    # Set HIGH_NOISE_PAUSE_RATIO == SPEECH_PAUSE_RATIO to opt out of the coupling.
+    #
+    # The quiet and loud endpointing knobs are fully independent (see
+    # effective_pause_ratio / adaptive_silence_seconds): HIGH_NOISE_PAUSE_RATIO
+    # governs the relative-energy pause while loud, SPEECH_PAUSE_RATIO governs it
+    # while quiet (set SPEECH_PAUSE_RATIO=0 to switch it off in quiet rooms only),
+    # and HIGH_NOISE_SILENCE_SECONDS_MAX is the loud silence trail independent of
+    # the quiet SILENCE_SECONDS/SILENCE_SECONDS_MAX.
     HIGH_NOISE_PAUSE_RATIO: float = 0.40
     HIGH_NOISE_SILENCE_SECONDS_MAX: float = 1.8
     HIGH_NOISE_MAX_CHUNK_SECONDS: float = 8.0
@@ -553,18 +559,25 @@ class SpeechDetector:
     def effective_pause_ratio(self) -> float:
         """Relative-energy pause fraction for the *current* noise conditions.
 
-        In a loud environment the gentle ``SPEECH_PAUSE_RATIO`` is too lax to
-        register a real pause against the speaker's own (AGC-amplified) loudness,
-        so the chunk only ever closes on the max-chunk cap. Raising the fraction
-        lets a genuine mid-utterance drop register as a pause again. Quiet calls
-        keep ``SPEECH_PAUSE_RATIO`` so deliberate, level mid-sentence pauses are
-        not mistaken for an endpoint. ``SPEECH_PAUSE_RATIO == 0`` (disabled)
-        stays disabled regardless of noise.
+        The quiet and loud regimes are controlled by fully independent knobs so
+        the relative-energy pause can be tuned — or switched off — per regime:
+
+          * loud (``noise_is_high``) → ``HIGH_NOISE_PAUSE_RATIO``. The gentle
+            quiet fraction is too lax to register a real pause against the
+            speaker's own (AGC-amplified) loudness, so a higher fraction lets a
+            genuine mid-utterance drop close the chunk instead of running to the
+            max-chunk cap.
+          * quiet → ``SPEECH_PAUSE_RATIO``. Deliberate, level mid-sentence
+            pauses must not be mistaken for an endpoint, so this is gentle.
+            **Set ``SPEECH_PAUSE_RATIO == 0`` to disable the relative-energy
+            pause in quiet environments entirely** (the config switch for the
+            "cuts me off in a quiet room" complaint): a quiet chunk then closes
+            only on the genuine silence trail, never on a soft trail-off. The
+            loud regime is unaffected — it keeps ``HIGH_NOISE_PAUSE_RATIO`` — so
+            wind/train calls still get a working pause detector.
         """
-        if self.SPEECH_PAUSE_RATIO <= 0.0:
-            return 0.0
         if self.noise_is_high:
-            return max(self.SPEECH_PAUSE_RATIO, self.HIGH_NOISE_PAUSE_RATIO)
+            return self.HIGH_NOISE_PAUSE_RATIO
         return self.SPEECH_PAUSE_RATIO
 
     def effective_max_chunk_seconds(self, base_cap: float) -> float:
@@ -592,18 +605,24 @@ class SpeechDetector:
         ``SILENCE_SECONDS`` base. ``SILENCE_GROWTH_PER_SEC == 0`` disables growth.
 
         When ``high_noise`` is set (caller passes :attr:`noise_is_high`), the
-        growth is suppressed and the tolerance is clamped to
-        ``HIGH_NOISE_SILENCE_SECONDS_MAX``: in sustained noise a long tolerated
-        pause can never be satisfied (the noise fills the gaps), so growing it
-        only delays the close to the cap. A short, fixed tolerance lets the
-        relative-energy pause actually fire.
+        growth is suppressed and a fixed ``HIGH_NOISE_SILENCE_SECONDS_MAX``
+        tolerance is used: in sustained noise a long tolerated pause can never be
+        satisfied (the noise fills the gaps), so growing it only delays the close
+        to the cap. A short, fixed tolerance lets the relative-energy pause
+        actually fire.
+
+        The quiet and loud silence trails (the timeout before a chunk is sent to
+        STT) are fully independent: quiet is ``SILENCE_SECONDS`` + adaptive
+        growth up to ``SILENCE_SECONDS_MAX``; loud is the flat
+        ``HIGH_NOISE_SILENCE_SECONDS_MAX``. Neither caps the other, so a setup
+        can be patient in a quiet room yet snappy in wind, or vice versa.
 
         Wind safety for the *grown* (quiet-call) path is handled via
         :meth:`resume_frames_for_silence` — see the class-level note.
         """
         base = max(1.2, self.SILENCE_SECONDS)
         if high_noise:
-            return min(base, max(1.2, self.HIGH_NOISE_SILENCE_SECONDS_MAX))
+            return max(1.2, self.HIGH_NOISE_SILENCE_SECONDS_MAX)
         if self.SILENCE_GROWTH_PER_SEC <= 0.0:
             return base
         grown = base + max(0.0, spoken_seconds) * self.SILENCE_GROWTH_PER_SEC
