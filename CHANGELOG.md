@@ -26,6 +26,14 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   shows the current backend and CLI availability.
 - Both coding CLIs are bundled in the images — `opencode` in the Alpine image,
   `opencode` + `aider` in the Debian VoIP image (the production build).
+- **Workspace git: monthly GC pass** (`pawlia/workspace_git.py:monthly_gc`).
+  Daily/weekly squashes consolidate the commit graph but leave the old blobs
+  reachable from the reflog, so the remote repo never actually shrank. The
+  new monthly pass runs `reflog expire --expire=now --all` + `gc --aggressive
+  --prune=now` + `repack -ad` and force-pushes with `--force-with-lease`.
+  Configurable via `workspace.git.monthly_gc_day` (default 1) and
+  `monthly_gc_time` (default 23:45). Refuses to run with uncommitted changes.
+  Local `.git` size before/after is logged.
 
 ### Changed
 - VoIP endpointing is now **fully decoupled between quiet and loud

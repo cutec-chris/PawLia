@@ -12,6 +12,7 @@ from pawlia.workspace_git import (
     auto_commit,
     daily_squash,
     ensure_repo,
+    monthly_gc,
     pull,
     weekly_squash,
 )
@@ -167,6 +168,30 @@ class TestWeeklySquash:
 
             r = _git(ws, "log", "-1", "--format=%s")
             assert r.stdout.strip().startswith("Week:")
+
+
+class TestMonthlyGc:
+    def test_runs_on_clean_repo(self):
+        with tempfile.TemporaryDirectory() as ws:
+            ensure_repo(ws)
+            # A few extra commits so the reflog has entries to expire
+            for i in range(3):
+                _write(ws, f"f{i}.md", f"v{i}")
+                _git(ws, "add", "-A")
+                _git(ws, "commit", "-m", f"c{i}")
+            assert monthly_gc(ws)
+
+    def test_refuses_with_uncommitted_changes(self):
+        with tempfile.TemporaryDirectory() as ws:
+            ensure_repo(ws)
+            _write(ws, "uncommitted.md", "x")
+            assert monthly_gc(ws) is False
+            # File must still exist — gc must not destroy uncommitted work
+            assert os.path.exists(os.path.join(ws, "uncommitted.md"))
+
+    def test_returns_false_without_repo(self):
+        with tempfile.TemporaryDirectory() as ws:
+            assert monthly_gc(ws) is False
 
 
 def _seed_remote(workspace: str, remote: str) -> str:

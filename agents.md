@@ -351,7 +351,7 @@ Background asyncio task that runs every 60 seconds and scans all user sessions f
 - **Conversation summarization**: After 5 min idle (`IDLE_SUMMARIZE_MIN`). Soft `"tokens"` and legacy `"exchange_limit"`/`"repetition"` triggers fire here.
 - **Background tasks** (`/background`): After 10 min idle (`IDLE_BACKGROUND_MIN`).
 - **Memory indexing** (RAG backend): After configurable idle time, default 20 min (`IDLE_MEMORY_MIN`, override via `skill-config.memory.idle_minutes`).
-- **Workspace git auto-commit** (when `workspace-git.enabled`): throttled to max 1 commit per 5 minutes; invalid-character paths are auto-renamed (commit skipped if still unrepresentable); daily and weekly squashes run at the configured time. When `push` is on, the scheduler pushes then pulls (`--ff-only`); on divergence the remote is authoritative (`reset --hard origin/HEAD`, discarding local commits). See `pawlia/workspace_git.py`.
+- **Workspace git auto-commit** (when `workspace-git.enabled`): throttled to max 1 commit per 5 minutes; invalid-character paths are auto-renamed (commit skipped if still unrepresentable); daily and weekly squashes run at the configured time, plus a monthly GC pass (`reflog expire` + `gc --aggressive` + `repack -ad` + `--force-with-lease`) that is the only thing that actually shrinks the remote on disk. When `push` is on, the scheduler pushes then pulls (`--ff-only`); on divergence the remote is authoritative (`reset --hard origin/HEAD`, discarding local commits). See `pawlia/workspace_git.py`.
 
 The scheduler provides LLM priority gating via `acquire_llm()` / `release_llm()` to block background tasks during active chat sessions. Interfaces register async callbacks via `scheduler.register(callback)` for proactive message delivery.
 

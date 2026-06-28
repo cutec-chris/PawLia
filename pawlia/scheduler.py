@@ -345,9 +345,12 @@ class Scheduler:
         self._git_daily_squash_time = git_cfg.get("daily_squash_time", "23:00")
         self._git_weekly_squash_day = int(git_cfg.get("weekly_squash_day", 6))  # 0=Mon, 6=Sun
         self._git_weekly_squash_time = git_cfg.get("weekly_squash_time", "23:30")
+        self._git_monthly_gc_day = int(git_cfg.get("monthly_gc_day", 1))  # 1..28, day of month
+        self._git_monthly_gc_time = git_cfg.get("monthly_gc_time", "23:45")
         self._git_push = git_cfg.get("push", False)
         self._git_daily_done: Dict[str, str] = {}   # user_id → date of last daily squash
         self._git_weekly_done: Dict[str, str] = {}   # user_id → week of last weekly squash
+        self._git_monthly_done: Dict[str, str] = {}   # user_id → "YYYY-MM" of last monthly gc
         self._apply_git_config()
 
         # Recording rotation config
@@ -384,6 +387,8 @@ class Scheduler:
         self._git_daily_squash_time = git_cfg.get("daily_squash_time", "23:00")
         self._git_weekly_squash_day = int(git_cfg.get("weekly_squash_day", 6))  # 0=Mon, 6=Sun
         self._git_weekly_squash_time = git_cfg.get("weekly_squash_time", "23:30")
+        self._git_monthly_gc_day = int(git_cfg.get("monthly_gc_day", 1))  # 1..28
+        self._git_monthly_gc_time = git_cfg.get("monthly_gc_time", "23:45")
         self._git_push = git_cfg.get("push", False)
 
     def register(self, callback: NotifyCallback) -> None:
@@ -589,8 +594,10 @@ class Scheduler:
                     logger.error("Recording rotation failed: %s", e)
 
     async def _git_sync(self, user_id: str) -> None:
-        """Auto-commit workspace changes and run daily/weekly squash when due."""
-        from pawlia.workspace_git import auto_commit, daily_squash, ensure_repo, pull, push, weekly_squash
+        """Auto-commit workspace changes and run daily/weekly squash + monthly GC when due."""
+        from pawlia.workspace_git import (
+            auto_commit, daily_squash, ensure_repo, monthly_gc, pull, push, weekly_squash,
+        )
 
         workspace = os.path.join(self.session_dir, user_id, "workspace")
         if not os.path.isdir(workspace):
@@ -615,6 +622,7 @@ class Scheduler:
         today = now.strftime("%Y-%m-%d")
         _, week, _ = now.isocalendar()
         week_key = f"{now.year}-W{week:02d}"
+        month_key = f"{now.year}-{now.month:02d}"
 
         # Daily squash
         try:
@@ -639,6 +647,22 @@ class Scheduler:
                 and self._git_weekly_done.get(user_id) != week_key):
             if weekly_squash(workspace):
                 self._git_weekly_done[user_id] = week_key
+                if self._git_push:
+                    push(workspace)
+
+        # Monthly GC — actually shrinks the remote. Daily/weekly squashes use
+        # ``reset --soft`` and leave the old blobs reachable via the reflog,
+        # so the remote stays the same size until this runs.
+        try:
+            mg_hour, mg_min = (int(x) for x in self._git_monthly_gc_time.split(":"))
+        except ValueError:
+            mg_hour, mg_min = 23, 45
+
+        if (now.day == self._git_monthly_gc_day
+                and now.hour == mg_hour and now.minute == mg_min
+                and self._git_monthly_done.get(user_id) != month_key):
+            if monthly_gc(workspace):
+                self._git_monthly_done[user_id] = month_key
                 if self._git_push:
                     push(workspace)
 

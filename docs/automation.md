@@ -340,7 +340,9 @@ workspace:
     daily_squash_time: "23:00"     # squash all daily commits into one
     weekly_squash_day: 6           # 0=Mon..6=Sun (default: Sunday)
     weekly_squash_time: "23:30"    # squash all weekly commits into one
-    push: false                    # push to remote after squash
+    monthly_gc_day: 1              # 1..28 — day of month to actually shrink the repo
+    monthly_gc_time: "23:45"       # time of day for the GC + force-push
+    push: false                    # push to remote after squash / GC
 ```
 
 ### How it works
@@ -349,6 +351,7 @@ workspace:
 2. **Push + pull** — when `push: true` and a remote is configured, after committing the scheduler pushes, then pulls. The pull is `merge --ff-only`; on divergence (local and remote histories disagree) **the remote becomes authoritative — the workspace is `reset --hard` to `origin/HEAD`, discarding diverging local commits.** This keeps multi-device sync simple but means the remote always wins. Both push and pull are throttled to once per 5 minutes. Do not hand-edit the remote history out of band if you have local changes you want to keep.
 3. **Daily squash** — at the configured time (default 23:00), all commits from today are squashed into one `Daily: YYYY-MM-DD` commit.
 4. **Weekly squash** — on the configured day (default Sunday) at the configured time (default 23:30), all commits from this week are squashed into one `Week: YYYY-Www` commit. After a squash the scheduler pushes with `--force-with-lease`.
+5. **Monthly GC** — on the configured day of the month (default the 1st) at the configured time (default 23:45), runs `git reflog expire --expire=now --all && git gc --aggressive --prune=now && git repack -ad` and then pushes with `--force-with-lease`. **This is the only step that actually shrinks the remote repo on disk** — the daily/weekly squashes use `git reset --soft` and leave the old blobs reachable from the reflog, so the remote's size barely moves without the monthly GC. The local `.git` size before/after is logged. The pass refuses to run if there are uncommitted local changes.
 
 ### Setting up a remote
 

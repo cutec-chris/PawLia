@@ -1,4 +1,4 @@
-"""Workspace Git — auto-commit, daily squash, weekly squash.
+"""Workspace Git — auto-commit, daily/weekly squash, monthly GC.
 
 Keeps the workspace (Obsidian vault) in a Git repo for syncing.
 Internal scheduler state and other non-vault files are excluded via .gitignore.
@@ -6,6 +6,11 @@ Internal scheduler state and other non-vault files are excluded via .gitignore.
 Commit throttle: at most one commit per COMMIT_COOLDOWN seconds.
 Daily squash: all commits from today → one "Daily: YYYY-MM-DD" commit.
 Weekly squash: all commits from this week → one "Week: YYYY-Www" commit.
+Monthly GC: reflog expire + gc --aggressive + repack + force-push to actually
+shrink the remote. Daily/weekly squashes only consolidate the commit graph
+(``reset --soft`` keeps the old blobs reachable from reflog) — they do not
+reduce the on-disk size of the remote repo. The monthly pass is the only
+thing that does.
 """
 
 import logging
@@ -480,3 +485,70 @@ def push(workspace: str, remote: str = "origin") -> bool:
         return True
     logger.warning("Push to %s failed", remote)
     return False
+
+
+def _repo_size_mb(workspace: str) -> float:
+    """Size of the ``.git`` directory in MiB. Returns 0.0 on failure."""
+    try:
+        r = subprocess.run(
+            ["du", "-sm", os.path.join(workspace, ".git")],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0:
+            return float(r.stdout.split()[0])
+    except (ValueError, OSError):
+        pass
+    return 0.0
+
+
+def monthly_gc(workspace: str) -> bool:
+    """Aggressively shrink the local repo and force-push the trimmed history.
+
+    Daily/weekly squashes use ``reset --soft`` and only consolidate the commit
+    graph — the old blobs stay reachable from the reflog, so the on-disk size
+    of the remote repo barely moves. This pass actually prunes:
+
+      1. ``git reflog expire --expire=now --all`` — orphan the reflog entries
+         that keep the pre-squash commits alive.
+      2. ``git gc --aggressive --prune=now`` — collect garbage, repack tight.
+      3. ``git repack -ad`` — fold any remaining loose objects into the pack.
+
+    The push step is the caller's job (see ``scheduler._git_sync``) so the
+    size delta before/after is logged in one place. Returns True if the
+    local GC ran cleanly; the caller should follow up with ``push()`` to
+    shrink the remote.
+
+    Refuses to run if there are uncommitted local changes — those would be
+    destroyed by the reflog expire. Caller must commit first.
+    """
+    if not os.path.isdir(os.path.join(workspace, ".git")):
+        return False
+
+    rc, status = _git(workspace, "status", "--porcelain")
+    if rc != 0:
+        return False
+    if status.strip():
+        logger.warning("monthly_gc skipped: workspace has uncommitted changes")
+        return False
+
+    before = _repo_size_mb(workspace)
+    logger.info("monthly_gc starting in %s (size=%.1f MiB)", workspace, before)
+
+    steps = [
+        ("reflog", ["reflog", "expire", "--expire=now", "--all"]),
+        ("gc",     ["gc", "--aggressive", "--prune=now"]),
+        ("repack", ["repack", "-ad"]),
+    ]
+    for name, args in steps:
+        rc, _ = _git(workspace, *args, quiet=True)
+        if rc != 0:
+            logger.error("monthly_gc %s failed (rc=%d) in %s", name, rc, workspace)
+            return False
+
+    after = _repo_size_mb(workspace)
+    delta = before - after
+    logger.info(
+        "monthly_gc done in %s: %.1f MiB → %.1f MiB (freed %.1f MiB)",
+        workspace, before, after, delta,
+    )
+    return True

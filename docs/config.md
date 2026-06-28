@@ -463,7 +463,7 @@ tts:
 
 ## Workspace
 
-The workspace directory (`session/<user>/workspace/`) serves as an Obsidian vault. Optional Git integration auto-commits changes and keeps the repo compact with daily/weekly squash.
+The workspace directory (`session/<user>/workspace/`) serves as an Obsidian vault. Optional Git integration auto-commits changes and keeps the repo compact with daily/weekly squash plus a monthly GC that actually shrinks the remote on disk.
 
 ```yaml
 workspace:
@@ -472,7 +472,9 @@ workspace:
     daily_squash_time: "23:00"     # squash daily commits into one
     weekly_squash_day: 6           # 0=Mon..6=Sun (default: Sunday)
     weekly_squash_time: "23:30"    # squash weekly commits into one
-    push: false                    # push to remote after squash
+    monthly_gc_day: 1              # 1..28 — day of month for the GC pass
+    monthly_gc_time: "23:45"       # time of day for GC + force-push
+    push: false                    # push to remote after squash / GC
 ```
 
 | Key | Default | Description |
@@ -481,9 +483,11 @@ workspace:
 | `daily_squash_time` | `23:00` | Time to squash all daily commits into one |
 | `weekly_squash_day` | `6` | Day of week for weekly squash (0=Mon, 6=Sun) |
 | `weekly_squash_time` | `23:30` | Time for weekly squash |
-| `push` | `false` | Push to remote after squash (`--force-with-lease`) |
+| `monthly_gc_day` | `1` | Day of month (1..28) for the GC pass |
+| `monthly_gc_time` | `23:45` | Time of day for the GC pass + force-push |
+| `push` | `false` | Push to remote after squash / GC (`--force-with-lease`) |
 
-Auto-commits are throttled to max 1 per 5 minutes. When `push: true`, the scheduler also pulls after pushing; **on divergence the remote is authoritative — the workspace is `reset --hard` to `origin/HEAD`, discarding diverging local commits.** See [automation.md](automation.md#workspace-git-sync) for details.
+Auto-commits are throttled to max 1 per 5 minutes. When `push: true`, the scheduler also pulls after pushing; **on divergence the remote is authoritative — the workspace is `reset --hard` to `origin/HEAD`, discarding diverging local commits.** The monthly GC runs `reflog expire --expire=now --all` + `gc --aggressive --prune=now` + `repack -ad` and force-pushes the trimmed history — this is the only step that actually shrinks the remote. See [automation.md](automation.md#workspace-git-sync) for details.
 
 ## Skill Configuration
 

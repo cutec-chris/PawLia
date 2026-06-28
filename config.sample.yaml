@@ -308,7 +308,9 @@ workspace:
     # daily_squash_time: "23:00"   # squash all daily commits into one (default: 23:00)
     # weekly_squash_day: 6         # 0=Mon..6=Sun (default: 6 = Sunday)
     # weekly_squash_time: "23:30"  # squash all weekly commits into one (default: 23:30)
-    # push: false                  # push to remote after squash (uses --force-with-lease)
+    # monthly_gc_day: 1            # 1..28 — GC + force-push day of month (default: 1)
+    # monthly_gc_time: "23:45"     # time of day for the GC pass (default: 23:45)
+    # push: false                  # push to remote after squash / GC (uses --force-with-lease)
 
 # File / image attachments — received files and images from any interface are
 # saved to <workspace>/Downloads/ and tracked in downloads_index.json. The
