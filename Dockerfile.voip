@@ -59,10 +59,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
 # Baked in so prod always has them; the config skill can also install at
 # runtime when missing. opencode is the preferred agentic backend; aider is
 # the CLI fallback. setuptools/wheel are needed in the runtime stage because
-# the python:3.14-slim-bookworm base image does not ship them and aider-chat
-# still uses a setuptools build backend.
+# the python:3.14-slim-bookworm base image does not ship them, and the
+# pinned versions it would otherwise pull in fail on 3.14
+# (pkgutil.ImpImporter was removed in 3.12). --upgrade pulls a recent
+# setuptools that knows about the 3.14 stdlib.
 RUN npm install -g opencode-ai \
-    && pip install --no-cache-dir setuptools wheel \
+    && pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir aider-chat
 
 WORKDIR /app
