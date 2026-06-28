@@ -427,7 +427,7 @@ The command auto-detects the best available coding backend:
 | Backend | How | When |
 |---------|-----|------|
 | **aider** | `aider --message ... --yes` CLI | `aider` in PATH |
-| **opencode** | `opencode run ...` CLI | `opencode` in PATH |
+| **opencode** | `opencode run ...` CLI | `opencode` in PATH (model via opencode's own config) |
 | **llm** | Direct LLM call via config `agents.coder` | Always available (fallback) |
 
 Override per-skill via `skill-config.skill-creator.coding_backend` in config.yaml,

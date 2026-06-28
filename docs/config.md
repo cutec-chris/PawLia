@@ -176,7 +176,7 @@ agents:
   skill_runner: fast    # default for all skill sub-agents
   vision: vision        # used when the user sends an image
   compiler: compiler    # model for compiling SKILL.md → workflow.yaml
-  coder: smart          # coding backend model (llm fallback + opencode --model)
+  coder: smart          # coding backend model (llm fallback only)
   skills:               # per-skill overrides
     searxng: groq-fast,fast
     browser: smart,fast
@@ -604,11 +604,12 @@ config.py coding --backend aider --scope skill-creator
 config.py coding                                   # show current + availability
 ```
 
-The `agents.coder` model is used by the LLM fallback backend, **and** by
-opencode: when `backend: opencode`, PawLia passes `--model <provider>/<model>`
-plus the provider API key, so opencode runs on the same `coder` model/auth
-(no separate `opencode auth` needed). aider uses its own model configuration.
-opencode and aider are bundled in the production image. See
+The `agents.coder` model is used by the LLM fallback backend only. opencode
+and aider each use their own model configuration (opencode: `opencode auth
+login` / project config; aider: its own model setting) — PawLia does not
+pass `--model` or forward any provider API key to either CLI, so each backend
+authenticates against the providers it has been configured for. opencode and
+aider are bundled in the production image. See
 [skills.md](skills.md#coding-backend) for details.
 
 ## Skill Installation

@@ -352,9 +352,10 @@ skill-install:
 #   auto     → detect in order: opencode → aider → llm (default)
 # opencode/aider are bundled in the prod image; the config skill can also set
 # this and install a missing CLI at runtime: `config.py coding --backend opencode`.
-# When opencode is used it is coupled to the `coder` agent model (passes
-# --model <provider>/<model> + the provider API key), so no separate opencode
-# model/auth setup is needed.
+# Each CLI uses its own model and authentication — PawLia does not pass
+# `--model` or forward provider API keys. Configure opencode via
+# `opencode auth login` / project `opencode.json`; aider has its own model
+# setting.
 # coding:
 #   backend: auto
 # Per-skill override (wins over coding.backend):

@@ -17,7 +17,6 @@ Config (config.yaml):
 
 import json
 import logging
-import os
 import shutil
 import subprocess
 import sys
@@ -280,90 +279,20 @@ def _run_aider(
     return _run_backend("aider", cmd, cwd=str(skill_path), files_modified=list(existing_files.keys()))
 
 
-# PawLia provider name → the env var opencode expects for that provider's key.
-# Lets opencode authenticate with the same key PawLia already has, without a
-# separate `opencode auth login`. Providers not listed (e.g. local ollama, or
-# a custom OpenAI-compatible endpoint) need no key / must be configured in
-# opencode's own config — we still pass --model so the right model is used.
-_OPENCODE_PROVIDER_ENV = {
-    "groq": "GROQ_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "google": "GEMINI_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
-    "xai": "XAI_API_KEY",
-}
-
-# Provider names opencode-1.x ships with as built-in providers. If the resolved
-# PawLia coder model targets one of these, we forward --model so the user gets
-# the same model they would get from PawLia directly. Anything else (e.g.
-# local `ollama`, custom OpenAI-compatible endpoints, or providers added by
-# opencode plugins) we leave alone and let opencode use its own default model
-# (``opencode/big-pickle``) — otherwise opencode aborts with
-# ``ProviderModelNotFoundError``.
-_OPENCODE_NATIVE_PROVIDERS = {
-    "opencode",
-    "anthropic",
-    "google",
-    "gemini",
-    "openai",
-    "groq",
-    "mistral",
-    "deepseek",
-    "xai",
-}
-
-
-def _opencode_model_target(config: Dict[str, Any]) -> tuple[list[str], Dict[str, str]]:
-    """Resolve PawLia's ``coder`` model to opencode ``--model`` args + key env.
-
-    Returns ``(["--model", "<provider>/<model_id>"], {ENV: key})`` so opencode
-    uses the same model and provider PawLia is configured with. The provider
-    must be one opencode ships natively (see ``_OPENCODE_NATIVE_PROVIDERS``) —
-    for everything else (local ollama, custom OpenAI-compatible endpoints,
-    plugin-only providers) we return ``([], {})`` and let opencode use its
-    own default model. This avoids ``ProviderModelNotFoundError`` from
-    opencode when PawLia's coder chain points at a provider opencode does
-    not know about. On any other failure returns ``([], {})`` as well.
-    """
-    try:
-        from pawlia.llm import LLMFactory
-
-        factory = LLMFactory(config)
-        selector = factory.default_model_name("coder")
-        model_cfg = factory.get_model_config(selector)
-        model_id = str(model_cfg.get("model") or selector).strip()
-        provider = str(model_cfg.get("provider") or "").strip()
-        if not (model_id and provider):
-            return [], {}
-        if provider.lower() not in _OPENCODE_NATIVE_PROVIDERS:
-            logger.info(
-                "opencode: pawlia coder provider %r is not a built-in opencode "
-                "provider; falling back to opencode default model",
-                provider,
-            )
-            return [], {}
-        env: Dict[str, str] = {}
-        env_var = _OPENCODE_PROVIDER_ENV.get(provider.lower())
-        if env_var:
-            api_key = str(factory.get_provider_config(provider).get("apiKey") or "").strip()
-            if api_key and api_key.lower() not in ("none", "ollama"):
-                env[env_var] = api_key
-        return ["--model", f"{provider}/{model_id}"], env
-    except Exception as exc:  # pragma: no cover - best-effort coupling
-        logger.warning("opencode --model coupling failed, using opencode default: %s", exc)
-        return [], {}
-
-
 def _run_opencode(
     skill_path: Path,
     task_prompt: str,
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Run opencode in non-interactive mode, coupled to PawLia's coder model.
+    """Run opencode in non-interactive mode with its own model configuration.
+
+    opencode is treated as a self-contained CLI: it picks its own model and
+    authenticates against its own configured providers (``opencode auth``,
+    ``~/.config/opencode``, project ``opencode.json``). PawLia does not pass
+    ``--model`` and does not forward any provider API key — coupling PawLia's
+    ``coder`` chain to opencode was a footgun, since providers opencode does
+    not ship natively caused it to fall back to ``opencode/big-pickle``
+    silently. Users who want a specific model set it in opencode's own config.
 
     Uses ``--format json`` so opencode emits a stream of JSON events on stdout
     (one per line) instead of the default formatted output. JSON mode also lets
@@ -381,9 +310,6 @@ def _run_opencode(
         "--format", "json",
         "--dir", str(skill_path),
     ]
-
-    model_args, env_extra = _opencode_model_target(config)
-    cmd.extend(model_args)
 
     context_blocks: list[str] = []
     skill_md = skill_path / "SKILL.md"
@@ -415,10 +341,7 @@ def _run_opencode(
         )
     cmd.append(prompt)
 
-    env = None
-    if env_extra:
-        env = {**os.environ, **env_extra}
-    result = _run_backend("opencode", cmd, env=env)
+    result = _run_backend("opencode", cmd)
 
     # Parse JSON event stream for any tools/files opencode actually edited,
     # so callers can verify the skill files were touched.

@@ -287,12 +287,14 @@ python <scripts_dir>/config.py coding --backend opencode --scope skill-creator
 python <scripts_dir>/config.py coding --backend aider --no-install
 ```
 
-When set to `opencode`, the backend is coupled to PawLia's `coder` model — it
-passes `--model <provider>/<model>` and forwards the provider API key — so you
-do not maintain a separate opencode model/auth. The response's `install` field
-reports whether the CLI was already present or just installed; a `warning`
-field appears if the auto-install failed (then the backend falls back to `llm`
-until the CLI is on PATH). The prod image already bundles opencode and aider.
+When set to `opencode`, PawLia runs `opencode run ...` and opencode uses its
+own configured model and authentication (`opencode auth login`, project
+`opencode.json`). PawLia does not pass `--model` or forward any provider API
+key — each backend authenticates against the providers it has been configured
+for. The response's `install` field reports whether the CLI was already
+present or just installed; a `warning` field appears if the auto-install
+failed (then the backend falls back to `llm` until the CLI is on PATH). The
+prod image already bundles opencode and aider.
 
 ## Output
 

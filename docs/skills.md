@@ -186,7 +186,7 @@ fixing.
 
 | Backend | How | Requirements |
 |---------|-----|-------------|
-| **opencode** | Runs `opencode run --model <provider>/<model> ...` in the skill directory | `opencode` CLI in PATH |
+| **opencode** | Runs `opencode run` in the skill directory | `opencode` CLI in PATH; model configured via opencode's own config (`opencode auth login`, `~/.config/opencode`, project `opencode.json`) |
 | **aider** | Runs `aider --message ... --yes` in the skill directory | `aider` CLI in PATH, configured LLM |
 | **llm** | Direct LLM call via the `coder` model from config | Always available (fallback) |
 
@@ -214,7 +214,7 @@ python <scripts_dir>/creator.py fix --name "my-skill" --error "SyntaxError..." -
 
 ```yaml
 agents:
-  coder: coder              # model for the LLM fallback AND opencode (--model)
+  coder: coder              # model for the LLM fallback
 
 coding:
   backend: auto             # auto | opencode | aider | llm
@@ -230,7 +230,7 @@ the detection order. Set explicitly to skip detection. The easiest way to
 switch is `config.py coding --backend <name>` (config skill), which writes this
 setting and installs the CLI if it is missing.
 
-The `coder` model drives the LLM fallback backend and is also passed to
-opencode as `--model <provider>/<model>` (with the provider API key forwarded),
-so opencode runs on the same model/auth as PawLia. aider uses its own
-configured model.
+The `coder` model drives only the `llm` fallback backend. opencode and aider
+each use their own model configuration (opencode: `opencode auth login` /
+project config; aider: its own model setting) — PawLia does not pass `--model`
+or forward API keys to either CLI, so there is no model coupling to manage.

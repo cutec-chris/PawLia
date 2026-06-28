@@ -24,10 +24,6 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   via `--scope skill-creator` — and **auto-installs the chosen CLI if missing**
   (`opencode` via npm, `aider` via pip). `config.py coding` without `--backend`
   shows the current backend and CLI availability.
-- opencode backend is now coupled to PawLia's `coder` model: `_run_opencode`
-  passes `--model <provider>/<model>` and forwards the provider API key as the
-  conventional env var, so opencode uses the same model/auth as PawLia instead
-  of a separate `opencode auth` setup.
 - Both coding CLIs are bundled in the images — `opencode` in the Alpine image,
   `opencode` + `aider` in the Debian VoIP image (the production build).
 
@@ -46,6 +42,19 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   Defaults unchanged. See `docs/config.md` › "Noise-coupled endpointing".
 - Coding-backend auto-detection now prefers `opencode` over `aider` (was the
   reverse), since opencode runs a full agentic loop with its own turn budget.
+
+### Removed
+- opencode backend is no longer coupled to PawLia's `coder` model. Previously
+  `_run_opencode` passed `--model <provider>/<model>` and forwarded the
+  provider API key as the conventional env var, so opencode used the same
+  model/auth as PawLia. This silently fell back to opencode's default model
+  (`opencode/big-pickle`) for any provider opencode does not ship natively
+  (e.g. `opencodego`, custom OpenAI-compatible endpoints), which made the
+  configured `coder` chain a lie. opencode is now treated as a self-contained
+  CLI: PawLia does not pass `--model` or forward API keys. Configure opencode
+  via `opencode auth login` / project `opencode.json`. `pawlia/coding.py`
+  drops `_opencode_model_target`, `_OPENCODE_PROVIDER_ENV` and
+  `_OPENCODE_NATIVE_PROVIDERS`.
 
 ### Fixed
 - VoIP: while PawLia is *thinking* (hold tone, not yet speaking), speech without

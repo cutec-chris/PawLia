@@ -212,11 +212,12 @@ delegate script writing/debugging to a coding backend selected by `coding.backen
 `skill-config.skill-creator.coding_backend`. `auto` detects in order
 **opencode → aider → llm**. opencode and aider run as subprocesses (own agentic
 loop / turn budget); `llm` is a single in-process call via the `coder` model.
-opencode is coupled to the `coder` model — it is launched with
-`--model <provider>/<model>` and the provider API key forwarded as the
-conventional env var, so it needs no separate `opencode auth`. Both CLIs are
-bundled in the images; the config skill switches the backend and installs a
-missing CLI at runtime via `config.py coding --backend <name>`.
+Each CLI uses its own model and authentication — PawLia does not pass
+`--model` or forward provider API keys, so there is no `coder`-chain coupling
+to manage. Users configure opencode via `opencode auth login` / project
+`opencode.json`; aider has its own model setting. Both CLIs are bundled in
+the images; the config skill switches the backend and installs a missing CLI
+at runtime via `config.py coding --backend <name>`.
 
 ## Tools (`pawlia/tools/`)
 
