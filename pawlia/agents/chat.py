@@ -1025,7 +1025,7 @@ class ChatAgent(BaseAgent):
             # stray intro text (identity phrases, "I'll search for X…") that
             # should not be sent as a separate message before any tool runs.
             # From turn 2 onward the model is mid-task and interim is useful.
-            interim = self.extract_text(final)
+            interim = self.sanitize_output(self.extract_text(final))
             if interim and self.on_interim and turn > 1:
                 try:
                     await self.on_interim(interim)
@@ -1065,7 +1065,7 @@ class ChatAgent(BaseAgent):
                 llm=unbound_llm,
             )
 
-        result = self.extract_text(final)
+        result = self.sanitize_output(self.extract_text(final))
         used_skills = bool(tool_calls_info)
         await self._persist(
             user_input, result,
@@ -1219,13 +1219,13 @@ class ChatAgent(BaseAgent):
                 _partial_text = raw_text
 
             if not accumulated or not getattr(accumulated, "tool_calls", None):
-                result = self.strip_thinking(raw_text)
+                result = self.sanitize_output(self.strip_thinking(raw_text))
                 await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
                 return result
 
             if not allow_skills:
                 self.logger.warning("run_streamed received tool calls while allow_skills=False; ignoring tool calls")
-                result = self.strip_thinking(raw_text)
+                result = self.sanitize_output(self.strip_thinking(raw_text))
                 await self._persist(user_input, result, track_similarity=True, thread_id=thread_id)
                 return result
 
@@ -1285,15 +1285,15 @@ class ChatAgent(BaseAgent):
                 )
                 final_response = accumulated2 if isinstance(accumulated2, AIMessage) else None
 
-            if on_sentence and raw_text2.strip():
-                sentences, remainder = _split_sentences(raw_text2)
+            result = self.sanitize_output(self.strip_thinking(raw_text2))
+            if on_sentence and result.strip():
+                sentences, remainder = _split_sentences(result)
                 for sentence in sentences:
                     if sentence.strip():
                         await on_sentence(sentence)
                 if remainder.strip():
                     await on_sentence(remainder.strip())
 
-            result = self.strip_thinking(raw_text2)
             used_skills = bool(tool_calls_info)
             await self._persist(
                 user_input, result,
@@ -1378,6 +1378,10 @@ class ChatAgent(BaseAgent):
             if new_content:
                 sentences, remainder = _split_sentences(new_content)
                 for s in sentences:
+                    # Drop leaked internal-context lines before they're spoken /
+                    # streamed (covers consumers without a _for_tts sink: web,
+                    # openai_compat). A marker-only sentence collapses to "".
+                    s = self.sanitize_output(s)
                     if s.strip():
                         await on_sentence(s)
                 emitted_len = len(clean) - len(remainder)
@@ -1385,7 +1389,7 @@ class ChatAgent(BaseAgent):
         # Flush remaining buffer
         if on_sentence:
             clean = self.strip_thinking(raw_text)
-            remainder = clean[emitted_len:]
+            remainder = self.sanitize_output(clean[emitted_len:])
             if remainder.strip():
                 await on_sentence(remainder.strip())
 

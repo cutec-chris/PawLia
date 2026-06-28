@@ -22,6 +22,7 @@ try:
 except ImportError:
     _NUMPY_AVAILABLE = False
 
+from pawlia.agents.base import _RE_INTERNAL_LINE
 from pawlia.audio.agc import AGCController
 from pawlia.audio.vad import SpeechDetector
 from pawlia.audio.config import get_float_config, get_int_config, get_bool_config
@@ -42,25 +43,15 @@ _KEYWORD_INTERRUPT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_TTS_INTERNAL_RE = re.compile(
-    r"^\s*("
-    r"\[Earlier skill use"
-    r"|\[Report from `"
-    r"|\[internal context"
-    r"|Trust: (INTERNAL|EXTERNAL)"
-    r"|Raw outside data"
-    r"|Treat with skepticism"
-    r"|This information comes from the user.s own"
-    r"|Cross-check with what you know"
-    r"|when in conflict, follow this source"
-    r"|---\s*$"
-    r")",
-    re.IGNORECASE,
-)
+# Standalone separator line the trust wrapper emits — dropped only on the TTS
+# path (a bare "---" should never be spoken). The internal-marker prefixes
+# themselves are shared with the text path via _RE_INTERNAL_LINE (base.py), the
+# single source of truth, so both paths stay in sync.
+_TTS_SEPARATOR_RE = re.compile(r"^\s*---\s*$")
 
 
 def _for_tts(sentence: str) -> Optional[str]:
-    if _TTS_INTERNAL_RE.search(sentence):
+    if _RE_INTERNAL_LINE.search(sentence) or _TTS_SEPARATOR_RE.match(sentence):
         return None
     return sentence
 
