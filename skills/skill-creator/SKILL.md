@@ -155,7 +155,8 @@ Skeleton rules:
 - **`emit()` only when there is something to say.** Empty/whitespace = silent.
 - **`llm_call()` sparingly** — a monitor often needs it never; a digest needs it once.
 - **Fail loud:** let exceptions propagate (non-zero exit); the scheduler surfaces failures.
-- **Write the script to `workspace/.scripts/<name>.py`** — the only place job scripts resolve from.
+- **Write the script to `workspace/skills/scripts/<name>.py`** — the primary
+  path the scheduler resolves job scripts from.
 - **Test before registering:** run it with a representative `AUTOMATION_PARAMS` and confirm the
   silent case prints nothing and the alert case prints exactly the message.
 
@@ -175,6 +176,19 @@ runs commands inside a sandbox with a read-only root, so such writes fail with
 a permission/read-only error. **`creator.py test` enforces the same rule** and
 fails the harness if the skill writes outside these roots — so a violation is
 caught at the latest during testing.
+
+**Tighter rule for skill-creator specifically.** Skill-creator writes code, not
+user documents, so it tightens the above to a single subtree:
+
+| Write to | When |
+|----------|------|
+| `workspace/skills/<name>/` | New or changed skills (SKILL.md, scripts/, etc.) |
+| `workspace/skills/scripts/<name>.py` | Automation scripts (scheduled jobs) — the only place `automation add-job --script` resolves from |
+
+No direct writes to the workspace root (e.g. `workspace/foo.md` for ad-hoc
+notes), no `/tmp` artefacts from skill-creator, no writes outside the
+`workspace/skills/` subtree. If a build needs an intermediate artefact, do it
+in a sandboxed scratch dir inside the skill's own `scripts/` and clean up.
 
 **Delivering a file to the user** (image, PDF, GIF): write it to `/tmp` (or the
 workspace if it should be kept) and return its **path** in the JSON payload.

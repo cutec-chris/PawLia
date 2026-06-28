@@ -411,9 +411,22 @@ async def rag_llm_call(cfg: dict, system_prompt: str, user_prompt: str,
 def resolve_script(session_dir: str, user_id: str, script: str) -> str:
     """Resolve a script name to an absolute path.
 
-    Checks workspace/.scripts/ first (LLM-visible), then automations/ (legacy).
+    Search order (first hit wins):
+      1. ``workspace/skills/scripts/<script>`` — primary, where skill-creator
+         writes automation scripts.
+      2. ``workspace/.scripts/<script>`` — legacy, kept for older jobs.
+      3. ``automations/<script>`` — pre-skills legacy location.
+
+    Returns the primary path even if no file exists, so the caller surfaces
+    a clear "not found" instead of silently picking a wrong directory.
     """
-    workspace_scripts = os.path.join(session_dir, user_id, "workspace", ".scripts", script)
-    if os.path.isfile(workspace_scripts):
-        return workspace_scripts
-    return os.path.join(session_dir, user_id, "automations", script)
+    base = os.path.join(session_dir, user_id)
+    candidates = [
+        os.path.join(base, "workspace", "skills", "scripts", script),
+        os.path.join(base, "workspace", ".scripts", script),
+        os.path.join(base, "automations", script),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return candidates[0]

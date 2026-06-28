@@ -99,11 +99,24 @@ emit(report)
 
 ## Building a job
 
+### Which job type? Monitor vs. one-shot
+
+Pick the kind that matches the silence rule — *before* you build the script:
+
+| Job kind | Stays silent when there is nothing to say? | Use |
+|----------|--------------------------------------------|-----|
+| **Monitor** (cyclic check: thunderstorm, train delay, inbox watch) | Yes — the script decides; empty stdout = no notification | `add-script-job` + script in `workspace/skills/scripts/<name>.py` |
+| **One-shot** (must produce output every tick: morning digest, daily summary) | No — the LLM is invoked every run, the response is always delivered | `add-job --instruction` (or a script that always emits) |
+
+Rule of thumb: "tell me only when something is up" → script. "give me an
+update every morning" → instruction.
+
 ### Step 1 — build the script (use skill-creator for anything non-trivial)
 
-Trivial gate you can write inline → write it to `workspace/.scripts/<name>.py`.
-Anything with API calls, parsing, or LLM curation → ask skill-creator to build it
-(it knows the harness skeleton and will test the script before you register it):
+A trivial gate you can write inline → write it to
+`workspace/skills/scripts/<name>.py`. Anything with API calls, parsing, or
+LLM curation → ask skill-creator to build it (it knows the harness skeleton
+and will test the script before you register it):
 
 ```
 Call skill-creator with: "Baue ein Automations-Skript das [task]. Nutze das
@@ -111,25 +124,32 @@ pawlia.automation_harness (get_params/emit/silent/llm_call) und bleib still wenn
 nichts zu melden ist."
 ```
 
-The script must live under `workspace/.scripts/` (the only place the scheduler
-resolves job scripts from, alongside the legacy `automations/`).
+The script must live under `workspace/skills/scripts/` (the primary path the
+scheduler resolves job scripts from; `workspace/.scripts/` and `automations/`
+still resolve as legacy fallbacks for older jobs).
 
 ### Step 2 — register the job
+
+For a monitor (script that may stay silent):
 
 ```bash
 python <scripts_dir>/../organizer/scripts/organizer.py add-job \
   --name "<descriptive name>" \
   --schedule "<schedule>" \
   --script "<name>.py" \
-  [--params '{"city":"Magdeburg"}']
+  --params '{"city":"Magdeburg"}'
 ```
 
-For a trivial LLM job instead of a script:
+For a one-shot that always delivers output:
 
 ```bash
 python <scripts_dir>/../organizer/scripts/organizer.py add-job \
   --name "<name>" --schedule "<schedule>" --instruction "<instruction>"
 ```
+
+When the agent calls this skill, it picks `add-script-job` for monitors and
+`add-job` for one-shots — the two building blocks are the only entry points
+and they map 1:1 to the choice above.
 
 **Notify flags** (override the per-kind default):
 - `--notify-on-output` — deliver only when there is output (silent on empty). Default for `--script`.

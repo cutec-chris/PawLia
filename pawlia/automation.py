@@ -140,12 +140,12 @@ class ScriptExecutor:
             os.path.realpath(os.path.join(pkg_dir, "scripts")),
         ]
         if session_dir and user_id:
-            allowed.append(os.path.realpath(
-                os.path.join(session_dir, user_id, "automations")
-            ))
-            allowed.append(os.path.realpath(
-                os.path.join(session_dir, user_id, "workspace", ".scripts")
-            ))
+            user_root = os.path.realpath(
+                os.path.join(session_dir, user_id)
+            )
+            allowed.append(os.path.join(user_root, "workspace", "skills", "scripts"))
+            allowed.append(os.path.join(user_root, "automations"))
+            allowed.append(os.path.join(user_root, "workspace", ".scripts"))
         return any(real.startswith(base + os.sep) for base in allowed)
 
     @staticmethod

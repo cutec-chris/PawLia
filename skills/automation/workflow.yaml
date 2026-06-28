@@ -14,9 +14,21 @@ workflows:
   - id: add-job
     command: python {skills_root}/organizer/scripts/organizer.py add-job --name
       "{name}" --schedule "{schedule}" --instruction "{instruction}"
-    description: Register a new scheduled automation job with a name, schedule, and
-      instruction
-    status_desc: Registriere Automatisierung '{name}' ({schedule})
+    description: Register a one-shot scheduled job that always delivers output (the
+      LLM is invoked every tick and the response is sent). Use for tasks that must
+      produce something on every run (daily digest, periodic summary). For cyclic
+      monitors that should stay silent on a quiet day, use add-script-job instead.
+    status_desc: Registriere One-Shot-Job '{name}' ({schedule})
+  - id: add-script-job
+    command: python {skills_root}/organizer/scripts/organizer.py add-job --name
+      "{name}" --schedule "{schedule}" --script "{script}" --params '{params}'
+    description: Register a cyclic monitor job that runs a deterministic script
+      (preferred for any "check X and tell me only if something is up" task).
+      The script must already exist at workspace/skills/scripts/{script}; the
+      scheduler delivers only when the script prints something, so an empty
+      stdout means no notification. Use add-job (--instruction) only for
+      one-shot tasks that always deliver output.
+    status_desc: Registriere Monitor '{name}' -> {script}
   - id: list-jobs
     command: python {skills_root}/organizer/scripts/organizer.py list-jobs
     description: List all registered automation jobs

@@ -2,6 +2,9 @@
 
 Guide for AI agents and developers working on PawLia.
 
+→ **[vision.md](vision.md)** — long-term direction, active priorities, and design decisions.
+Read it before making trade-off calls or planning larger changes.
+
 ## Test Commands
 
 Always run tests through the repository virtual environment. Do **not** use
@@ -458,6 +461,14 @@ suggestions for mistyped wiki/file slugs.
 - Prefer compiled workflows for reliability when a skill provides one; free-form
   tool calling remains the fallback path inside the SkillRunner
 - Command mode returns raw script output — no LLM interpretation phase
+- **System fixes, not one-off solutions.** A change that only makes sense for
+  one vendor, region, or use-case does not belong in `pawlia/` or as a
+  concrete script in `skills/files/templates/`. Fix the system (path
+  resolution, skill hooks, workflow building blocks, docs) so any agent can
+  build the domain solution via skill-creator on demand. If you find yourself
+  adding `gewitter-monitor.py` or similar to core, stop — write a generic
+  skeleton at most, and let skill-creator fill in the rest. See
+  [vision.md › System over solutions](vision.md#system-over-solutions).
 
 ## Versioning & Releases (git-flow)
 

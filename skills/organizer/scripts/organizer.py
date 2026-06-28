@@ -1443,7 +1443,7 @@ def main():
     p.add_argument("--instruction", default="",
                    help="Natural-language instruction run via the LLM (trivial jobs)")
     p.add_argument("--script", default="",
-                   help="Script in workspace/.scripts/ run deterministically (preferred)")
+                   help="Script in workspace/skills/scripts/ (primary) or workspace/.scripts/ / automations/ (legacy); runs deterministically, empty stdout = no notification")
     p.add_argument("--params", default="",
                    help="JSON dict passed to the script as AUTOMATION_PARAMS")
     p.add_argument("--schedule", required=True)

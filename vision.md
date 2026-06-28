@@ -45,6 +45,18 @@ New functionality belongs in a skill (`skills/user/` or bundled skills), not in 
 scheduler/agent code. Core changes require stronger justification (security, correctness,
 cross-cutting concerns).
 
+### System over solutions
+Fixes and features go into the *system* (path resolution, skill scaffolding, docs,
+workflow building blocks) — not into one-off scripts or vendor-specific templates
+baked into the core. If a fix only applies to a single use-case (thunderstorm for
+region X, a particular API, one user's mailbox rule), it belongs in a skill, not
+in `pawlia/` or `skills/files/templates/`. Concrete signal:
+`skills/files/templates/<vendor>-<use-case>.py` is almost always wrong. Generic
+skeletons (e.g. a silent-monitor harness pattern) are fine; a ready-made
+DWD/Gmail/Bahn script is not — it constrains the assistant to one vendor and
+one shape, and creates the exact failure mode where the template drifts from
+the real integration it claims to wrap.
+
 ---
 
 ## Wishes & Future Directions
