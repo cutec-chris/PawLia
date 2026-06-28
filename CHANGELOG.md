@@ -32,6 +32,18 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   `opencode` + `aider` in the Debian VoIP image (the production build).
 
 ### Changed
+- VoIP endpointing is now **fully decoupled between quiet and loud
+  environments** across all three axes — relative-energy pause
+  (`speech_pause_ratio` / `high_noise_pause_ratio`), silence trail
+  (`silence_seconds` / `high_noise_silence_seconds_max`) and max-chunk
+  force-flush cap (`vad_max_chunk_seconds` / `high_noise_max_chunk_seconds`).
+  Each quiet/loud pair is independent — neither bounds the other (previously the
+  loud values were clamped via `min()` to the quiet ones, and
+  `speech_pause_ratio: 0` disabled the relative pause everywhere). Now
+  `speech_pause_ratio: 0` switches the relative-energy pause off in quiet rooms
+  only (fixes "PawLia cuts me off in a quiet room" on a soft mid-sentence
+  trail-off) while wind/train calls keep their own `high_noise_*` values.
+  Defaults unchanged. See `docs/config.md` › "Noise-coupled endpointing".
 - Coding-backend auto-detection now prefers `opencode` over `aider` (was the
   reverse), since opencode runs a full agentic loop with its own turn budget.
 

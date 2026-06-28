@@ -41,6 +41,48 @@ _RE_CHAT_TOKENS = re.compile(r"<\|.*?\|>.*", re.DOTALL)
 # Pattern for tool call in failed_generation from API errors
 _RE_TOOL_CALL = re.compile(r'\{.*?"name"\s*:.*?"args"\s*:.*?\}', re.DOTALL)
 
+# Internal-context markers that must never reach a user. These are framing the
+# agent injects into its OWN context — replayed skill summaries
+# (``[Earlier skill use — internal context:]`` from
+# ``ChatAgent._format_replayed_assistant_turn``) and trust headers
+# (``[Report from …]`` / ``Trust: INTERNAL`` from ``_wrap_with_trust_header``).
+# Small models routinely parrot these back into their answers. This is the
+# single source of truth — the call/TTS path (call_core._for_tts) imports it.
+_INTERNAL_MARKER_PREFIXES = (
+    "[Earlier skill use",
+    "[Report from `",
+    "[internal context",
+    "Trust: INTERNAL",
+    "Trust: EXTERNAL",
+    "Raw outside data",
+    "Treat with skepticism",
+    "This information comes from the user",
+    "Cross-check with what you know",
+    "when in conflict, follow this source",
+)
+# Line-anchored matcher for the per-sentence TTS filter and the line scrubber.
+# Mirrors the prefixes above; ``---`` on its own line is a separator the trust
+# wrapper emits and is only stripped when adjacent to a dropped block.
+_RE_INTERNAL_LINE = re.compile(
+    r"^\s*(?:"
+    r"\[Earlier skill use"
+    r"|\[Report from `"
+    r"|\[internal context"
+    r"|Trust: (?:INTERNAL|EXTERNAL)"
+    r"|Raw outside data"
+    r"|Treat with skepticism"
+    r"|This information comes from the user.s own"
+    r"|Cross-check with what you know"
+    r"|when in conflict, follow this source"
+    r")",
+    re.IGNORECASE,
+)
+# Markers that introduce a trailing block whose continuation lines (bullets /
+# annotations / blanks) must be dropped along with the marker line itself.
+_RE_INTERNAL_BLOCK_START = re.compile(
+    r"^\s*(?:\[Earlier skill use|\[internal context)", re.IGNORECASE
+)
+
 _LOG_DIR: Optional[str] = None  # set by enable_prompt_logging()
 
 
@@ -391,3 +433,55 @@ class BaseAgent(ABC):
         """Extract plain text from an AIMessage, stripping thinking tags."""
         content = response.content if isinstance(response.content, str) else ""
         return BaseAgent.strip_thinking(content)
+
+    @staticmethod
+    def sanitize_output(text: str) -> str:
+        """Strip leaked internal-context markers from user-facing output.
+
+        Small models parrot the internal framing they see in their own replayed
+        history — the ``[Earlier skill use — internal context:]`` skill summary
+        and the ``[Report from …]`` / ``Trust: …`` trust headers. None of that is
+        meant for the user. This is the single choke-point applied to every
+        agent answer (final + interim) so all interfaces — text and voice — are
+        covered, regardless of which model produced the leak.
+
+        Conservative by design: only exact known marker prefixes are removed, so
+        legitimate prose (a stray "Trust", a markdown ``---`` rule) survives. The
+        contract is pinned by tests/test_output_sanitizer.py against real
+        captured leaks.
+        """
+        if not text:
+            return text
+
+        lines = text.split("\n")
+        cleaned: List[str] = []
+        in_block = False       # inside a trailing [Earlier skill use]/[internal context] block
+        just_dropped = False   # previous source line was removed as internal
+        for line in lines:
+            stripped = line.strip()
+            if _RE_INTERNAL_BLOCK_START.match(line):
+                # Start of a trailing summary block: drop it and the bullets /
+                # blank lines that belong to it.
+                in_block = True
+                just_dropped = True
+                continue
+            if in_block:
+                if stripped == "" or stripped.startswith(("- ", "* ", "•")) or stripped == "---":
+                    just_dropped = True
+                    continue
+                in_block = False  # block ended; fall through to evaluate this line
+            if _RE_INTERNAL_LINE.match(line):
+                # A standalone trust-header / annotation line anywhere in the text.
+                just_dropped = True
+                continue
+            if just_dropped and stripped == "---":
+                # Separator left orphaned by a removed trust-header block; a bare
+                # "---" elsewhere (a real markdown rule) is preserved.
+                continue
+            just_dropped = False
+            cleaned.append(line)
+
+        # Collapse the blank-line runs the removals may have left behind.
+        result = "\n".join(cleaned)
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        return result.strip()

@@ -1366,7 +1366,7 @@ async def test_send_greeting_waits_for_existing_prepare_task():
     media.set()
     session._transport = SimpleNamespace(
         enqueue_pcm_float32=MagicMock(), stop_hold=MagicMock(),
-        media_connected=media)
+        start_hold=MagicMock(), media_connected=media)
 
     async def _prepare_later():
         await asyncio.sleep(0)
@@ -1381,6 +1381,9 @@ async def test_send_greeting_waits_for_existing_prepare_task():
 
     session._transport.enqueue_pcm_float32.assert_called_once_with(pcm)
     session._transport.stop_hold.assert_called_once()
+    # Answered before the greeting was ready, so the gap is covered by the hold
+    # tone until the first prepared sentence flushes.
+    session._transport.start_hold.assert_called_once()
     send_cb.assert_any_call("Hallo, ich bin da.")
     assert session._greeting_sent is True
 
@@ -1659,3 +1662,167 @@ def test_active_session_for_room():
 
     assert mgr.active_session_for_room("!room:test") is live
     assert mgr.active_session_for_room("!nope:test") is None
+
+
+# --- semantic endpointing: incomplete-utterance grace scaling ----------------
+# The grace granted to an unfinished transcript must grow with how long the
+# caller has been speaking (a long monologue earns longer thinking pauses) yet
+# stay hard-capped so a dangling fragment can never stall the turn forever.
+
+def test_incomplete_grace_grows_with_speech_then_caps():
+    session = _make_call_session("call-grace")
+    session._speech_detector.last_speech_duration = 0.0
+    short = session._incomplete_grace_seconds()
+    session._speech_detector.last_speech_duration = 10.0
+    mid = session._incomplete_grace_seconds()
+    session._speech_detector.last_speech_duration = 1e6
+    huge = session._incomplete_grace_seconds()
+    assert short == pytest.approx(session.INCOMPLETE_GRACE_BASE, abs=1e-6)
+    assert mid > short                                  # grows with speech
+    assert huge <= session.INCOMPLETE_GRACE_MAX + 1e-6  # bounded for any input
+    assert huge == pytest.approx(session.INCOMPLETE_GRACE_MAX, abs=1e-6)
+
+
+def test_incomplete_grace_disabled_is_zero():
+    session = _make_call_session("call-grace-off")
+    session.INCOMPLETE_GRACE_BASE = 0.0
+    session._speech_detector.last_speech_duration = 100.0
+    assert session._incomplete_grace_seconds() == 0.0
+
+
+# --- pre-answer pickup decoupled from greeting readiness ---------------------
+# A slow/cold LLM+TTS used to delay the answer until the first greeting sentence
+# was synthesized (~9s observed), long enough that callers hung up before
+# connecting. The pickup now waits at most PREANSWER_ANSWER_DEADLINE_SECONDS and
+# answers regardless; the greeting streams in afterwards under the hold tone.
+
+@pytest.mark.asyncio
+async def test_preanswer_answers_within_deadline_when_greeting_slow():
+    session = _make_call_session("call-deadline")
+    session.PREANSWER_ANSWER_DEADLINE_SECONDS = 0.15
+    session.PREANSWER_WARMUP_TIMEOUT_SECONDS = 10.0
+    session._warm_stt_with_silence = AsyncMock()
+    session._ensure_prepare_greeting_task = MagicMock()
+    # greeting readiness is never signalled — must not block past the deadline
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await asyncio.wait_for(session._run_preanswer_warmup(), timeout=2.0)
+    elapsed = loop.time() - start
+    assert elapsed < 1.0  # answered at ~deadline, not the 10s warmup timeout
+    session._ensure_prepare_greeting_task.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_preanswer_answers_immediately_when_greeting_ready():
+    session = _make_call_session("call-ready")
+    session.PREANSWER_ANSWER_DEADLINE_SECONDS = 5.0
+    session._warm_stt_with_silence = AsyncMock()
+    session._ensure_prepare_greeting_task = MagicMock()
+    session._greeting_first_sentence_ready.set()
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await asyncio.wait_for(session._run_preanswer_warmup(), timeout=1.0)
+    assert loop.time() - start < 0.5  # returns at once, no deadline wait
+
+
+@pytest.mark.asyncio
+async def test_preanswer_deadline_zero_falls_back_to_warmup_timeout():
+    session = _make_call_session("call-deadline-off")
+    session.PREANSWER_ANSWER_DEADLINE_SECONDS = 0.0
+    session.PREANSWER_WARMUP_TIMEOUT_SECONDS = 0.15
+    session._warm_stt_with_silence = AsyncMock()
+    session._ensure_prepare_greeting_task = MagicMock()
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await asyncio.wait_for(session._run_preanswer_warmup(), timeout=2.0)
+    assert loop.time() - start < 1.0  # bounded by the (short) warmup timeout
+
+
+# --- TTS playback prebuffer --------------------------------------------------
+# Playing each sentence the instant it is synthesized leaves an audible gap
+# after the first sentence while sentence 2 is still being synthesized. The
+# prebuffer caches TTS_PREBUFFER_SENTENCES sentences before starting playback
+# (flushing them together), then streams the rest in during playback.
+
+def _prebuffer_session(call_id, prebuffer):
+    session = _make_call_session(call_id)
+    session.TTS_PREBUFFER_SENTENCES = prebuffer
+    session._keep_typing = AsyncMock(return_value=None)
+    enqueued = []
+    session._transport = SimpleNamespace(
+        start_hold=MagicMock(),
+        stop_hold=MagicMock(),
+        enqueue_pcm_float32=lambda pcm: enqueued.append(pcm),
+        is_playing=False,
+    )
+    session._agent.build_system_prompt.return_value = "P"
+    return session, enqueued
+
+
+@pytest.mark.asyncio
+async def test_tts_prebuffer_holds_first_sentence_then_flushes_pair():
+    session, enqueued = _prebuffer_session("call-prebuf", prebuffer=2)
+    seen = {}
+
+    async def fake_synth(sentence, *a, **k):
+        return [sentence]
+
+    async def fake_run_streamed(text, *, on_sentence, **kwargs):
+        await on_sentence("Erster Satz.")
+        seen["after_1"] = len(enqueued)          # still held — no gap-prone solo play
+        await on_sentence("Zweiter Satz.")
+        seen["after_2"] = len(enqueued)          # prebuffer trips → both flushed
+        await on_sentence("Dritter Satz.")
+        seen["after_3"] = len(enqueued)          # streamed during playback
+        return "voll"
+
+    session._agent.run_streamed = fake_run_streamed
+    with patch("pawlia.tts.synthesize_pcm", new=fake_synth):
+        await session._respond_to_transcript("hi", announce_transcript=False)
+
+    assert seen == {"after_1": 0, "after_2": 2, "after_3": 3}
+    session._transport.stop_hold.assert_called()  # hold released when playback starts
+
+
+@pytest.mark.asyncio
+async def test_tts_prebuffer_flushes_short_reply_after_stream_ends():
+    """A reply shorter than the prebuffer target must still play (flushed once
+    the stream completes), not stay stuck in the prebuffer forever."""
+    session, enqueued = _prebuffer_session("call-prebuf-short", prebuffer=2)
+
+    async def fake_synth(sentence, *a, **k):
+        return [sentence]
+
+    async def fake_run_streamed(text, *, on_sentence, **kwargs):
+        await on_sentence("Nur ein Satz.")
+        return "voll"
+
+    session._agent.run_streamed = fake_run_streamed
+    with patch("pawlia.tts.synthesize_pcm", new=fake_synth):
+        await session._respond_to_transcript("hi", announce_transcript=False)
+
+    assert len(enqueued) == 1
+    session._transport.stop_hold.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_tts_prebuffer_one_plays_each_sentence_immediately():
+    """TTS_PREBUFFER_SENTENCES == 1 restores the stream-as-ready behaviour."""
+    session, enqueued = _prebuffer_session("call-prebuf-off", prebuffer=1)
+    seen = {}
+
+    async def fake_synth(sentence, *a, **k):
+        return [sentence]
+
+    async def fake_run_streamed(text, *, on_sentence, **kwargs):
+        await on_sentence("Erster Satz.")
+        seen["after_1"] = len(enqueued)          # plays at once, no prebuffering
+        await on_sentence("Zweiter Satz.")
+        seen["after_2"] = len(enqueued)
+        return "voll"
+
+    session._agent.run_streamed = fake_run_streamed
+    with patch("pawlia.tts.synthesize_pcm", new=fake_synth):
+        await session._respond_to_transcript("hi", announce_transcript=False)
+
+    assert seen == {"after_1": 1, "after_2": 2}

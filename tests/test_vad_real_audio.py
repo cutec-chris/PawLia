@@ -496,24 +496,42 @@ def test_noise_is_high_gate_matches_floor():
 
 def test_effective_pause_ratio_rises_in_noise():
     """Quiet calls keep the gentle pause ratio (don't chop deliberate mid-
-    sentence pauses); loud calls raise it so a real pause registers against the
-    speaker's own loudness instead of running to the cap."""
+    sentence pauses); loud calls use the stronger HIGH_NOISE_PAUSE_RATIO so a
+    real pause registers against the speaker's own loudness instead of running
+    to the cap. The two regimes are fully independent knobs."""
     d = _detector()
     d._noise_floor = 0.01
     assert d.effective_pause_ratio() == pytest.approx(d.SPEECH_PAUSE_RATIO)
     d._noise_floor = 0.08
-    assert d.effective_pause_ratio() == pytest.approx(
-        max(d.SPEECH_PAUSE_RATIO, d.HIGH_NOISE_PAUSE_RATIO))
+    assert d.effective_pause_ratio() == pytest.approx(d.HIGH_NOISE_PAUSE_RATIO)
     assert d.effective_pause_ratio() > d.SPEECH_PAUSE_RATIO
 
 
-def test_effective_pause_ratio_disabled_stays_disabled():
-    """SPEECH_PAUSE_RATIO == 0 (relative pause off) is not silently re-enabled
-    by the noise coupling."""
+def test_speech_pause_ratio_disables_quiet_only_not_loud():
+    """The config switch for the quiet-room "cuts me off" complaint:
+    SPEECH_PAUSE_RATIO == 0 disables the relative-energy pause in quiet
+    environments only — the loud regime keeps its own HIGH_NOISE_PAUSE_RATIO so
+    wind/train calls still have a working pause detector. (Before decoupling,
+    setting it to 0 disabled the pause everywhere.)"""
     d = _detector()
     d.SPEECH_PAUSE_RATIO = 0.0
+    d._noise_floor = 0.01
+    assert d.effective_pause_ratio() == 0.0                      # quiet: off
     d._noise_floor = 0.08
-    assert d.effective_pause_ratio() == 0.0
+    assert d.effective_pause_ratio() == pytest.approx(d.HIGH_NOISE_PAUSE_RATIO)
+    assert d.effective_pause_ratio() > 0.0                       # loud: still on
+
+
+def test_high_noise_pause_ratio_disables_loud_only_not_quiet():
+    """Symmetric switch: HIGH_NOISE_PAUSE_RATIO == 0 turns the relative pause off
+    in loud environments without touching the quiet regime."""
+    d = _detector()
+    d.HIGH_NOISE_PAUSE_RATIO = 0.0
+    d._noise_floor = 0.08
+    assert d.effective_pause_ratio() == 0.0                      # loud: off
+    d._noise_floor = 0.01
+    assert d.effective_pause_ratio() == pytest.approx(d.SPEECH_PAUSE_RATIO)
+    assert d.effective_pause_ratio() > 0.0                       # quiet: still on
 
 
 def test_high_noise_suppresses_adaptive_growth():
@@ -528,19 +546,59 @@ def test_high_noise_suppresses_adaptive_growth():
     short = d.adaptive_silence_seconds(0.5, high_noise=True)
     long = d.adaptive_silence_seconds(60.0, high_noise=True)
     assert short == long
-    assert long <= max(1.2, d.HIGH_NOISE_SILENCE_SECONDS_MAX) + 1e-6
-    assert long <= d.adaptive_silence_seconds(60.0, high_noise=False)
+    assert long == pytest.approx(max(1.2, d.HIGH_NOISE_SILENCE_SECONDS_MAX))
+
+
+def test_quiet_and_loud_silence_trails_are_independent():
+    """The STT-send timeout (silence trail) is fully separate for quiet vs loud:
+    neither regime caps the other. A setup can be snappy in a quiet room yet
+    patient in wind, or vice versa — the loud trail is NOT min()'d against the
+    quiet base (the coupling that previously prevented loud > quiet)."""
+    d = _detector()
+    d.SILENCE_GROWTH_PER_SEC = 0.0  # isolate the base trails from adaptive growth
+    # patient quiet, snappy loud
+    d.SILENCE_SECONDS = 3.0
+    d.HIGH_NOISE_SILENCE_SECONDS_MAX = 1.3
+    assert d.adaptive_silence_seconds(0.0, high_noise=False) == pytest.approx(3.0)
+    assert d.adaptive_silence_seconds(0.0, high_noise=True) == pytest.approx(1.3)
+    # snappy quiet, patient loud — loud may exceed quiet (was impossible before)
+    d.SILENCE_SECONDS = 1.3
+    d.HIGH_NOISE_SILENCE_SECONDS_MAX = 2.5
+    quiet = d.adaptive_silence_seconds(0.0, high_noise=False)
+    loud = d.adaptive_silence_seconds(0.0, high_noise=True)
+    assert quiet == pytest.approx(1.3)
+    assert loud == pytest.approx(2.5)
+    assert loud > quiet
 
 
 def test_effective_max_chunk_shrinks_in_noise():
     d = _detector()
     base_cap = 15.0
     d._noise_floor = 0.01
-    assert d.effective_max_chunk_seconds(base_cap) == base_cap   # quiet: unchanged
+    assert d.effective_max_chunk_seconds(base_cap) == base_cap   # quiet: the quiet base
     d._noise_floor = 0.08
     assert d.effective_max_chunk_seconds(base_cap) == pytest.approx(
-        min(base_cap, d.HIGH_NOISE_MAX_CHUNK_SECONDS))            # loud: shortened
-    assert d.effective_max_chunk_seconds(base_cap) < base_cap
+        d.HIGH_NOISE_MAX_CHUNK_SECONDS)                           # loud: the loud cap
+    assert d.effective_max_chunk_seconds(base_cap) < base_cap     # (default loud < quiet)
+
+
+def test_quiet_and_loud_max_chunk_are_independent():
+    """The force-flush cap is fully separate for quiet vs loud: neither bounds
+    the other. A long quiet cap with a short loud cap, or — if the operator wants
+    it — a LONGER loud cap than the quiet one (was impossible while loud was
+    min()'d against the quiet base)."""
+    d = _detector()
+    # patient quiet, snappy loud
+    d.HIGH_NOISE_MAX_CHUNK_SECONDS = 8.0
+    d._noise_floor = 0.01
+    assert d.effective_max_chunk_seconds(25.0) == pytest.approx(25.0)
+    d._noise_floor = 0.08
+    assert d.effective_max_chunk_seconds(25.0) == pytest.approx(8.0)
+    # loud cap may exceed the quiet base — decoupled, no min()
+    d.HIGH_NOISE_MAX_CHUNK_SECONDS = 20.0
+    quiet = d.effective_max_chunk_seconds(8.0)  # noise still high
+    assert quiet == pytest.approx(20.0)
+    assert quiet > 8.0
 
 
 def test_effective_max_chunk_disabled_stays_disabled():
@@ -548,6 +606,15 @@ def test_effective_max_chunk_disabled_stays_disabled():
     d = _detector()
     d._noise_floor = 0.08
     assert d.effective_max_chunk_seconds(0.0) == 0.0
+
+
+def test_loud_max_chunk_disabled_falls_back_to_quiet_base():
+    """A disabled loud cap (HIGH_NOISE_MAX_CHUNK_SECONDS <= 0) falls back to the
+    quiet base_cap in noise rather than running uncapped."""
+    d = _detector()
+    d.HIGH_NOISE_MAX_CHUNK_SECONDS = 0.0
+    d._noise_floor = 0.08
+    assert d.effective_max_chunk_seconds(15.0) == pytest.approx(15.0)
 
 
 def _speechlike_tone(seconds, sr=48000, level=0.3):
@@ -574,3 +641,45 @@ def test_high_noise_cap_bounds_the_wait_end_to_end():
     assert loud == pytest.approx(d.HIGH_NOISE_MAX_CHUNK_SECONDS, abs=0.3)
     assert quiet == pytest.approx(MAX_CHUNK_SECONDS, abs=0.3)
     assert loud < quiet
+
+
+# --- semantic endpointing: incomplete-utterance heuristic --------------------
+# Reply timers in the call pipeline are time-based, so a thinking pause after an
+# unfinished clause would reply to half a sentence. looks_like_incomplete_utterance
+# lets the pipeline hold back. High precision by design: only dangling function
+# words / trailing commas fire, so a sentence ending in a content word is never
+# misread as unfinished (which would over-hold and feel laggy).
+
+@pytest.mark.parametrize("text", [
+    "und das liegt daran, dass",          # trailing subordinating conjunction (DE)
+    "ich hätte gern einen Termin mit",    # trailing preposition (DE)
+    "kannst du mir bitte die",            # trailing article (DE)
+    "ich wollte nur kurz sagen, also",    # trailing filler (DE)
+    "kauf bitte Milch, Eier,",            # trailing comma mid-list
+    "so the thing is that",               # trailing conjunction (EN)
+    "I would like to book a table for",   # trailing preposition (EN)
+    "can you please send me the",         # trailing article (EN)
+])
+def test_incomplete_utterance_detected(text):
+    assert SpeechDetector.looks_like_incomplete_utterance(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "kauf bitte Milch.",                  # complete, terminal punctuation
+    "ich brauche einen neuen Termin",     # complete, ends on content word, no punct
+    "ja",                                 # short standalone reply
+    "nein danke",                         # short standalone reply
+    "well",                               # short EN filler standalone (< 3 words)
+    "please send the report tomorrow",    # complete EN, ends on content word
+    "that's all for now",                 # complete EN
+    "",                                   # empty
+    "   ",                                # whitespace only
+])
+def test_complete_utterance_not_flagged(text):
+    assert SpeechDetector.looks_like_incomplete_utterance(text) is False
+
+
+def test_incomplete_heuristic_is_bilingual_and_case_insensitive():
+    """The trailing-word check ignores case and covers both languages."""
+    assert SpeechDetector.looks_like_incomplete_utterance("ICH GEHE NACH HAUSE UND") is True
+    assert SpeechDetector.looks_like_incomplete_utterance("I AM GOING HOME AND") is True

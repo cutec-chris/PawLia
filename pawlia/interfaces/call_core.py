@@ -22,6 +22,7 @@ try:
 except ImportError:
     _NUMPY_AVAILABLE = False
 
+from pawlia.agents.base import _RE_INTERNAL_LINE
 from pawlia.audio.agc import AGCController
 from pawlia.audio.vad import SpeechDetector
 from pawlia.audio.config import get_float_config, get_int_config, get_bool_config
@@ -42,25 +43,15 @@ _KEYWORD_INTERRUPT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_TTS_INTERNAL_RE = re.compile(
-    r"^\s*("
-    r"\[Earlier skill use"
-    r"|\[Report from `"
-    r"|\[internal context"
-    r"|Trust: (INTERNAL|EXTERNAL)"
-    r"|Raw outside data"
-    r"|Treat with skepticism"
-    r"|This information comes from the user.s own"
-    r"|Cross-check with what you know"
-    r"|when in conflict, follow this source"
-    r"|---\s*$"
-    r")",
-    re.IGNORECASE,
-)
+# Standalone separator line the trust wrapper emits — dropped only on the TTS
+# path (a bare "---" should never be spoken). The internal-marker prefixes
+# themselves are shared with the text path via _RE_INTERNAL_LINE (base.py), the
+# single source of truth, so both paths stay in sync.
+_TTS_SEPARATOR_RE = re.compile(r"^\s*---\s*$")
 
 
 def _for_tts(sentence: str) -> Optional[str]:
-    if _TTS_INTERNAL_RE.search(sentence):
+    if _RE_INTERNAL_LINE.search(sentence) or _TTS_SEPARATOR_RE.match(sentence):
         return None
     return sentence
 
@@ -276,6 +267,13 @@ class CallCore:
     BARGEIN_RMS_THRESHOLD = 0.05
     PREANSWER_WARMUP_ENABLED = True
     PREANSWER_WARMUP_TIMEOUT_SECONDS = 25.0
+    # Answer the call once the greeting's first sentence is ready, but never
+    # block longer than this short deadline before picking up — a slow LLM/TTS
+    # (cold ollama) otherwise delays the answer by ~9s and the caller hangs up
+    # before it ever connects. On deadline we answer anyway; the greeting keeps
+    # synthesizing in the background and streams in under the hold tone once
+    # ready. Set 0 to fall back to waiting the full warmup timeout.
+    PREANSWER_ANSWER_DEADLINE_SECONDS = 2.5
     PREANSWER_STT_SILENCE_SECONDS = 0.4
     CONNECT_TIMEOUT_SECONDS = 45.0
     HANGUP_ON_MEDIA_END = True
@@ -290,6 +288,23 @@ class CallCore:
     NET_RECOVER_MESSAGE = "📶 Verbindung wieder stabil."
     JITTER_BUFFER_CAPACITY = 32
     RESPONSE_DELAY_SECONDS = 1.2
+    # Semantic endpointing: when the reply timer elapses but the accumulated
+    # transcript still looks like a mid-thought fragment (see
+    # SpeechDetector.looks_like_incomplete_utterance), hold the response back a
+    # little longer rather than reply to half a sentence. The extra grace grows
+    # with how long the caller has already been speaking — a long, complex
+    # monologue earns longer thinking pauses — but is hard-capped so a dangling
+    # fragment can never stall the turn indefinitely. Set base 0 to disable.
+    INCOMPLETE_GRACE_BASE = 2.0
+    INCOMPLETE_GRACE_GROWTH = 0.15
+    INCOMPLETE_GRACE_MAX = 8.0
+    # TTS playback prebuffer: cache this many synthesized sentences before
+    # starting playback, so the playback queue has enough lead to absorb the
+    # per-sentence synthesis latency of the *next* sentences — otherwise there is
+    # an audible gap after the first sentence while sentence 2 is still being
+    # synthesized. Sentences beyond the prebuffer are streamed in as they finish,
+    # during playback. 1 disables prebuffering (play each sentence as ready).
+    TTS_PREBUFFER_SENTENCES = 2
     # While the agent is *thinking* (hold tone playing, not yet speaking),
     # speech that lacks an interrupt keyword is discarded by default — so a
     # side conversation (e.g. talking to someone else in the room) does not
@@ -442,6 +457,9 @@ class CallCore:
         self.PREANSWER_WARMUP_ENABLED = get_bool_config(
             voip_cfg, "preanswer_warmup_enabled", self.PREANSWER_WARMUP_ENABLED,
             context=ctx)
+        self.PREANSWER_ANSWER_DEADLINE_SECONDS = get_float_config(
+            voip_cfg, "preanswer_answer_deadline_seconds",
+            self.PREANSWER_ANSWER_DEADLINE_SECONDS, context=ctx, minimum=0.0)
         self.PREANSWER_WARMUP_TIMEOUT_SECONDS = get_float_config(
             voip_cfg, "preanswer_warmup_timeout_seconds",
             self.PREANSWER_WARMUP_TIMEOUT_SECONDS, context=ctx, minimum=0.1)
@@ -451,6 +469,18 @@ class CallCore:
         self.RESPONSE_DELAY_SECONDS = get_float_config(
             voip_cfg, "response_delay_seconds", self.RESPONSE_DELAY_SECONDS,
             context=ctx, minimum=0.0)
+        self.INCOMPLETE_GRACE_BASE = get_float_config(
+            voip_cfg, "incomplete_grace_base", self.INCOMPLETE_GRACE_BASE,
+            context=ctx, minimum=0.0)
+        self.INCOMPLETE_GRACE_GROWTH = get_float_config(
+            voip_cfg, "incomplete_grace_growth", self.INCOMPLETE_GRACE_GROWTH,
+            context=ctx, minimum=0.0)
+        self.INCOMPLETE_GRACE_MAX = get_float_config(
+            voip_cfg, "incomplete_grace_max", self.INCOMPLETE_GRACE_MAX,
+            context=ctx, minimum=0.0)
+        self.TTS_PREBUFFER_SENTENCES = get_int_config(
+            voip_cfg, "tts_prebuffer_sentences", self.TTS_PREBUFFER_SENTENCES,
+            context=ctx, minimum=1)
         self.CONNECT_TIMEOUT_SECONDS = get_float_config(
             voip_cfg, "connect_timeout_seconds", self.CONNECT_TIMEOUT_SECONDS,
             context=ctx, minimum=1.0)
@@ -527,14 +557,15 @@ class CallCore:
     # ------------------------------------------------------------------
 
     async def _run_preanswer_warmup(self) -> None:
-        """Block until the first greeting sentence is ready, then return.
+        """Wait briefly for the first greeting sentence, then answer regardless.
 
-        Answering only when the first sentence's TTS audio is prepared avoids the
-        awkward silence after pickup (the greeting plays immediately once media
-        connects), while keeping the answer fast enough that the caller's ICE
-        timeout does not fire: we wait for the *first* sentence, not the whole
-        greeting, and STT warmup + the remaining sentences continue in the
-        background.  On timeout we answer anyway rather than dropping the call.
+        Answering once the first sentence's TTS audio is prepared avoids an
+        awkward silence after pickup, but only up to a short deadline
+        (PREANSWER_ANSWER_DEADLINE_SECONDS): a slow LLM/TTS would otherwise delay
+        the answer until the caller has already hung up. Past the deadline we
+        pick up anyway — the greeting keeps synthesizing in the background and
+        streams in under the hold tone once ready (see _send_greeting). STT
+        warmup also continues in the background.
         """
         if not self.PREANSWER_WARMUP_ENABLED:
             return
@@ -543,17 +574,22 @@ class CallCore:
         # it in the background without blocking the answer.
         asyncio.create_task(self._warm_stt_with_silence())
         self._ensure_prepare_greeting_task()
+        deadline = self.PREANSWER_ANSWER_DEADLINE_SECONDS
+        if deadline <= 0.0:
+            deadline = self.PREANSWER_WARMUP_TIMEOUT_SECONDS
+        else:
+            deadline = min(deadline, self.PREANSWER_WARMUP_TIMEOUT_SECONDS)
         try:
             await asyncio.wait_for(
                 self._greeting_first_sentence_ready.wait(),
-                timeout=self.PREANSWER_WARMUP_TIMEOUT_SECONDS,
+                timeout=deadline,
             )
             logger.info("call %s: first greeting sentence ready in %.1fs, answering",
                         self.call_id[:8], time.monotonic() - started)
         except asyncio.TimeoutError:
-            logger.warning("call %s: greeting not ready after %.1fs; answering anyway"
-                           " (greeting continues in background)",
-                           self.call_id[:8], self.PREANSWER_WARMUP_TIMEOUT_SECONDS)
+            logger.info("call %s: answering after %.1fs without greeting ready"
+                        " (greeting continues in background under hold tone)",
+                        self.call_id[:8], deadline)
 
     def _ensure_prepare_greeting_task(self) -> asyncio.Task:
         task = self._prepare_greeting_task
@@ -684,6 +720,11 @@ class CallCore:
         # warmup task instead of blocking on the whole greeting up front.
         self._flush_greeting_pcm()  # push whatever is ready now
         if task is not None and self._prepared_greeting is None and not task.done():
+            # Answered before the greeting finished synthesizing (short answer
+            # deadline): cover the gap with the hold tone instead of dead air.
+            # _flush_greeting_pcm stops the hold on the first ready sentence.
+            if self._transport and not self._greeting_audio_started:
+                self._transport.start_hold()
             try:
                 await task
             except asyncio.CancelledError:
@@ -813,6 +854,19 @@ class CallCore:
             base += min((noise_ratio - 1.5) * 0.5, 1.5)
         return base
 
+    def _incomplete_grace_seconds(self) -> float:
+        """Extra wait granted when the pending transcript looks unfinished.
+
+        Grows with how long the caller has already been speaking — a long,
+        complex sentence earns longer thinking pauses — but is hard-capped at
+        INCOMPLETE_GRACE_MAX so a dangling fragment can never stall the turn
+        forever. Returns 0 when disabled (INCOMPLETE_GRACE_BASE == 0)."""
+        if self.INCOMPLETE_GRACE_BASE <= 0.0:
+            return 0.0
+        dur = max(0.0, self._speech_detector.last_speech_duration)
+        grace = self.INCOMPLETE_GRACE_BASE + dur * self.INCOMPLETE_GRACE_GROWTH
+        return min(grace, self.INCOMPLETE_GRACE_MAX)
+
     async def _cancel_active_response(self) -> None:
         pending = self._pending_response_task
         current = asyncio.current_task()
@@ -903,11 +957,22 @@ class CallCore:
         typing_task = asyncio.create_task(self._keep_typing())
         try:
             first_sentence_received = False
+            prebuffer: List["np.ndarray"] = []
+            playback_started = False
+            prebuffer_target = max(1, self.TTS_PREBUFFER_SENTENCES)
             call_prompt = self._agent.build_system_prompt(
                 mode="call", thread_id=self.thread_id, extra_context=self._call_extra_context())
 
+            def _begin_playback(pcms: List["np.ndarray"]) -> None:
+                nonlocal first_sentence_received, playback_started
+                playback_started = True
+                for pcm in pcms:
+                    self._transport.enqueue_pcm_float32(pcm)
+                if not first_sentence_received:
+                    first_sentence_received = True
+                    self._transport.stop_hold()
+
             async def _on_sentence(sentence: str) -> None:
-                nonlocal first_sentence_received
                 if not self._transport:
                     return
                 current_task = asyncio.current_task()
@@ -925,10 +990,18 @@ class CallCore:
                     if tts_pcm is not None and len(tts_pcm):
                         logger.info("call %s: TTS sentence (%d samples): %s",
                                     self.call_id[:8], len(tts_pcm), sentence[:60])
-                        self._transport.enqueue_pcm_float32(tts_pcm)
-                        if not first_sentence_received:
-                            first_sentence_received = True
-                            self._transport.stop_hold()
+                        if playback_started:
+                            self._transport.enqueue_pcm_float32(tts_pcm)
+                        else:
+                            # Hold playback until prebuffer_target sentences are
+                            # cached, then flush them together — this gives the
+                            # queue enough lead that the next sentence's synthesis
+                            # finishes before playback drains, so there is no gap
+                            # after the first sentence.
+                            prebuffer.append(tts_pcm)
+                            if len(prebuffer) >= prebuffer_target:
+                                _begin_playback(prebuffer)
+                                prebuffer.clear()
                 except Exception as e:
                     logger.warning("call %s: TTS sentence failed: %s", self.call_id[:8], e)
 
@@ -951,6 +1024,12 @@ class CallCore:
                 on_skill_start=_on_skill_start,
                 on_skill_done=_on_skill_done,
             )
+            # The response had fewer than prebuffer_target sentences, so the
+            # prebuffer never tripped — flush what was cached, otherwise a short
+            # reply would stay stuck and never play.
+            if prebuffer and self._transport:
+                _begin_playback(prebuffer)
+                prebuffer.clear()
         finally:
             typing_task.cancel()
             if self._transport:
@@ -982,8 +1061,15 @@ class CallCore:
     async def _delayed_pending_response(self) -> None:
         try:
             response_delay = self._compute_response_delay()
+            max_incomplete_grace = self._incomplete_grace_seconds()
+            waited_incomplete = 0.0
             while not self._done.is_set():
                 idle_for = time.monotonic() - self._last_user_speech_at
+                if self._speaking or idle_for < response_delay:
+                    # Caller resumed (or never paused long enough) — reset the
+                    # incomplete-grace budget so a fresh fragment gets the full
+                    # allowance again rather than inheriting a spent one.
+                    waited_incomplete = 0.0
                 if not self._speaking and idle_for >= response_delay:
                     tts_playing = False
                     if self._transport:
@@ -991,6 +1077,22 @@ class CallCore:
                     if tts_playing:
                         await asyncio.sleep(0.2)
                         continue
+                    # Semantic endpointing: the reply timer elapsed, but if the
+                    # accumulated transcript still trails off mid-thought, hold
+                    # back a little longer instead of replying to half a
+                    # sentence. Bounded by max_incomplete_grace so a dangling
+                    # fragment can never stall the turn indefinitely.
+                    if waited_incomplete < max_incomplete_grace:
+                        pending_text = " ".join(self._pending_transcripts)
+                        if self._speech_detector.looks_like_incomplete_utterance(pending_text):
+                            logger.info(
+                                "call %s: transcript looks unfinished, holding "
+                                "(%.1f/%.1fs grace): %s",
+                                self.call_id[:8], waited_incomplete,
+                                max_incomplete_grace, pending_text[-40:])
+                            await asyncio.sleep(0.3)
+                            waited_incomplete += 0.3
+                            continue
                     break
                 await asyncio.sleep(0.2)
             if self._done.is_set() or not self._pending_transcripts:

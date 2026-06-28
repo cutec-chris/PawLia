@@ -143,11 +143,13 @@ interfaces:
 #   silence_threshold: 0.018          # frame RMS above this counts as speech (after AGC)
 #   silence_emphasis_factor: 2.0      # base multiplier for adaptive threshold
 #                                       # (auto-scaled down to 1.2 in noisy environments)
-#   silence_seconds: 1.8              # base trailing silence that ends a chunk
+#   silence_seconds: 1.8              # QUIET-environment trailing silence that ends a chunk
+#                                       # (the STT-send timeout for quiet rooms; the loud
+#                                       #  trail is high_noise_silence_seconds_max, independent)
 #   silence_growth_per_sec: 0.12      # +pause tolerance per second already spoken
 #                                       # (long sentences with thinking pauses aren't chopped;
 #                                       #  short replies still close at silence_seconds; 0 = off)
-#   silence_seconds_max: 3.0          # cap for the grown pause tolerance
+#   silence_seconds_max: 3.0          # cap for the grown pause tolerance (quiet only)
 #   min_speech_seconds: 0.4           # shorter chunks are discarded early
 #   min_active_speech_ratio: 0.12     # fraction of active frames required per chunk
 #   min_consecutive_speech_frames: 8  # sustained active 20ms frames required
@@ -158,23 +160,38 @@ interfaces:
 #                                       # noise that energy/spectral gates miss
 #   min_speech_like_ratio: 0.08       # active + speech-like frame ratio required
 #   min_consecutive_speechlike_frames: 4
-#   speech_pause_ratio: 0.25          # frame below this fraction of the running speech
-#                                       # level counts as a pause even if spectrally
-#                                       # speech-like — lets chunks close in wind (0 = off)
+#   speech_pause_ratio: 0.25          # QUIET-environment relative-energy pause: a frame
+#                                       # below this fraction of the running speech level
+#                                       # counts as a pause even if spectrally speech-like.
+#                                       # Set 0 to switch it OFF in quiet rooms — a quiet
+#                                       # chunk then closes only on the silence trail, never
+#                                       # on a soft mid-sentence trail-off (fixes "cuts me
+#                                       # off in a quiet room"). Loud is unaffected: it uses
+#                                       # high_noise_pause_ratio independently.
 #   min_resume_speech_frames: 3       # consecutive speech-like frames to break a running pause
 #                                       # (auto-scaled up in noisy environments — see adaptive silence)
-#   vad_max_chunk_seconds: 15          # force-flush open speech buffer after this many seconds
-#                                       # (safety net so sustained wind can't hold a chunk open; 0 = disabled)
+#   vad_max_chunk_seconds: 15          # QUIET/normal-environment force-flush cap: close an open
+#                                       # speech buffer after this many seconds even without a pause.
+#                                       # Safety net so sustained noise can't hold a chunk open, but
+#                                       # with speech_pause_ratio=0 (relative pause off) it also becomes
+#                                       # the primary endpoint for long quiet monologues — raise it
+#                                       # (e.g. 25) so a long sentence isn't chopped mid-thought.
+#                                       # The loud cap is high_noise_max_chunk_seconds (independent).
+#                                       # 0 = disabled.
 #   # --- noise-coupled endpointing: in a persistently loud environment
 #   #     (noise_floor > high_noise_floor, e.g. wind/train) the patient values
 #   #     above stop working (noise fills the gaps, the silence counter never
 #   #     advances, chunks run to vad_max_chunk_seconds). These switch to a more
 #   #     aggressive endpoint while loud; quiet calls are untouched.
-#   high_noise_pause_ratio: 0.40       # stronger relative-pause fraction used instead of
-#                                       # speech_pause_ratio while loud (== speech_pause_ratio to opt out)
-#   high_noise_silence_seconds_max: 1.8 # clamp pause tolerance + suppress adaptive growth while loud
-#   high_noise_max_chunk_seconds: 8    # shorter force-flush cap while loud — bounds the worst-case
-#                                       # wait when no pause is detectable (0 = no extra cap)
+#   high_noise_pause_ratio: 0.40       # LOUD-environment relative-pause fraction, independent of
+#                                       # speech_pause_ratio (0 = off in loud only)
+#   high_noise_silence_seconds_max: 1.8 # LOUD-environment silence trail — flat (no adaptive growth),
+#                                       # fully independent of the quiet silence_seconds
+#   high_noise_max_chunk_seconds: 8    # LOUD-environment force-flush cap, fully independent of the
+#                                       # quiet vad_max_chunk_seconds (neither bounds the other).
+#                                       # Usually shorter — bounds the worst-case wait when no pause is
+#                                       # detectable in wind/train — but may be set longer if wanted.
+#                                       # 0 = no separate loud cap (falls back to vad_max_chunk_seconds)
 #   pre_speech_seconds: 0.6           # prepend this much audio before detected speech (onset safety)
 #   webrtcvad_enabled: true           # extra lightweight speech detector
 #   webrtcvad_mode: 2                 # 0..3, higher = stricter
@@ -182,6 +199,18 @@ interfaces:
 #   webrtcvad_min_consecutive_frames: 4
 #   call_inactivity_seconds: 180      # hang up if nothing is sent to STT for this long
 #   response_delay_seconds: 2.5       # wait this long after speech ends before replying
+#   # --- semantic endpointing: when response_delay_seconds elapses but the
+#   #     accumulated transcript still trails off mid-thought (dangling
+#   #     conjunction/preposition/article/filler or a trailing comma, DE+EN),
+#   #     hold the reply back instead of answering half a sentence. The extra
+#   #     grace grows with how long the caller has been speaking but is capped.
+#   incomplete_grace_base: 2.0         # base extra wait for an unfinished transcript (0 = disable)
+#   incomplete_grace_growth: 0.15      # +grace per second already spoken
+#   incomplete_grace_max: 8.0          # hard cap so a dangling fragment never stalls the turn
+#   tts_prebuffer_sentences: 2         # cache this many synthesized sentences before starting
+#                                       # playback (flushed together), then stream the rest in
+#                                       # during playback — removes the gap after the first
+#                                       # sentence while sentence 2 is still synthesizing. 1 = off
 #   agc_window_seconds: 15.0          # keep AGC active this long after bot/user activity
 #   agc_target_rms: 0.10              # target loudness used for VAD normalization (bot active)
 #   agc_quiet_target_rms: 0.06        # target loudness when bot is idle (boosts quiet speech)
@@ -192,6 +221,11 @@ interfaces:
 #                                      # interrupt keyword (halt/stop/warte/moment/pause/pawlia) is
 #                                      # discarded as side conversation. Set true to queue it instead.
 #   preanswer_warmup_enabled: true    # warm STT + prepare greeting before answering calls
+#   preanswer_answer_deadline_seconds: 2.5 # answer once the greeting's 1st sentence is ready,
+#                                       # but never block longer than this before picking up
+#                                       # (slow LLM/TTS otherwise delays the answer and the
+#                                       #  caller hangs up; greeting streams in under the hold
+#                                       #  tone once ready). 0 = wait the full warmup timeout
 #   preanswer_warmup_timeout_seconds: 25.0
 #   preanswer_stt_silence_seconds: 0.4
 #   # --- transport / connection ---

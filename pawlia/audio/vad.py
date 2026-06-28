@@ -49,6 +49,40 @@ _STT_HALLUCINATION_SUBSTR_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# Words that almost never end a finished spoken turn — when a transcript ends on
+# one of these (or a comma), the caller is mid-thought and a trailing pause is a
+# *thinking* pause, not an endpoint. Used by ``looks_like_incomplete_utterance``
+# to hold the response back instead of replying to half a sentence. Kept high
+# precision (dangling function words only) so a sentence ending in a content
+# word ("...kauf bitte Milch") is never misread as unfinished. Bilingual:
+# the caller may speak German or English.
+_CONTINUATION_WORDS = frozenset({
+    # --- German ---
+    # coordinating / subordinating conjunctions
+    "und", "oder", "aber", "sondern", "denn", "doch", "sowie", "bzw",
+    "beziehungsweise", "weil", "dass", "daß", "ob", "obwohl", "damit", "sodass",
+    "während", "bevor", "nachdem", "falls", "sobald", "indem", "als", "wenn",
+    "wie", "wo", "wer", "was", "welche", "welcher", "welches",
+    # prepositions
+    "mit", "für", "von", "zu", "zur", "zum", "im", "in", "an", "am", "auf",
+    "bei", "beim", "nach", "über", "unter", "vor", "durch", "gegen", "ohne",
+    "um", "aus", "seit", "bis", "wegen", "trotz", "gegenüber",
+    # dangling articles / determiners / possessives
+    "der", "die", "das", "dem", "den", "des", "ein", "eine", "einen", "einem",
+    "einer", "eines", "kein", "keine", "keinen", "mein", "dein", "sein", "ihr",
+    "unser", "euer",
+    # fillers / discourse markers
+    "also", "äh", "ähm", "ehm", "öh", "naja", "halt", "quasi", "sozusagen",
+    "zwar", "nämlich",
+    # --- English ---
+    "and", "or", "but", "so", "because", "that", "which", "who", "if", "when",
+    "while", "since", "although", "though", "unless", "whereas",
+    "with", "for", "from", "to", "of", "in", "on", "at", "by", "about",
+    "into", "onto", "over", "under", "through", "between", "without",
+    "the", "a", "an", "my", "your", "his", "her", "their", "our", "its",
+    "like", "well", "um", "uh", "uhm", "basically", "actually",
+})
+
 
 def _build_webrtc_vad(mode: int):
     """Create a WebRTC VAD instance when the optional dependency is available."""
@@ -145,7 +179,13 @@ class SpeechDetector:
     # shorter max-chunk cap — trading the (already impossible) clean capture of a
     # long monologue for a bounded, responsive reply. Quiet/local calls keep the
     # patient values, so long sentences with thinking pauses are not chopped.
-    # Set HIGH_NOISE_PAUSE_RATIO == SPEECH_PAUSE_RATIO to opt out of the coupling.
+    #
+    # The quiet and loud endpointing knobs are fully independent (see
+    # effective_pause_ratio / adaptive_silence_seconds): HIGH_NOISE_PAUSE_RATIO
+    # governs the relative-energy pause while loud, SPEECH_PAUSE_RATIO governs it
+    # while quiet (set SPEECH_PAUSE_RATIO=0 to switch it off in quiet rooms only),
+    # and HIGH_NOISE_SILENCE_SECONDS_MAX is the loud silence trail independent of
+    # the quiet SILENCE_SECONDS/SILENCE_SECONDS_MAX.
     HIGH_NOISE_PAUSE_RATIO: float = 0.40
     HIGH_NOISE_SILENCE_SECONDS_MAX: float = 1.8
     HIGH_NOISE_MAX_CHUNK_SECONDS: float = 8.0
@@ -519,32 +559,52 @@ class SpeechDetector:
     def effective_pause_ratio(self) -> float:
         """Relative-energy pause fraction for the *current* noise conditions.
 
-        In a loud environment the gentle ``SPEECH_PAUSE_RATIO`` is too lax to
-        register a real pause against the speaker's own (AGC-amplified) loudness,
-        so the chunk only ever closes on the max-chunk cap. Raising the fraction
-        lets a genuine mid-utterance drop register as a pause again. Quiet calls
-        keep ``SPEECH_PAUSE_RATIO`` so deliberate, level mid-sentence pauses are
-        not mistaken for an endpoint. ``SPEECH_PAUSE_RATIO == 0`` (disabled)
-        stays disabled regardless of noise.
+        The quiet and loud regimes are controlled by fully independent knobs so
+        the relative-energy pause can be tuned — or switched off — per regime:
+
+          * loud (``noise_is_high``) → ``HIGH_NOISE_PAUSE_RATIO``. The gentle
+            quiet fraction is too lax to register a real pause against the
+            speaker's own (AGC-amplified) loudness, so a higher fraction lets a
+            genuine mid-utterance drop close the chunk instead of running to the
+            max-chunk cap.
+          * quiet → ``SPEECH_PAUSE_RATIO``. Deliberate, level mid-sentence
+            pauses must not be mistaken for an endpoint, so this is gentle.
+            **Set ``SPEECH_PAUSE_RATIO == 0`` to disable the relative-energy
+            pause in quiet environments entirely** (the config switch for the
+            "cuts me off in a quiet room" complaint): a quiet chunk then closes
+            only on the genuine silence trail, never on a soft trail-off. The
+            loud regime is unaffected — it keeps ``HIGH_NOISE_PAUSE_RATIO`` — so
+            wind/train calls still get a working pause detector.
         """
-        if self.SPEECH_PAUSE_RATIO <= 0.0:
-            return 0.0
         if self.noise_is_high:
-            return max(self.SPEECH_PAUSE_RATIO, self.HIGH_NOISE_PAUSE_RATIO)
+            return self.HIGH_NOISE_PAUSE_RATIO
         return self.SPEECH_PAUSE_RATIO
 
     def effective_max_chunk_seconds(self, base_cap: float) -> float:
-        """Hard max-chunk cap for the current noise conditions.
+        """Hard max-chunk (force-flush) cap for the current noise conditions.
 
-        Shortened to ``HIGH_NOISE_MAX_CHUNK_SECONDS`` in a loud environment so
-        the worst-case wait is bounded when no pause can be detected (the caller
-        otherwise speaks into the void for the full quiet-call budget). A cap the
-        operator has disabled (``base_cap <= 0``) stays disabled.
+        The quiet and loud caps are fully independent — neither bounds the other,
+        consistent with the silence trail (:meth:`adaptive_silence_seconds`) and
+        the relative pause (:meth:`effective_pause_ratio`):
+
+          * quiet → ``base_cap`` (the operator's ``vad_max_chunk_seconds``).
+          * loud (``noise_is_high``) → ``HIGH_NOISE_MAX_CHUNK_SECONDS`` directly,
+            *not* ``min()``'d against the quiet base. Typically shorter (bound the
+            worst-case wait in wind/train when no pause is detectable), but it may
+            also be set *longer* than the quiet cap if that is what the operator
+            wants — the two are tuned separately.
+
+        Two opt-outs are preserved: an operator who disabled the cap entirely
+        (``base_cap <= 0``) keeps it disabled in every condition, and a disabled
+        loud cap (``HIGH_NOISE_MAX_CHUNK_SECONDS <= 0``) falls back to the quiet
+        ``base_cap`` rather than running uncapped.
         """
         if base_cap <= 0.0:
             return 0.0
-        if self.noise_is_high and self.HIGH_NOISE_MAX_CHUNK_SECONDS > 0.0:
-            return min(base_cap, self.HIGH_NOISE_MAX_CHUNK_SECONDS)
+        if self.noise_is_high:
+            if self.HIGH_NOISE_MAX_CHUNK_SECONDS > 0.0:
+                return self.HIGH_NOISE_MAX_CHUNK_SECONDS
+            return base_cap
         return base_cap
 
     def adaptive_silence_seconds(
@@ -558,18 +618,24 @@ class SpeechDetector:
         ``SILENCE_SECONDS`` base. ``SILENCE_GROWTH_PER_SEC == 0`` disables growth.
 
         When ``high_noise`` is set (caller passes :attr:`noise_is_high`), the
-        growth is suppressed and the tolerance is clamped to
-        ``HIGH_NOISE_SILENCE_SECONDS_MAX``: in sustained noise a long tolerated
-        pause can never be satisfied (the noise fills the gaps), so growing it
-        only delays the close to the cap. A short, fixed tolerance lets the
-        relative-energy pause actually fire.
+        growth is suppressed and a fixed ``HIGH_NOISE_SILENCE_SECONDS_MAX``
+        tolerance is used: in sustained noise a long tolerated pause can never be
+        satisfied (the noise fills the gaps), so growing it only delays the close
+        to the cap. A short, fixed tolerance lets the relative-energy pause
+        actually fire.
+
+        The quiet and loud silence trails (the timeout before a chunk is sent to
+        STT) are fully independent: quiet is ``SILENCE_SECONDS`` + adaptive
+        growth up to ``SILENCE_SECONDS_MAX``; loud is the flat
+        ``HIGH_NOISE_SILENCE_SECONDS_MAX``. Neither caps the other, so a setup
+        can be patient in a quiet room yet snappy in wind, or vice versa.
 
         Wind safety for the *grown* (quiet-call) path is handled via
         :meth:`resume_frames_for_silence` — see the class-level note.
         """
         base = max(1.2, self.SILENCE_SECONDS)
         if high_noise:
-            return min(base, max(1.2, self.HIGH_NOISE_SILENCE_SECONDS_MAX))
+            return max(1.2, self.HIGH_NOISE_SILENCE_SECONDS_MAX)
         if self.SILENCE_GROWTH_PER_SEC <= 0.0:
             return base
         grown = base + max(0.0, spoken_seconds) * self.SILENCE_GROWTH_PER_SEC
@@ -638,3 +704,35 @@ class SpeechDetector:
         if _STANDALONE_STT_HALLUCINATION_RE.fullmatch(normalized):
             return True
         return bool(_STT_HALLUCINATION_SUBSTR_RE.search(normalized))
+
+    @staticmethod
+    def looks_like_incomplete_utterance(text: str) -> bool:
+        """Return True when a transcript looks like a mid-thought fragment.
+
+        Pure-text semantic endpointing: reply timers in the call pipeline are
+        time-based, so a thinking pause after an unfinished clause ("...und das
+        liegt daran, dass") would otherwise trigger a reply to half a sentence.
+        This lets the caller hold the response back until the thought is closed.
+
+        High precision by design — only the strongest dangling-fragment signals
+        fire, so a complete sentence ending in a content word ("...kauf bitte
+        Milch") is never misread as unfinished:
+
+          1. a trailing comma (a comma never ends a spoken turn);
+          2. the last word is a dangling function word (conjunction, preposition,
+             article, filler) from :data:`_CONTINUATION_WORDS`.
+
+        Signal 2 only applies once the utterance has at least three words, so a
+        short standalone reply ("ja", "naja", "well") stays complete. Missing
+        terminal punctuation alone is *not* a signal — Whisper drops it even on
+        finished sentences, which would over-hold.
+        """
+        normalized = " ".join((text or "").strip().split())
+        if not normalized:
+            return False
+        if normalized.endswith(","):
+            return True
+        words = re.findall(r"\b[\wäöüß']+\b", normalized, flags=re.UNICODE)
+        if len(words) < 3:
+            return False
+        return words[-1].lower() in _CONTINUATION_WORDS
