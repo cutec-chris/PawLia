@@ -56,23 +56,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-# Copy the constraints file early so the coding-backend installs below can
-# pin numpy / onnxruntime / etc. to versions that ship cp314 wheels.
+# Copy the constraints file early so any pip installs below can pin
+# numpy / onnxruntime / etc. to versions that ship cp314 wheels.
 COPY constraints.txt constraints.txt
 ENV PIP_CONSTRAINT=/app/constraints.txt
 
-# Optional coding backends for the skill-creator (config: coding.backend).
-# Baked in so prod always has them; the config skill can also install at
-# runtime when missing. opencode is the preferred agentic backend; aider is
-# the CLI fallback. setuptools/wheel are needed in the runtime stage because
-# the python:3.14-slim-bookworm base image does not ship them, and the
-# pinned versions it would otherwise pull in fail on 3.14
-# (pkgutil.ImpImporter was removed in 3.12). The constraints file pins
-# numpy / onnxruntime / etc. to versions that have 3.14 wheels — without it
-# pip falls back to building numpy from source and crashes the same way.
-RUN npm install -g opencode-ai \
-    && pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -c /app/constraints.txt aider-chat
+# opencode — the skill-creator's preferred coding backend (full agentic
+# loop, own turn budget). Baked in so prod always has it; the config skill
+# can also install at runtime when missing.
+# Aider is intentionally NOT bundled: aider-chat 0.14.x pins aiohttp==3.8.4
+# which conflicts with our constraints (aiohttp==3.13.3, needed by the rest
+# of pawlia), and any pin that resolved both broke the build under
+# Python 3.14. Install aider at runtime with
+# `config.py coding --backend aider` if a skill needs the fallback.
+RUN npm install -g opencode-ai
 
 # Python-Packages aus Builder kopieren
 COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
