@@ -44,10 +44,10 @@ def _has_marker(text: str) -> bool:
 LEAK_SAMPLES = [
     # Trailing single-skill summary block (the most common real leak).
     (
-        "Workspace synchronisiert — Remote stand schon aktuell.\n\n"
+        "Datei gelesen — Inhalt geprüft.\n\n"
         "[Earlier skill use — internal context:]\n"
-        "- workspace-git: sync --workspace /work/space -> Already up to date",
-        "Workspace synchronisiert — Remote stand schon aktuell.",
+        "- files: read notes.md -> ok",
+        "Datei gelesen — Inhalt geprüft.",
     ),
     # Trailing multi-skill block with several bullets.
     (
@@ -124,9 +124,9 @@ def test_block_at_very_start_leaves_empty():
 # Integration — the choke-points in ChatAgent are actually wired
 # ---------------------------------------------------------------------------
 _LEAKED_ANSWER = (
-    "Alles synchron, nichts zu tun.\n\n"
+    "Datei gelesen, alles klar.\n\n"
     "[Earlier skill use — internal context:]\n"
-    "- workspace-git: sync -> up to date"
+    "- files: read notes.md -> ok"
 )
 
 
@@ -136,7 +136,7 @@ async def test_run_strips_leaked_final_answer(make_chat_agent):
 
     out = await agent.run("status?")
 
-    assert out == "Alles synchron, nichts zu tun."
+    assert out == "Datei gelesen, alles klar."
     assert not _has_marker(out)
 
 
@@ -160,16 +160,16 @@ async def test_interim_narration_is_sanitized(make_chat_agent, fake_runner):
     # the interim is what gets sent mid-task (read aloud / posted to Matrix).
     interim = Reply(
         text=(
-            "Einen Moment, ich pushe noch.\n\n"
-            "[Earlier skill use — internal context:]\n- workspace-git: status -> dirty"
+            "Einen Moment, lese noch.\n\n"
+            "[Earlier skill use — internal context:]\n- files: status -> dirty"
         ),
-        tool_calls=ScriptedLLM.tool("workspace-git", query="push").tool_calls,
+        tool_calls=ScriptedLLM.tool("files", query="read").tool_calls,
     )
     llm = ScriptedLLM().on(
-        "sync and push",
-        ScriptedLLM.tool("workspace-git", query="sync"),  # turn 1: tool only
+        "read and check",
+        ScriptedLLM.tool("files", query="list"),  # turn 1: tool only
         interim,                                           # turn 2: interim + tool
-        Reply(text="Fertig, alles gepusht."),             # final
+        Reply(text="Fertig, gelesen."),                    # final
     )
     runner = fake_runner(returns="ok")
     captured = []
@@ -178,16 +178,16 @@ async def test_interim_narration_is_sanitized(make_chat_agent, fake_runner):
         captured.append(text)
 
     agent = make_chat_agent(
-        llm=llm, skills=["workspace-git"], runner=runner, on_interim=on_interim
+        llm=llm, skills=["files"], runner=runner, on_interim=on_interim
     )
 
-    out = await agent.run("sync and push")
+    out = await agent.run("read and check")
 
-    assert out == "Fertig, alles gepusht."
+    assert out == "Fertig, gelesen."
     assert captured, "expected interim narration to be emitted on turn 2"
     assert all(not _has_marker(t) for t in captured), captured
     # The conversational part of the narration is preserved, only the block goes.
-    assert any("ich pushe noch" in t for t in captured)
+    assert any("Einen Moment, lese noch" in t for t in captured)
 
 
 # ---------------------------------------------------------------------------

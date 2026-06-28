@@ -373,9 +373,9 @@ einwandfrei" after eyeballing null output — that ships a broken command. Re-re
 the command's wiring (is its result actually written into the output envelope?
 is `success` set?) and loop back to Phase 2.
 
-**Commit atomically when green.** A scheduled workspace-sync (`workspace-git`)
-can `git add -A && commit` at any moment — including mid-edit. To stop it
-capturing a half-finished fix, commit your own work the moment Phase 3 is green:
+**Commit atomically when green.** If you have an out-of-band workspace sync
+(e.g. syncthing), make sure your own work is in a clean state the moment Phase 3
+is green — half-finished edits may otherwise get picked up:
 ```
 git -C "$PAWLIA_SESSION_DIR/$PAWLIA_USER_ID/workspace" \
   add skills/<name> && git commit -m "fix(<name>): <what>"
@@ -427,13 +427,36 @@ The command auto-detects the best available coding backend:
 | Backend | How | When |
 |---------|-----|------|
 | **aider** | `aider --message ... --yes` CLI | `aider` in PATH |
-| **opencode** | `opencode run ...` CLI | `opencode` in PATH (model via opencode's own config) |
+| **opencode** | `opencode run ...` CLI (daemon preferred, see below) | `opencode` in PATH |
 | **llm** | Direct LLM call via config `agents.coder` | Always available (fallback) |
 
 Override per-skill via `skill-config.skill-creator.coding_backend` in config.yaml,
 or globally via `coding.backend`.
 
 After `implement`, run `validate` and `compile` separately.
+
+### Opencode daemon (preferred)
+
+When the opencode backend is selected and `coding.opencode_daemon.enabled` is
+true (the default), the first call spawns a long-lived `opencode serve`
+process (one per skill directory) and reuses a single opencode session per
+user across calls. This means:
+
+- A follow-up question ("schick mal den diff", "und was ist mit X?")
+  continues the same conversation — the model has the previous turns
+  in its context window.
+- The 5–10 s cost of starting `opencode serve` is paid only once per
+  skill per process, not per `implement` / `fix` call.
+
+The session id is included in `creator.py`'s JSON output as
+`session_id`; the SkillRunner's direct-passthrough stashes it on the
+context so a follow-up delegation to the same skill reuses it.
+
+Disable the daemon by setting `coding.opencode_daemon.enabled: false` in
+`config.yaml` (or `OPENCODE_SERVER_URL` to point at an externally
+managed server). When the daemon is disabled or fails to start, the
+backend transparently falls back to the one-shot `opencode run`
+subprocess so the skill always has *some* working path.
 
 ## Fix (coding backend)
 

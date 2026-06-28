@@ -26,16 +26,17 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   shows the current backend and CLI availability.
 - Both coding CLIs are bundled in the images — `opencode` in the Alpine image,
   `opencode` + `aider` in the Debian VoIP image (the production build).
-- **Workspace git: monthly GC pass** (`pawlia/workspace_git.py:monthly_gc`).
-  Daily/weekly squashes consolidate the commit graph but leave the old blobs
-  reachable from the reflog, so the remote repo never actually shrank. The
-  new monthly pass runs `reflog expire --expire=now --all` + `gc --aggressive
-  --prune=now` + `repack -ad` and force-pushes with `--force-with-lease`.
-  Configurable via `workspace.git.monthly_gc_day` (default 1) and
-  `monthly_gc_time` (default 23:45). Refuses to run with uncommitted changes.
-  Local `.git` size before/after is logged.
 
 ### Changed
+- **Workspace git support removed entirely.** The auto-commit + daily/weekly
+  squash scheduler, the `workspace-git` skill, `pawlia/workspace_git.py`,
+  and all related config keys (`workspace.git.*`) are gone. Multi-device
+  workspace sync is now expected to happen out-of-band (e.g. syncthing).
+  The motivation: a workspace was once misconfigured with a hallucinated
+  remote URL by the LLM, and a force-pushed the user's vault to a public
+  GitHub repo. Out-of-band sync removes the attack surface. Existing
+  `jobs.json` entries `job-workspace-git-push` and `job-workspace-git-pull`
+  are no-ops (callers will fail at `git push origin`); remove them.
 - VoIP endpointing is now **fully decoupled between quiet and loud
   environments** across all three axes — relative-energy pause
   (`speech_pause_ratio` / `high_noise_pause_ratio`), silence trail
@@ -99,11 +100,11 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   smoke test at the latest. `bubblewrap` added to both Dockerfiles.
 - `attach_file` now accepts `/tmp` paths so generated throwaway artefacts
   (e.g. a rain-radar PNG) can be attached without being written into the
-  workspace git tree.
+  workspace.
 - File / image attachments over Matrix, Telegram, and Discord.
 - Incoming files and images are saved to `<workspace>/Downloads/` and tracked
   in `downloads_index.json` (kept outside the workspace so it does not
-  pollute the workspace git repo).
+  clutter the user's vault).
 - `attach_file` direct tool — the LLM can re-attach a previously received or
   generated file (e.g. a rain-radar GIF) to its next reply. Path is validated
   against the workspace + `attachments.extra_allowed_roots`; symlinks and

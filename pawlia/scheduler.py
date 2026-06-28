@@ -339,20 +339,6 @@ class Scheduler:
         self._boot_time = time.monotonic()
         self._last_activity: Dict[str, float] = {}
 
-        # Git config
-        git_cfg = self._config.get("workspace", {}).get("git", {})
-        self._git_enabled = git_cfg.get("enabled", False)
-        self._git_daily_squash_time = git_cfg.get("daily_squash_time", "23:00")
-        self._git_weekly_squash_day = int(git_cfg.get("weekly_squash_day", 6))  # 0=Mon, 6=Sun
-        self._git_weekly_squash_time = git_cfg.get("weekly_squash_time", "23:30")
-        self._git_monthly_gc_day = int(git_cfg.get("monthly_gc_day", 1))  # 1..28, day of month
-        self._git_monthly_gc_time = git_cfg.get("monthly_gc_time", "23:45")
-        self._git_push = git_cfg.get("push", False)
-        self._git_daily_done: Dict[str, str] = {}   # user_id → date of last daily squash
-        self._git_weekly_done: Dict[str, str] = {}   # user_id → week of last weekly squash
-        self._git_monthly_done: Dict[str, str] = {}   # user_id → "YYYY-MM" of last monthly gc
-        self._apply_git_config()
-
         # Recording rotation config
         rec_cfg = self._config.get("voip", {}).get("recording", {}) if self._config else {}
         self._rec_rotation_enabled = rec_cfg.get("rotate_enabled", True)
@@ -378,18 +364,6 @@ class Scheduler:
         self._jobs = None
         self._task_reminders = None
         self._memory_indexer = None
-        self._apply_git_config()
-
-    def _apply_git_config(self) -> None:
-        """Load git-related settings from the current config."""
-        git_cfg = self._config.get("workspace", {}).get("git", {})
-        self._git_enabled = git_cfg.get("enabled", False)
-        self._git_daily_squash_time = git_cfg.get("daily_squash_time", "23:00")
-        self._git_weekly_squash_day = int(git_cfg.get("weekly_squash_day", 6))  # 0=Mon, 6=Sun
-        self._git_weekly_squash_time = git_cfg.get("weekly_squash_time", "23:30")
-        self._git_monthly_gc_day = int(git_cfg.get("monthly_gc_day", 1))  # 1..28
-        self._git_monthly_gc_time = git_cfg.get("monthly_gc_time", "23:45")
-        self._git_push = git_cfg.get("push", False)
 
     def register(self, callback: NotifyCallback) -> None:
         self._callbacks.append(callback)
@@ -574,14 +548,6 @@ class Scheduler:
                     except Exception as e:
                         logger.error("Memory indexing failed for %s: %s", user_id, e)
 
-        # ── Workspace Git (auto-commit, daily/weekly squash) ──
-        if self._git_enabled:
-            for user_id in user_ids:
-                try:
-                    await self._git_sync(user_id)
-                except Exception as e:
-                    logger.error("Git sync failed for %s: %s", user_id, e)
-
         # ── Recording rotation (daily) ──
         if self._rec_rotation_enabled:
             today = datetime.now().strftime("%Y-%m-%d")
@@ -592,79 +558,6 @@ class Scheduler:
                     self._rec_last_rotation = today
                 except Exception as e:
                     logger.error("Recording rotation failed: %s", e)
-
-    async def _git_sync(self, user_id: str) -> None:
-        """Auto-commit workspace changes and run daily/weekly squash + monthly GC when due."""
-        from pawlia.workspace_git import (
-            auto_commit, daily_squash, ensure_repo, monthly_gc, pull, push, weekly_squash,
-        )
-
-        workspace = os.path.join(self.session_dir, user_id, "workspace")
-        if not os.path.isdir(workspace):
-            return
-
-        # Ensure git repo exists
-        if not ensure_repo(workspace):
-            return
-
-        # Commit → push → pull order: push local commits to remote before
-        # pulling, so ff-only always works and reset --hard never discards work.
-        committed = auto_commit(workspace)
-
-        if self._git_push:
-            if committed:
-                push(workspace)
-            # Pull after push so remote already contains our changes and
-            # ff-only merge succeeds without needing a hard reset.
-            pull(workspace)
-
-        now = datetime.now()
-        today = now.strftime("%Y-%m-%d")
-        _, week, _ = now.isocalendar()
-        week_key = f"{now.year}-W{week:02d}"
-        month_key = f"{now.year}-{now.month:02d}"
-
-        # Daily squash
-        try:
-            ds_hour, ds_min = (int(x) for x in self._git_daily_squash_time.split(":"))
-        except ValueError:
-            ds_hour, ds_min = 23, 0
-
-        if now.hour == ds_hour and now.minute == ds_min and self._git_daily_done.get(user_id) != today:
-            if daily_squash(workspace):
-                self._git_daily_done[user_id] = today
-                if self._git_push:
-                    push(workspace)
-
-        # Weekly squash
-        try:
-            ws_hour, ws_min = (int(x) for x in self._git_weekly_squash_time.split(":"))
-        except ValueError:
-            ws_hour, ws_min = 23, 30
-
-        if (now.weekday() == self._git_weekly_squash_day
-                and now.hour == ws_hour and now.minute == ws_min
-                and self._git_weekly_done.get(user_id) != week_key):
-            if weekly_squash(workspace):
-                self._git_weekly_done[user_id] = week_key
-                if self._git_push:
-                    push(workspace)
-
-        # Monthly GC — actually shrinks the remote. Daily/weekly squashes use
-        # ``reset --soft`` and leave the old blobs reachable via the reflog,
-        # so the remote stays the same size until this runs.
-        try:
-            mg_hour, mg_min = (int(x) for x in self._git_monthly_gc_time.split(":"))
-        except ValueError:
-            mg_hour, mg_min = 23, 45
-
-        if (now.day == self._git_monthly_gc_day
-                and now.hour == mg_hour and now.minute == mg_min
-                and self._git_monthly_done.get(user_id) != month_key):
-            if monthly_gc(workspace):
-                self._git_monthly_done[user_id] = month_key
-                if self._git_push:
-                    push(workspace)
 
     async def _summarize_user(self, user_id: str) -> None:
         if not self._app or not self._app.memory:

@@ -251,7 +251,7 @@ On startup a random access token is printed to the console unless `token:` is se
 | Providers | View and edit provider config (API base, key, timeout) |
 | Models | View and edit model definitions (incl. `context_size`, `max_tool_turns`, `summarize_at_tokens`) |
 | Skills | List all skills, upload new ones (ZIP), configure skill settings, delete user skills |
-| Settings | Edit interface, TTS, transcription, VoIP, workspace-git config |
+| Settings | Edit interface, TTS, transcription, VoIP config |
 | Memory | Browse per-user memory state and the Dream Wiki graph |
 
 ### Commands
@@ -284,7 +284,7 @@ Commands use `/` as prefix (same as CLI/Telegram):
 | `POST` | `/api/skills/upload` | Upload a skill ZIP |
 | `DELETE` | `/api/skills/{name}` | Delete a user skill |
 | `GET` / `POST` | `/api/skill-config` | Read/write skill configuration |
-| `GET` / `POST` | `/api/settings` | Read/write interface / TTS / transcription / workspace-git config |
+| `GET` / `POST` | `/api/settings` | Read/write interface / TTS / transcription / VoIP config |
 | `GET` | `/api/setup-status` | Whether the bootstrap wizard still has work to do |
 | `POST` | `/api/setup/auto` | Auto-detect provider, pull a default model, write config |
 | `GET` | `/api/memory/users` | List users with persisted memory |

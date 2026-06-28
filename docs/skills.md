@@ -20,7 +20,6 @@ When the user sends a message, the dispatcher (ChatAgent) decides whether to cal
 | `automation` | Scheduled jobs (cron-like recurring tasks) and event-bound checklists | — |
 | `config` | Read/write config files in the workspace | — |
 | `skill-creator` | Create, scaffold, validate, and package new skills; manage centralized credentials | — |
-| `workspace-git` | Commit, squash, push, and pull the workspace git repo on demand | — |
 
 ## Custom skills
 

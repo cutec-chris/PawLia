@@ -91,12 +91,12 @@ def _build_history(system_prompt: str) -> list:
         HumanMessage(content="Sync mal kurz den Workspace."),
         AIMessage(content=_replay_block(
             "Erledigt, der Workspace ist aktuell.",
-            "workspace-git", "sync", "Already up to date",
+            "files", "sync", "Already up to date",
         )),
         HumanMessage(content="Und push die letzten Änderungen."),
         AIMessage(content=_replay_block(
             "Gepusht, alles synchron.",
-            "workspace-git", "push", "Everything up-to-date",
+            "files", "push", "Everything up-to-date",
         )),
         HumanMessage(content="Alles klar, danke. Wie ist der Stand jetzt insgesamt?"),
     ]

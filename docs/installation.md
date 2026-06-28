@@ -180,7 +180,7 @@ All enabled interfaces run simultaneously in server mode. The OpenAI-compatible 
 | `tts` | Text-to-speech (Piper or edge-tts) |
 | `voip` | Matrix VoIP call settings (silence detection, barge-in) |
 | `caldav` | Sync workspace `calendar/*.md` events to a Radicale/Nextcloud server |
-| `workspace` / `workspace-git` | Per-user workspace template + auto-commit/squash |
+| `workspace` | Per-user workspace template (Obsidian vault) |
 | `workspace-search` | BM25 search across workspace files for system-prompt injection |
 | `skill-config` | Per-skill runtime config (e.g. `memory.rag_backend`, `perplexica.url`) |
 | `skill-install` | Allow workspace-local skills (`allow_workspace: true`) |

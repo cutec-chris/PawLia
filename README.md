@@ -28,7 +28,7 @@ PawLia brings persistent memory, multi-user sessions, and extensible skills to (
 - **Threads** — isolate side conversations in Telegram forum topics or Matrix threads, each with its own context, model, and backend
 - **Multi-user** — every user gets their own session with separate memory, history, and model settings
 - **Remembers** — conversation history and user facts persisted as Markdown, with token-aware automatic summarization (configurable per model) and a Dream Wiki that compiles conversations into a structured, interlinked knowledge base overnight
-- **Obsidian vault** — the workspace is a native Obsidian vault: events use [Full Calendar](https://github.com/obsidian-community/obsidian-full-calendar) frontmatter, tasks use [Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) emoji format, the Dream Wiki creates interlinked topic pages. Optional Git sync with auto-commit (max 1/5min), daily squash, and weekly squash keeps the repo compact
+- **Obsidian vault** — the workspace is a native Obsidian vault: events use [Full Calendar](https://github.com/obsidian-community/obsidian-full-calendar) frontmatter, tasks use [Obsidian Tasks](https://github.com/obsidian-tasks-group/obsidian-tasks) emoji format, the Dream Wiki creates interlinked topic pages. Multi-device sync is done out-of-band (e.g. syncthing)
 - **Switch models on the fly** — `/model qwen3:4b` swaps the LLM at runtime, per-thread or session-wide. Use `/model <path> <name>` (e.g. `/model chat smart`) to override per agent role
 - **Reload runtime config** — `/reload` picks up changed model/provider config and bundled skills without a full process restart
 - **Extensible** — drop a `SKILL.md` in `skills/user/` and the agent picks it up automatically
@@ -64,7 +64,7 @@ All interfaces run simultaneously in server mode.
 
 ## Skills
 
-Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and it loads automatically. Bundled: `searxng` · `perplexica` · `browser` · `files` · `organizer` · `automation` · `memory` · `researcher` · `config` · `skill-creator` · `workspace-git`.
+Skills are self-contained sub-agents — drop a `SKILL.md` in `skills/user/` and it loads automatically. Bundled: `searxng` · `perplexica` · `browser` · `files` · `organizer` · `automation` · `memory` · `researcher` · `config` · `skill-creator`.
 
 → [docs/skills.md](docs/skills.md)
 
