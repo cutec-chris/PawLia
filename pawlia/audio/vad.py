@@ -581,17 +581,30 @@ class SpeechDetector:
         return self.SPEECH_PAUSE_RATIO
 
     def effective_max_chunk_seconds(self, base_cap: float) -> float:
-        """Hard max-chunk cap for the current noise conditions.
+        """Hard max-chunk (force-flush) cap for the current noise conditions.
 
-        Shortened to ``HIGH_NOISE_MAX_CHUNK_SECONDS`` in a loud environment so
-        the worst-case wait is bounded when no pause can be detected (the caller
-        otherwise speaks into the void for the full quiet-call budget). A cap the
-        operator has disabled (``base_cap <= 0``) stays disabled.
+        The quiet and loud caps are fully independent — neither bounds the other,
+        consistent with the silence trail (:meth:`adaptive_silence_seconds`) and
+        the relative pause (:meth:`effective_pause_ratio`):
+
+          * quiet → ``base_cap`` (the operator's ``vad_max_chunk_seconds``).
+          * loud (``noise_is_high``) → ``HIGH_NOISE_MAX_CHUNK_SECONDS`` directly,
+            *not* ``min()``'d against the quiet base. Typically shorter (bound the
+            worst-case wait in wind/train when no pause is detectable), but it may
+            also be set *longer* than the quiet cap if that is what the operator
+            wants — the two are tuned separately.
+
+        Two opt-outs are preserved: an operator who disabled the cap entirely
+        (``base_cap <= 0``) keeps it disabled in every condition, and a disabled
+        loud cap (``HIGH_NOISE_MAX_CHUNK_SECONDS <= 0``) falls back to the quiet
+        ``base_cap`` rather than running uncapped.
         """
         if base_cap <= 0.0:
             return 0.0
-        if self.noise_is_high and self.HIGH_NOISE_MAX_CHUNK_SECONDS > 0.0:
-            return min(base_cap, self.HIGH_NOISE_MAX_CHUNK_SECONDS)
+        if self.noise_is_high:
+            if self.HIGH_NOISE_MAX_CHUNK_SECONDS > 0.0:
+                return self.HIGH_NOISE_MAX_CHUNK_SECONDS
+            return base_cap
         return base_cap
 
     def adaptive_silence_seconds(

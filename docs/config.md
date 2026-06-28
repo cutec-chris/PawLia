@@ -251,7 +251,10 @@ Shared VoIP behavior is configured globally so the same settings can be reused b
 ```yaml
 voip:
   silence_threshold: 0.018
-  silence_seconds: 2.2  # default — silence that ends a chunk
+  silence_seconds: 2.2  # quiet base — silence that ends a chunk
+  silence_growth_per_sec: 0.12  # +pause tolerance per second already spoken (0 = fixed)
+  silence_seconds_max: 3.0  # cap for the grown quiet pause tolerance
+  speech_pause_ratio: 0.25  # quiet relative-energy pause (0 = off in quiet only)
   bargein_rms_threshold: 0.05  # raw RMS that interrupts TTS playback
   queue_speech_while_thinking: false  # discard non-keyword speech while thinking (default)
   min_speech_seconds: 0.4
@@ -262,7 +265,11 @@ voip:
   min_speech_like_ratio: 0.08
   min_consecutive_speechlike_frames: 4
   min_resume_speech_frames: 3
-  vad_max_chunk_seconds: 15  # force-flush after 15s (0 disables)
+  vad_max_chunk_seconds: 15  # quiet force-flush cap (0 disables)
+  high_noise_floor: 0.03  # noise floor above which the loud-environment knobs apply
+  high_noise_pause_ratio: 0.40  # loud relative-energy pause (independent of speech_pause_ratio)
+  high_noise_silence_seconds_max: 1.8  # loud silence trail (independent of silence_seconds)
+  high_noise_max_chunk_seconds: 8  # loud force-flush cap (independent of vad_max_chunk_seconds)
   pre_speech_seconds: 0.6
   webrtcvad_enabled: true
   webrtcvad_mode: 2
@@ -282,7 +289,10 @@ voip:
 | Key | Description |
 |-----|-------------|
 | `voip.silence_threshold` | Baseline per-frame RMS threshold for silence detection. Acts as a floor: the effective threshold is raised automatically when background noise is present (see adaptive silence below) |
-| `voip.silence_seconds` | Silence duration that closes the current VoIP speech chunk |
+| `voip.silence_seconds` | Quiet-environment silence duration that closes the current VoIP speech chunk (the base; grows with `silence_growth_per_sec`). The loud-environment trail is `high_noise_silence_seconds_max`, tuned independently |
+| `voip.silence_growth_per_sec` | Extra quiet-environment pause tolerance granted per second the caller has already been speaking, so a long sentence with thinking pauses is not chopped (default `0.12`). `0` = fixed endpoint at `silence_seconds` |
+| `voip.silence_seconds_max` | Cap on the grown quiet pause tolerance (default `3.0`) |
+| `voip.speech_pause_ratio` | Quiet-environment relative-energy pause: a frame below this fraction of the running speech level counts as a pause even if it reads spectrally speech-like, letting a chunk close on a soft trail-off (default `0.25`). **`0` switches the relative-energy pause off in quiet rooms only** (a quiet chunk then closes only on the silence trail / max-chunk cap) — the loud regime keeps its own `high_noise_pause_ratio` |
 | `voip.min_speech_seconds` | Minimum chunk duration before deeper speech/noise analysis runs |
 | `voip.min_active_speech_ratio` | Minimum share of active 20 ms frames required before a chunk is sent to STT |
 | `voip.min_consecutive_speech_frames` | Minimum sustained run of active 20 ms frames required before a chunk is sent to STT |
@@ -291,7 +301,11 @@ voip:
 | `voip.min_speech_like_ratio` | Minimum share of frames that must simultaneously be active and speech-like before a chunk is sent to STT |
 | `voip.min_consecutive_speechlike_frames` | Minimum sustained run of speech-like frames required before a chunk is sent to STT |
 | `voip.min_resume_speech_frames` | Consecutive speech-like frames required to break an in-progress pause once silence has already started accumulating. Automatically scaled up in noisy environments so brief noise bursts cannot reset the silence timer |
-| `voip.vad_max_chunk_seconds` | Force-flush an open speech buffer after this many seconds regardless of pause detection (default `15`). `0` disables the limit. Acts as a safety net in environments where noise keeps resetting the silence counter; in loud environments the noise-coupled endpointing caps the chunk even shorter |
+| `voip.vad_max_chunk_seconds` | Quiet-environment force-flush cap: close an open speech buffer after this many seconds regardless of pause detection (default `15`). `0` disables the limit. A safety net where noise keeps resetting the silence counter, but with `speech_pause_ratio: 0` it also becomes the primary endpoint for long quiet monologues — raise it (e.g. `25`) so a long sentence is not chopped mid-thought. The loud cap is `high_noise_max_chunk_seconds`, tuned independently |
+| `voip.high_noise_floor` | Noise-floor threshold (default `0.03`) above which the environment counts as *loud* (wind/road/train) and the `high_noise_*` knobs below take over from their quiet counterparts |
+| `voip.high_noise_pause_ratio` | Loud-environment relative-energy pause fraction (default `0.40`), independent of `speech_pause_ratio`. Higher than the quiet value so a real pause registers against the speaker's own (AGC-amplified) loudness instead of running to the cap. `0` = off in loud only |
+| `voip.high_noise_silence_seconds_max` | Loud-environment silence trail (default `1.8`), flat (no adaptive growth) and fully independent of `silence_seconds` — neither bounds the other |
+| `voip.high_noise_max_chunk_seconds` | Loud-environment force-flush cap (default `8`), fully independent of `vad_max_chunk_seconds` — neither bounds the other. Usually shorter (bounds the worst-case wait when no pause is detectable in noise) but may be set longer. `0` = no separate loud cap (falls back to `vad_max_chunk_seconds`) |
 | `voip.pre_speech_seconds` | Audio lead-in to prepend before detected speech so STT keeps the beginnings of words |
 | `voip.webrtcvad_enabled` | Enable an additional lightweight WebRTC speech detector before sending audio to STT |
 | `voip.webrtcvad_mode` | WebRTC VAD aggressiveness from `0` (lenient) to `3` (strict) |
@@ -325,6 +339,18 @@ Once a pause has started, PawLia also requires a short run of consecutive speech
 When a new speech chunk starts, PawLia also prepends a short rolling pre-buffer from immediately before the trigger frame. This helps STT keep soft or fast word onsets that begin just before the VAD crosses its threshold.
 
 `silence_threshold` remains the configurable floor; the adaptive part only ever raises it, never lowers it.
+
+### Noise-coupled endpointing (quiet vs loud)
+
+In a persistently loud environment (noise floor above `high_noise_floor`, e.g. wind, road or train noise) the patient quiet-call endpointing stops working: the noise fills the gaps between words, so the silence counter never advances and chunks only ever close on the max-chunk cap. PawLia therefore couples the endpoint to the noise floor — aggressive when loud, patient when quiet — across three **fully independent** axes. Neither side bounds the other, so a setup can be patient in a quiet room yet snappy in wind (or vice versa):
+
+| Axis | Quiet knob | Loud knob |
+|------|-----------|-----------|
+| Relative-energy pause | `speech_pause_ratio` | `high_noise_pause_ratio` |
+| Silence trail | `silence_seconds` (+`silence_growth_per_sec`, up to `silence_seconds_max`) | `high_noise_silence_seconds_max` (flat) |
+| Max-chunk force-flush cap | `vad_max_chunk_seconds` | `high_noise_max_chunk_seconds` |
+
+Each quiet/loud pair is set independently. Setting a quiet knob to `0` (where supported, e.g. `speech_pause_ratio`) disables it in quiet rooms only; the loud counterpart is unaffected. This is the recommended fix for "PawLia cuts me off in a quiet room": set `speech_pause_ratio: 0` so a soft mid-sentence trail-off no longer closes the chunk, and raise `vad_max_chunk_seconds` so long quiet monologues are not force-flushed mid-thought, while wind/train calls keep their tighter `high_noise_*` values.
 
 ### Adaptive response delay
 

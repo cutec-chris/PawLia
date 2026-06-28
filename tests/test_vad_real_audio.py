@@ -575,11 +575,30 @@ def test_effective_max_chunk_shrinks_in_noise():
     d = _detector()
     base_cap = 15.0
     d._noise_floor = 0.01
-    assert d.effective_max_chunk_seconds(base_cap) == base_cap   # quiet: unchanged
+    assert d.effective_max_chunk_seconds(base_cap) == base_cap   # quiet: the quiet base
     d._noise_floor = 0.08
     assert d.effective_max_chunk_seconds(base_cap) == pytest.approx(
-        min(base_cap, d.HIGH_NOISE_MAX_CHUNK_SECONDS))            # loud: shortened
-    assert d.effective_max_chunk_seconds(base_cap) < base_cap
+        d.HIGH_NOISE_MAX_CHUNK_SECONDS)                           # loud: the loud cap
+    assert d.effective_max_chunk_seconds(base_cap) < base_cap     # (default loud < quiet)
+
+
+def test_quiet_and_loud_max_chunk_are_independent():
+    """The force-flush cap is fully separate for quiet vs loud: neither bounds
+    the other. A long quiet cap with a short loud cap, or — if the operator wants
+    it — a LONGER loud cap than the quiet one (was impossible while loud was
+    min()'d against the quiet base)."""
+    d = _detector()
+    # patient quiet, snappy loud
+    d.HIGH_NOISE_MAX_CHUNK_SECONDS = 8.0
+    d._noise_floor = 0.01
+    assert d.effective_max_chunk_seconds(25.0) == pytest.approx(25.0)
+    d._noise_floor = 0.08
+    assert d.effective_max_chunk_seconds(25.0) == pytest.approx(8.0)
+    # loud cap may exceed the quiet base — decoupled, no min()
+    d.HIGH_NOISE_MAX_CHUNK_SECONDS = 20.0
+    quiet = d.effective_max_chunk_seconds(8.0)  # noise still high
+    assert quiet == pytest.approx(20.0)
+    assert quiet > 8.0
 
 
 def test_effective_max_chunk_disabled_stays_disabled():
@@ -587,6 +606,15 @@ def test_effective_max_chunk_disabled_stays_disabled():
     d = _detector()
     d._noise_floor = 0.08
     assert d.effective_max_chunk_seconds(0.0) == 0.0
+
+
+def test_loud_max_chunk_disabled_falls_back_to_quiet_base():
+    """A disabled loud cap (HIGH_NOISE_MAX_CHUNK_SECONDS <= 0) falls back to the
+    quiet base_cap in noise rather than running uncapped."""
+    d = _detector()
+    d.HIGH_NOISE_MAX_CHUNK_SECONDS = 0.0
+    d._noise_floor = 0.08
+    assert d.effective_max_chunk_seconds(15.0) == pytest.approx(15.0)
 
 
 def _speechlike_tone(seconds, sr=48000, level=0.3):

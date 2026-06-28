@@ -170,8 +170,14 @@ interfaces:
 #                                       # high_noise_pause_ratio independently.
 #   min_resume_speech_frames: 3       # consecutive speech-like frames to break a running pause
 #                                       # (auto-scaled up in noisy environments — see adaptive silence)
-#   vad_max_chunk_seconds: 15          # force-flush open speech buffer after this many seconds
-#                                       # (safety net so sustained wind can't hold a chunk open; 0 = disabled)
+#   vad_max_chunk_seconds: 15          # QUIET/normal-environment force-flush cap: close an open
+#                                       # speech buffer after this many seconds even without a pause.
+#                                       # Safety net so sustained noise can't hold a chunk open, but
+#                                       # with speech_pause_ratio=0 (relative pause off) it also becomes
+#                                       # the primary endpoint for long quiet monologues — raise it
+#                                       # (e.g. 25) so a long sentence isn't chopped mid-thought.
+#                                       # The loud cap is high_noise_max_chunk_seconds (independent).
+#                                       # 0 = disabled.
 #   # --- noise-coupled endpointing: in a persistently loud environment
 #   #     (noise_floor > high_noise_floor, e.g. wind/train) the patient values
 #   #     above stop working (noise fills the gaps, the silence counter never
@@ -181,8 +187,11 @@ interfaces:
 #                                       # speech_pause_ratio (0 = off in loud only)
 #   high_noise_silence_seconds_max: 1.8 # LOUD-environment silence trail — flat (no adaptive growth),
 #                                       # fully independent of the quiet silence_seconds
-#   high_noise_max_chunk_seconds: 8    # shorter force-flush cap while loud — bounds the worst-case
-#                                       # wait when no pause is detectable (0 = no extra cap)
+#   high_noise_max_chunk_seconds: 8    # LOUD-environment force-flush cap, fully independent of the
+#                                       # quiet vad_max_chunk_seconds (neither bounds the other).
+#                                       # Usually shorter — bounds the worst-case wait when no pause is
+#                                       # detectable in wind/train — but may be set longer if wanted.
+#                                       # 0 = no separate loud cap (falls back to vad_max_chunk_seconds)
 #   pre_speech_seconds: 0.6           # prepend this much audio before detected speech (onset safety)
 #   webrtcvad_enabled: true           # extra lightweight speech detector
 #   webrtcvad_mode: 2                 # 0..3, higher = stricter
