@@ -250,7 +250,7 @@ class SkillRunnerAgent(BaseAgent):
         """Strip a trailing ``skill`` token from a captured skill name."""
         return name[:-6].strip() if name.lower().endswith(" skill") else name
 
-    def _try_direct_coding_backend(self, query: str) -> Optional[str]:
+    async def _try_direct_coding_backend(self, query: str) -> Optional[str]:
         """If the query is a clear "write/fix code for <skill>" request,
         invoke ``creator.py implement|fix`` directly and return its output.
 
