@@ -229,11 +229,20 @@ class SkillRunnerAgent(BaseAgent):
     # intentionally absent — those are read-only / structural operations
     # where the LLM loop is fine.
     _DIRECT_CODE_VERBS = (
+        # English
         "implement", "rewrite", "refactor",
         "improve", "enhance", "extend", "update", "modernize",
         "fix", "repair", "debug",
         "create", "scaffold", "build",
         "add",  # "add a feature to <skill>"
+        # German imperatives (du-Form, singular). The German
+        # dispatcher often appends the verb after a description, so
+        # these must be recognised anywhere in the query — not just
+        # at the start.
+        "implementiere", "repariere", "behebe", "verbessere",
+        "aktualisiere", "erstelle", "baue", "erweitere",
+        "korrigiere", "debugge", "modernisiere",
+        "fixen",  # German colloquial infinitive: "den skill fixen"
     )
 
     # Phrases that disqualify a query from direct passthrough even if a
@@ -277,13 +286,13 @@ class SkillRunnerAgent(BaseAgent):
         if any(b in q_lower for b in self._DIRECT_CODE_BLOCKERS):
             return None
 
-        # Find an opening code-verb. We look for any of the verbs at a
-        # word boundary near the start of the query (first ~40 chars are
-        # enough; the dispatcher always prepends a verb). Case-insensitive.
-        head = q_lower[:80]
+        # Find a code-verb anywhere in the query. German dispatchers
+        # often append the verb after a description ("Der X Skill ...
+        # Bitte behebe das."), so a head-only search would miss them.
+        # Case-insensitive.
         verb_found: Optional[str] = None
         for verb in self._DIRECT_CODE_VERBS:
-            m = re.search(rf"\b{re.escape(verb)}\b", head)
+            m = re.search(rf"\b{re.escape(verb)}\b", q_lower)
             if m:
                 verb_found = verb
                 break
@@ -399,14 +408,15 @@ class SkillRunnerAgent(BaseAgent):
                 asyncio.ensure_future(
                     self.on_step(f"Coding-Backend ({mode}): {name}")
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                self.logger.debug("on_step scheduling failed: %s", exc)
 
-        # Run synchronously — the parent already runs us via asyncio,
-        # and creator.py + opencode typically take 30–120s. Use a worker
-        # thread to avoid blocking the event loop.
+        # creator.py + opencode typically take 30–120s. Run in a worker
+        # thread so the asyncio event loop stays responsive (Matrix
+        # messages, heartbeats, other user requests).
         try:
-            proc = subprocess.run(
+            proc = await asyncio.to_thread(
+                subprocess.run,
                 cmd,
                 capture_output=True,
                 text=True,
@@ -434,12 +444,21 @@ class SkillRunnerAgent(BaseAgent):
             )
             return None  # let the LLM loop surface a real error
 
-        # creator.py prints a JSON result on stdout. Parse it so we can
-        # return a concise, user-facing summary; if parsing fails, return
-        # the raw stdout verbatim.
-        try:
-            payload = json.loads(out.splitlines()[-1])
-        except (ValueError, IndexError):
+        # creator.py prints a JSON result on stdout, but other lines
+        # (npm deprecation warnings, Python warnings, blank lines) may
+        # follow. Walk backwards and take the first line that parses as
+        # JSON; fall back to the raw tail if none do.
+        payload = None
+        for line in reversed(out.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+                break
+            except ValueError:
+                continue
+        if payload is None:
             return out[-2000:]
 
         backend = payload.get("backend", "?")

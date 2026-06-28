@@ -373,15 +373,11 @@ einwandfrei" after eyeballing null output — that ships a broken command. Re-re
 the command's wiring (is its result actually written into the output envelope?
 is `success` set?) and loop back to Phase 2.
 
-**Commit atomically when green.** If you have an out-of-band workspace sync
-(e.g. syncthing), make sure your own work is in a clean state the moment Phase 3
-is green — half-finished edits may otherwise get picked up:
-```
-git -C "$PAWLIA_SESSION_DIR/$PAWLIA_USER_ID/workspace" \
-  add skills/<name> && git commit -m "fix(<name>): <what>"
-```
-Leave the workspace either fully green+committed or rolled back — never broken
-and uncommitted across a pause.
+**Commit atomically when green.** Workspace sync (syncthing) handles cross-host
+propagation, so no local `git commit` is required from the sub-agent. Just make
+sure your own work is in a clean state the moment Phase 3 is green —
+half-finished edits may otherwise get picked up. Leave the workspace either
+fully green or rolled back — never broken and uncommitted across a pause.
 
 Green → done, report a short summary to the user. Red → one loop back to
 Phase 2, same budget. Never go back to Phase 1 from here.
