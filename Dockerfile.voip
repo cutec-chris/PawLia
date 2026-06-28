@@ -55,6 +55,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+# Copy the constraints file early so the coding-backend installs below can
+# pin numpy / onnxruntime / etc. to versions that ship cp314 wheels.
+COPY constraints.txt constraints.txt
+ENV PIP_CONSTRAINT=/app/constraints.txt
+
 # Optional coding backends for the skill-creator (config: coding.backend).
 # Baked in so prod always has them; the config skill can also install at
 # runtime when missing. opencode is the preferred agentic backend; aider is
@@ -67,10 +73,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
 RUN npm install -g opencode-ai \
     && pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir -c /app/constraints.txt aider-chat
-
-WORKDIR /app
-COPY constraints.txt constraints.txt
-ENV PIP_CONSTRAINT=/app/constraints.txt
 
 # Python-Packages aus Builder kopieren
 COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
