@@ -61,11 +61,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl gnupg \
 # the CLI fallback. setuptools/wheel are needed in the runtime stage because
 # the python:3.14-slim-bookworm base image does not ship them, and the
 # pinned versions it would otherwise pull in fail on 3.14
-# (pkgutil.ImpImporter was removed in 3.12). --upgrade pulls a recent
-# setuptools that knows about the 3.14 stdlib.
+# (pkgutil.ImpImporter was removed in 3.12). The constraints file pins
+# numpy / onnxruntime / etc. to versions that have 3.14 wheels — without it
+# pip falls back to building numpy from source and crashes the same way.
 RUN npm install -g opencode-ai \
     && pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir aider-chat
+    && pip install --no-cache-dir -c /app/constraints.txt aider-chat
 
 WORKDIR /app
 COPY constraints.txt constraints.txt
