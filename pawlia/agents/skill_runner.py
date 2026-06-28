@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -192,6 +194,19 @@ class SkillRunnerAgent(BaseAgent):
         self._broken_error_excerpt = ""
         self._broken_failing_command = ""
         self._broken_skill = False
+
+        # Fast path: if this is the skill-creator and the query looks like a
+        # "implement/fix <skill>" instruction, hand it straight to
+        # ``creator.py implement|fix`` (which runs the configured coding
+        # backend, e.g. opencode) instead of letting the sub-agent LLM
+        # iterate manually for 10+ tool calls. Returns ``None`` for anything
+        # the pattern does not confidently match (config queries, sync ops,
+        # credential management, "validate"/"list" requests, …) so the
+        # normal LLM loop handles those.
+        direct = await self._try_direct_coding_backend(query)
+        if direct is not None:
+            return direct
+
         for attempt in range(1, self.MAX_RETRIES + 1):
             result = await self._attempt(query)
             if result.strip():
@@ -204,6 +219,253 @@ class SkillRunnerAgent(BaseAgent):
         if self._directives:
             return "\n".join(self._directives)
         return ""
+
+    # ------------------------------------------------------------------
+    # Direct coding-backend passthrough (skips the sub-agent LLM loop)
+    # ------------------------------------------------------------------
+
+    # Verbs that signal "I want code written/changed", not just inspection.
+    # ``validate``, ``list``, ``audit``, ``package``, ``compile`` etc. are
+    # intentionally absent — those are read-only / structural operations
+    # where the LLM loop is fine.
+    _DIRECT_CODE_VERBS = (
+        "implement", "rewrite", "refactor",
+        "improve", "enhance", "extend", "update", "modernize",
+        "fix", "repair", "debug",
+        "create", "scaffold", "build",
+        "add",  # "add a feature to <skill>"
+    )
+
+    # Phrases that disqualify a query from direct passthrough even if a
+    # code-verb is present. These are config/inspection operations that
+    # happen to use words like "fix" or "change" in a non-coding sense.
+    _DIRECT_CODE_BLOCKERS = (
+        "coding backend", "coding_backend", "backend to",
+        "sync --workspace", "sync workspace",
+        "check current", "show current",
+    )
+
+    @staticmethod
+    def _strip_skill_word(name: str) -> str:
+        """Strip a trailing ``skill`` token from a captured skill name."""
+        return name[:-6].strip() if name.lower().endswith(" skill") else name
+
+    def _try_direct_coding_backend(self, query: str) -> Optional[str]:
+        """If the query is a clear "write/fix code for <skill>" request,
+        invoke ``creator.py implement|fix`` directly and return its output.
+
+        Returns ``None`` when the query does not confidently match — callers
+        then fall back to the normal sub-agent LLM loop. Also returns
+        ``None`` for any skill other than ``skill-creator``.
+
+        The implementation is deliberately conservative: a false negative
+        just means the LLM loop handles it (status quo), while a false
+        positive would invoke the coding backend on something the user did
+        not want changed. When in doubt → ``None``.
+        """
+        if self.skill.name != "skill-creator":
+            return None
+
+        q = query.strip()
+        if not q:
+            return None
+
+        # Reject obvious config / sync queries up front — those use "fix"
+        # or "change" in a non-coding sense ("change the coding backend",
+        # "fix the sync") and must go through the LLM loop.
+        q_lower = q.lower()
+        if any(b in q_lower for b in self._DIRECT_CODE_BLOCKERS):
+            return None
+
+        # Find an opening code-verb. We look for any of the verbs at a
+        # word boundary near the start of the query (first ~40 chars are
+        # enough; the dispatcher always prepends a verb). Case-insensitive.
+        head = q_lower[:80]
+        verb_found: Optional[str] = None
+        for verb in self._DIRECT_CODE_VERBS:
+            m = re.search(rf"\b{re.escape(verb)}\b", head)
+            if m:
+                verb_found = verb
+                break
+        if not verb_found:
+            return None
+
+        # Disambiguate implement vs fix. Anything containing an error
+        # report ("error:", "fails with", "crashes", "traceback", "exit
+        # code") routes to ``fix``; otherwise ``implement``. ``fix`` is
+        # strictly more informative when error context is present (the
+        # backend uses it to target the root cause), so we err on the
+        # side of ``implement`` when unsure.
+        is_fix = bool(re.search(
+            r"\b(error|fails?|crash|traceback|exit code|broken|exception)\b",
+            q_lower,
+        ))
+        mode = "fix" if is_fix else "implement"
+
+        # Common words that are not skill names but can precede ``skill``
+        # ("the skill", "a skill", "new skill", "this skill" …). Captures
+        # matching one of these are skipped during name extraction below.
+        non_name_words = {
+            "the", "a", "an", "this", "that", "these", "those",
+            "new", "other", "every", "any", "some", "all",
+            "no",  # "no skill"
+        }
+
+        # Tokenise into hyphen-aware words so multi-part names like
+        # "skill-creator" survive as a single token.
+        tokens = re.findall(r"[a-z][a-z0-9_-]{2,59}", q_lower)
+
+        # (1) Look for an explicit "<name> skill" pair. Iterating tokens
+        #     (instead of regex finditer) avoids the pitfall where matching
+        #     "the skill" consumes the "skill" token so that a following
+        #     "creator skill" inside "skill-creator skill" gets captured
+        #     as the bare name "creator". With tokenisation the predecessor
+        #     of "skill" is the full previous token.
+        name: Optional[str] = None
+        rest = q
+        for i, tok in enumerate(tokens):
+            if tok == "skill" and i > 0:
+                prev = tokens[i - 1]
+                if prev in non_name_words:
+                    continue
+                # Skip if the predecessor is the code-verb itself
+                # ("create skill" with no name between them — let the
+                # LLM elicit the name from the user).
+                if prev == verb_found:
+                    continue
+                name = prev
+                # ``rest`` = everything after the "skill" token. Find
+                # its position in the original (case-preserved) query.
+                skill_pos = q_lower.find(f"{prev} skill") + len(prev) + len(" skill")
+                rest = q[skill_pos:]
+                break
+
+        if name is None:
+            # (2) Token right after the verb (allowing an optional
+            #     "the"/"a" article and an optional trailing colon).
+            m_after = re.search(
+                rf"\b{re.escape(verb_found)}\b\s+(?:the\s+|a\s+)?"
+                rf"([a-z][a-z0-9_-]{{2,59}})\s*?:?",
+                q_lower,
+            )
+            if m_after:
+                cand = m_after.group(1)
+                if cand not in non_name_words:
+                    name = cand
+                    rest = q[m_after.end():]
+
+        if not name:
+            # No skill name identified → don't guess, let the LLM handle it.
+            return None
+
+        # Clean up the task description: drop leading colons, dashes,
+        # "Use X backend."-style prefixes the chat agent sometimes adds,
+        # and surrounding whitespace.
+        task = re.sub(r"^\s*[:\-–—\s]+", "", rest).strip()
+        task = re.sub(r"^use\s+\S+\s+backend\.?\s*", "", task, flags=re.IGNORECASE)
+        if not task:
+            # Verb + skill but no actual instruction — let the LLM ask
+            # the user for clarification rather than firing off an empty
+            # implement call.
+            return None
+
+        # Resolve the script directory the same way SkillRunner sets up
+        # ``cwd`` for the sub-agent: bundled skills under /app/skills,
+        # workspace skills under the per-user session dir.
+        scripts_dir = os.path.join(self.skill.skill_path, "scripts")
+        creator_py = os.path.join(scripts_dir, "creator.py")
+        if not os.path.isfile(creator_py):
+            # skill-creator not installed in this layout — bail out, the
+            # LLM loop will produce a sensible error message.
+            return None
+
+        # Build the creator.py invocation. ``--task``/`--error`` get the
+        # full sentence so the coding backend (opencode/aider/llm) sees
+        # the same context the sub-agent would have assembled manually.
+        cmd = [
+            sys.executable, creator_py, mode, "--name", name,
+        ]
+        if mode == "fix":
+            cmd += ["--error", task, "--failed-cmd", ""]
+        else:
+            cmd += ["--task", task]
+
+        self.logger.info(
+            "skill-creator direct passthrough: %s name=%r task=%r",
+            mode, name, task[:120],
+        )
+        if self.on_step:
+            try:
+                asyncio.ensure_future(
+                    self.on_step(f"Coding-Backend ({mode}): {name}")
+                )
+            except Exception:
+                pass
+
+        # Run synchronously — the parent already runs us via asyncio,
+        # and creator.py + opencode typically take 30–120s. Use a worker
+        # thread to avoid blocking the event loop.
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                cwd=self.context.get("cwd") or self.skill.base_dir,
+                env={**os.environ},
+            )
+        except subprocess.TimeoutExpired:
+            self.logger.warning(
+                "skill-creator direct passthrough timed out after 600s"
+            )
+            return None  # fall back to LLM loop (which has its own budget)
+        except Exception as exc:
+            self.logger.warning(
+                "skill-creator direct passthrough failed: %s", exc
+            )
+            return None
+
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        if proc.returncode != 0:
+            self.logger.warning(
+                "skill-creator direct passthrough rc=%d: %s",
+                proc.returncode, (err or out)[:300],
+            )
+            return None  # let the LLM loop surface a real error
+
+        # creator.py prints a JSON result on stdout. Parse it so we can
+        # return a concise, user-facing summary; if parsing fails, return
+        # the raw stdout verbatim.
+        try:
+            payload = json.loads(out.splitlines()[-1])
+        except (ValueError, IndexError):
+            return out[-2000:]
+
+        backend = payload.get("backend", "?")
+        files_written = payload.get("files_written") or []
+        files_modified = payload.get("files_modified") or []
+        all_files = sorted(set(files_written) | set(files_modified))
+        ok = bool(payload.get("success", payload.get("ok", False)))
+        error_msg = payload.get("error") or payload.get("output") or ""
+
+        if not ok:
+            self.logger.warning(
+                "skill-creator direct passthrough reported failure: %s",
+                str(error_msg)[:300],
+            )
+            return None
+
+        summary_lines = [
+            f"Skill **{name}** aktualisiert via **{backend}**-Backend.",
+        ]
+        if all_files:
+            listing = ", ".join(f"`{f}`" for f in all_files[:10])
+            summary_lines.append(f"Geänderte Dateien: {listing}.")
+        if error_msg and len(error_msg) < 500:
+            summary_lines.append(str(error_msg).strip())
+
+        return "\n\n".join(summary_lines)
 
     async def _attempt(self, query: str) -> str:
         """Single attempt: workflow mode, then tool-call, then command mode."""
