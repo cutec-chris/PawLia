@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable, Coroutine, Dict, List, Optional
@@ -45,10 +46,38 @@ SILENT_SENTINEL = "PAWLIA_SILENT"
 # on the Gewitter and Bahn monitors).
 _SILENT_MARKERS = frozenset({SILENT_SENTINEL, "SILENT"})
 
+# Unicode categories with no visible glyph: format (Cf — e.g. U+200E
+# LEFT-TO-RIGHT MARK, zero-width spaces, BOM), control (Cc), surrogates (Cs).
+# A model that wants to "say nothing" can't emit a truly empty turn, so it
+# emits one of these instead (mimo-v2.5 sends U+200E). We must treat such a
+# reply as silence, not as a one-character message body.
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Cs"})
+
+
+def _visible_text(output: "str | None") -> str:
+    """*output* reduced to visible content: invisible/format/control characters
+    removed, then surrounding whitespace stripped."""
+    if not output:
+        return ""
+    return "".join(
+        ch for ch in output if unicodedata.category(ch) not in _INVISIBLE_CATEGORIES
+    ).strip()
+
 
 def _is_silent_sentinel(output: "str | None") -> bool:
-    """True when *output* is nothing but a bare silent marker."""
-    return bool(output) and output.strip().upper() in _SILENT_MARKERS
+    """True when *output* carries no message worth sending.
+
+    That is either a bare silent marker (PAWLIA_SILENT / SILENT, any case) or
+    no visible content at all — whitespace, or only zero-width / format
+    characters such as U+200E. A genuinely empty string is *not* silent here:
+    it stays subject to the notify policy (notify=True → "erledigt").
+    """
+    if not output:
+        return False
+    visible = _visible_text(output)
+    if not visible:
+        return True
+    return visible.upper() in _SILENT_MARKERS
 
 
 def _strip_sentinel(output: str) -> str:
