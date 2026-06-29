@@ -205,11 +205,22 @@ class WorkflowExecutor:
             # No tool calls → LLM is done, return its text
             if not response.tool_calls:
                 text = (response.content or "").strip()
-                if text:
-                    if directives:
-                        return "\n".join(directives) + "\n" + text
-                    return text
-                break
+                if not text:
+                    break
+                if directives:
+                    final = "\n".join(directives) + "\n" + text
+                else:
+                    final = text
+                if await self._goal_check_passed(workflow, messages, final):
+                    return final
+                # Goal not achieved — feed back and let the loop continue.
+                messages.append(response)
+                messages.append(HumanMessage(content=(
+                    f"The user's goal was not yet achieved. "
+                    f"Re-check your work and continue. "
+                    f"Goal: {workflow.goal_check.prompt}"
+                )))
+                continue
 
             messages.append(response)
 
@@ -430,4 +441,49 @@ class WorkflowExecutor:
                 return False
         if spec.output_regex and not re.search(spec.output_regex, output):
             return False
+        return True
+
+    async def _goal_check_passed(
+        self, workflow: Workflow, messages: List[Any], final_text: str
+    ) -> bool:
+        """Verify that the workflow's goal was actually achieved.
+
+        Returns True if there is no goal_check configured, or if the LLM
+        confirms the goal was reached within max_retries. Returns False to
+        signal that the executor should keep trying.
+
+        Behaviour notes:
+        * The check is a single LLM call asking yes/no. If the LLM
+          returns something ambiguous (parse failure, exception, empty
+          answer) we conservatively return True so a malformed verifier
+          never blocks an otherwise-successful workflow.
+        * The check is only triggered if the workflow.yaml declares
+          `goal_check:` — workflows without it skip verification entirely,
+          which preserves the previous behaviour.
+        """
+        if not workflow.goal_check:
+            return True
+
+        prompt = (
+            f"{workflow.goal_check.prompt}\n\n"
+            f"Final assistant response:\n\"\"\"\n{final_text}\n\"\"\"\n\n"
+            f"Answer with a single word: YES if the goal was reached, "
+            f"NO if it was not. No explanation."
+        )
+        try:
+            response = await self.llm.ainvoke(messages + [HumanMessage(content=prompt)])
+        except Exception as exc:
+            self.logger.warning("goal_check LLM call failed: %s", exc)
+            return True
+
+        answer = (getattr(response, "content", "") or "").strip().upper()
+        if answer.startswith("YES") or answer.startswith("JA"):
+            self.logger.info("goal_check: passed (%s)", answer[:10])
+            return True
+        if answer.startswith("NO") or answer.startswith("NEIN"):
+            self.logger.info("goal_check: NOT passed (%s)", answer[:10])
+            return False
+        self.logger.warning(
+            "goal_check: ambiguous response %r, treating as passed", answer[:40]
+        )
         return True

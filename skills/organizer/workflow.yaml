@@ -8,8 +8,13 @@ workflows:
     jobs.
   max_steps: 3
   goal_check:
-    prompt: Was the reminder, event, task, or job successfully created, listed, completed,
-      toggled, or deleted?
+    prompt: "Did the workflow actually fulfil the user's request? Answer YES only
+      if every requested artifact was created AND matches what the user asked
+      for (correct title/date/time, AND -- if the user asked for reminders or
+      checklist items -- the event's reminders/checklist are non-empty in the
+      list-events output). Answer NO if the user asked for reminders but the
+      event was stored with reminders equal to an empty list, or if any requested
+      event/task/job is missing."
     max_retries: 2
   building_blocks:
   - id: add-reminder
@@ -36,9 +41,9 @@ workflows:
       "{start}" --end "{end}" --description "{description}" --location "{location}"
       --reminders '{reminders}' --checklist '{checklist}' --recurrence {recurrence}
       --recurrence-days "{recurrence_days}" --recurrence-until "{recurrence_until}"
-      --recurrence-count {recurrence_count}
     description: Add a calendar event with optional end, location, recurrence, reminders
-      and checklist.
+      and checklist. Pass --recurrence-count directly via the script for bounded
+      recurrences.
     status_desc: 'Erstelle Termin: {title}'
     verify:
       exit_code: 0

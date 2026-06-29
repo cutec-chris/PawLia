@@ -316,6 +316,11 @@ def _event_filename(date_str: str, title: str) -> str:
 
 
 def _event_reminder_to_checklist_item(reminder: dict, title: str) -> dict:
+    if not isinstance(reminder, dict):
+        raise TypeError(
+            f"Event reminder must be an object with 'minutes_before' "
+            f"(got {type(reminder).__name__}: {reminder!r})."
+        )
     minutes = reminder.get("minutes_before")
     if minutes in (None, ""):
         raise ValueError("Event reminder is missing minutes_before.")
@@ -797,6 +802,9 @@ def cmd_add_event(args) -> None:
         except json.JSONDecodeError:
             _out({"success": False, "error": "Invalid checklist JSON."})
             return
+        if not isinstance(checklist, list):
+            _out({"success": False, "error": "Checklist must be a JSON array."})
+            return
 
     reminders = []
     if args.reminders:
@@ -804,6 +812,9 @@ def cmd_add_event(args) -> None:
             reminders = json.loads(_strip_quotes(args.reminders))
         except json.JSONDecodeError:
             _out({"success": False, "error": "Invalid reminders JSON."})
+            return
+        if not isinstance(reminders, list):
+            _out({"success": False, "error": "Reminders must be a JSON array."})
             return
 
     for item in checklist:
@@ -1365,6 +1376,14 @@ def main():
         p.add_argument("--user-id", default=os.environ.get("PAWLIA_USER_ID"))
         p.add_argument("--session-dir", default=os.environ.get("PAWLIA_SESSION_DIR"))
 
+    def _int_or_none(value):
+        if value in ("", None):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise argparse.ArgumentTypeError(f"expected integer or empty, got {value!r}")
+
     # add-event
     p = sub.add_parser("add-event")
     _base(p)
@@ -1378,7 +1397,7 @@ def main():
     p.add_argument("--recurrence", default="none", help="none, daily, weekly, monthly, yearly, or RRULE string (e.g. FREQ=WEEKLY;BYDAY=MO,WE)")
     p.add_argument("--recurrence-days", help="Weekly days, e.g. 'TU,TH' or 'dienstag donnerstag'")
     p.add_argument("--recurrence-until", help="Last recurrence date as YYYY-MM-DD")
-    p.add_argument("--recurrence-count", type=int, help="Maximum number of occurrences")
+    p.add_argument("--recurrence-count", type=_int_or_none, default=None, help="Maximum number of occurrences (empty = no limit)")
 
     # list-events
     p = sub.add_parser("list-events")
