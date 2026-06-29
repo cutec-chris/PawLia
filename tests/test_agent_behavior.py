@@ -218,6 +218,34 @@ async def test_plain_text_tool_intent_is_nudged_into_a_real_call(
     assert "tutorials" in out.lower()
 
 
+async def test_bracket_form_tool_call_is_nudged_into_a_real_call(
+    make_chat_agent, fake_runner
+):
+    """A model that writes a skill call inline as ``[tool call: skill(args)]``
+    should be nudged (via the fake-tool-call retry) until it issues a real
+    structured tool call. The bracket form is NOT a ``<tool_call>...</tool_call>``
+    block, so the text-form extractor in ``_extract_fake_skill_calls`` cannot
+    recover it directly — the retry path is the only thing that rescues it."""
+    runner = fake_runner(returns="1. result")
+    llm = (
+        ScriptedLLM()
+        .on("tutorials", Reply(text='[tool call: searxng(query="python tutorials")]'))
+        .on(
+            "real tool call now",
+            ScriptedLLM.tool("searxng", query="python tutorials"),
+            Reply(text="Here are the tutorials."),
+        )
+    )
+    agent = make_chat_agent(llm=llm, skills=["searxng"], runner=runner)
+
+    out = await agent.run("find python tutorials")
+
+    assert runner.last_query == "python tutorials"
+    assert "tutorials" in out.lower()
+    # The marker must not leak into the final answer.
+    assert "[tool call" not in out
+
+
 class _ApiError(Exception):
     """Mimics a provider 400 'tool_use_failed' error."""
     status_code = 400

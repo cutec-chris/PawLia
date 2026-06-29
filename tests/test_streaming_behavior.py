@@ -97,3 +97,80 @@ async def test_allow_skills_false_returns_text_and_never_runs_a_tool(
 
     assert runner.calls == []
     assert result == "I cannot use tools right now."
+
+
+async def test_streamed_bracket_form_tool_call_does_not_leak_to_tts(
+    make_chat_agent, fake_runner
+):
+    """A model that writes a skill call inline as ``[tool call: skill(args)]``
+    must not have the marker (or its arguments) read out loud during the
+    streamed turn. The fake-call retry path should produce a real
+    structured tool call instead.
+
+    Regression for: log/chris_…-20260629-144428/container.log line 5863
+    where the bracketed marker was streamed as TTS and the actual call
+    was never executed.
+    """
+    sentences, on_sentence = _collector()
+    runner = fake_runner(returns="weather data")
+    llm = (
+        ScriptedLLM()
+        # 1st turn: bracket-form fake call (the bug).
+        .on("weather", Reply(text='[tool call: searxng(query="weather rome")]'))
+        # 2nd turn: after the fake-call nudge, a real structured call.
+        # 3rd turn: after the tool result, the final answer.
+        .on(
+            "real tool call now",
+            ScriptedLLM.tool("searxng", query="weather rome"),
+            Reply(text="It is sunny in Rome today."),
+        )
+    )
+    agent = make_chat_agent(llm=llm, skills=["searxng"], runner=runner)
+
+    result = await agent.run_streamed(
+        "what is the weather in rome", on_sentence=on_sentence
+    )
+
+    assert runner.last_query == "weather rome"
+    assert result == "It is sunny in Rome today."
+    spoken = " ".join(sentences)
+    # Neither the marker nor any of its arguments may be spoken aloud.
+    assert "[tool call" not in spoken
+    assert "tool call" not in spoken
+    assert "weather rome" not in spoken
+
+
+async def test_streamed_bracket_form_with_preamble_keeps_preamble_but_drops_marker(
+    make_chat_agent, fake_runner
+):
+    """A model that emits a legitimate preamble BEFORE the bracket-form
+    marker must still have the preamble spoken; only the marker and what
+    follows it must be suppressed."""
+    sentences, on_sentence = _collector()
+    runner = fake_runner(returns="weather data")
+    llm = (
+        ScriptedLLM()
+        .on(
+            "weather",
+            Reply(
+                text='Ok, ich bin dran! [tool call: searxng(query="weather rome")]'
+            ),
+        )
+        .on(
+            "real tool call now",
+            ScriptedLLM.tool("searxng", query="weather rome"),
+            Reply(text="It is sunny in Rome today."),
+        )
+    )
+    agent = make_chat_agent(llm=llm, skills=["searxng"], runner=runner)
+
+    result = await agent.run_streamed(
+        "what is the weather in rome", on_sentence=on_sentence
+    )
+
+    assert runner.last_query == "weather rome"
+    assert result == "It is sunny in Rome today."
+    spoken = " ".join(sentences)
+    assert "Ok, ich bin dran!" in spoken
+    assert "[tool call" not in spoken
+    assert "weather rome" not in spoken

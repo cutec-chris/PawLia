@@ -39,6 +39,16 @@ if TYPE_CHECKING:
 _SENTENCE_RE = re.compile(r'[.!?…]\s')
 _RE_CODE_BLOCK = re.compile(r'```[^\n]*\n(.*?)(?:```|$)', re.DOTALL)
 _RE_TOOL_CALL_TAG = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
+# Some smaller / chat-tuned models emit the call inline as
+# ``[tool call: skill_name(args)]`` (or ``[Tool call: ...]``) instead of the
+# ``<tool_call>...</tool_call>`` block or a real structured tool call. Detect the
+# start of that marker so the fake-call retry path and the TTS stream can
+# react. We only need the start (bracket, label, name, opening paren) — the
+# real body may span many lines, and a precise parse is not required to
+# trigger the retry (see ``_is_fake_tool_call``).
+_RE_BRACKET_TOOL_CALL = re.compile(
+    r"\[\s*[Tt]ool\s*[Cc]all\s*:\s*\w+\s*\(",
+)
 # Small local models like to print file content in markdown blocks with the
 # filename as a heading instead of calling the files skill. Match the first
 # heading like "# identity.md - …" and recover it as a files write call.
@@ -1373,6 +1383,30 @@ class ChatAgent(BaseAgent):
             if n_open > n_close:
                 continue
 
+            # If the model started writing a text-form tool call marker
+            # (e.g. ``[tool call: skill(args)]``), flush any sentences
+            # that completed BEFORE the marker in this chunk and then
+            # suppress everything after it. The post-stream fake-call
+            # check (``_is_fake_tool_call``) will trigger a retry for a
+            # real structured tool call. Reading the marker (or the
+            # args that follow) out loud would confuse the user and may
+            # leak arguments (calendar entries, file contents, …)
+            # before the retry has a chance to run. The loop keeps
+            # accumulating into ``raw_text`` / ``accumulated`` so the
+            # post-stream check sees the full response.
+            if on_sentence and _RE_BRACKET_TOOL_CALL.search(raw_text):
+                clean = self.strip_thinking(raw_text)
+                new_content = clean[emitted_len:]
+                if new_content:
+                    sentences, remainder = _split_sentences(new_content)
+                    for s in sentences:
+                        s = self.sanitize_output(s)
+                        if s.strip():
+                            await on_sentence(s)
+                emitted_len = len(clean)
+                on_sentence = None
+                continue
+
             clean = self.strip_thinking(raw_text)
             new_content = clean[emitted_len:]
             if new_content:
@@ -1712,6 +1746,8 @@ class ChatAgent(BaseAgent):
             return False
         content = response.content if isinstance(response.content, str) else ""
         if "<tool_call>" in content:
+            return True
+        if _RE_BRACKET_TOOL_CALL.search(content):
             return True
         all_skill_names = set(self._all_skills.keys())
         for match in _RE_CODE_BLOCK.finditer(content):
