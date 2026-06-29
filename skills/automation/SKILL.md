@@ -4,7 +4,8 @@ description: "Create and manage scheduled automations. Use when the user wants s
 license: MIT
 metadata:
   author: Christian Ulrich
-  version: "3.0"
+  version: "4.0"
+  max_tool_turns: 30
 ---
 
 # Automation
@@ -105,7 +106,7 @@ Pick the kind that matches the silence rule — *before* you build the script:
 
 | Job kind | Stays silent when there is nothing to say? | Use |
 |----------|--------------------------------------------|-----|
-| **Monitor** (cyclic check: thunderstorm, train delay, inbox watch) | Yes — the script decides; empty stdout = no notification | `add-script-job` + script in `workspace/skills/scripts/<name>.py` |
+| **Monitor** (cyclic check: thunderstorm, train delay, inbox watch) | Yes — the script decides; empty stdout = no notification | script in `workspace/skills/scripts/<name>.py`, register with `add-job --script` |
 | **One-shot** (must produce output every tick: morning digest, daily summary) | No — the LLM is invoked every run, the response is always delivered | `add-job --instruction` (or a script that always emits) |
 
 Rule of thumb: "tell me only when something is up" → script. "give me an
@@ -147,10 +148,6 @@ python <scripts_dir>/../organizer/scripts/organizer.py add-job \
   --name "<name>" --schedule "<schedule>" --instruction "<instruction>"
 ```
 
-When the agent calls this skill, it picks `add-script-job` for monitors and
-`add-job` for one-shots — the two building blocks are the only entry points
-and they map 1:1 to the choice above.
-
 **Notify flags** (override the per-kind default):
 - `--notify-on-output` — deliver only when there is output (silent on empty). Default for `--script`.
 - `--notify-on-error` — deliver only on failure.
@@ -181,6 +178,12 @@ python <scripts_dir>/../organizer/scripts/organizer.py run-job --job-id "<id>"
 Flags the job for immediate execution on the next scheduler tick (within 60s).
 Use this after building/modifying the script to verify the job behaves: confirm
 the silent case sends nothing and the alert case sends exactly one message.
+
+## Working rules
+
+- Before each bash call, output a short status line (e.g. "Registriere Job …", "Teste Script …") so the runner sees progress between steps.
+- Build+Register is one continuous flow: decide type → (for monitors) build and test the script → register. Do not stop to ask for confirmation between steps.
+- For monitors, always verify the silent case works after registering: run `run-job` and confirm no notification is sent when the script prints nothing.
 
 ## Output
 

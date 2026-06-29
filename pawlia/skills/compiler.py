@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Skills that should never be compiled into workflow.yaml because their
 # tasks involve free-form, multi-line text that breaks rigid building-block
 # command substitution (e.g. implement/fix with arbitrary task descriptions).
-_SKIP_COMPILE = {"skill-creator"}
+_SKIP_COMPILE = {"skill-creator", "automation"}
 
 _ANGLE_PLACEHOLDER_RE = re.compile(r"<([a-zA-Z_][a-zA-Z0-9_]*)>")
 

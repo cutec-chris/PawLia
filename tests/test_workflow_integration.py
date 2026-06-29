@@ -78,7 +78,7 @@ def _run_command(command: str, env: dict = None, timeout: int = 30) -> subproces
 class TestWorkflowParsing:
     """Verify that all workflow.yaml files are valid against the schema."""
 
-    @pytest.fixture(params=["automation", "organizer"])
+    @pytest.fixture(params=["organizer"])
     def compiled(self, request):
         return _load_compiled(request.param)
 
@@ -118,9 +118,6 @@ class TestWorkflowPaths:
             script_path = Path(parts[1])
             assert script_path.exists(), \
                 f"Skill '{skill_name}' block '{block.id}': script not found: {script_path}"
-
-    def test_automation_commands_resolve(self):
-        self._check_blocks_resolve("automation")
 
     def test_organizer_commands_resolve(self):
         self._check_blocks_resolve("organizer")
@@ -319,24 +316,6 @@ class TestOrganizerScriptArguments:
 
 class TestWorkflowExecution:
     """Simulate executing workflow building blocks end-to-end."""
-
-    def test_automation_add_job_workflow(self, tmp_path):
-        """Simulate the automation add-job building block via executor."""
-        compiled = _load_compiled("automation")
-        block = next(b for w in compiled.workflows for b in w.building_blocks if b.id == "add-job")
-
-        executor = _make_executor("automation")
-        params = {"name": "Test Automation", "schedule": "16:00", "instruction": "Show open tasks"}
-        command = executor._substitute(block.command, params)
-
-        env = {
-            "PAWLIA_USER_ID": "test_user",
-            "PAWLIA_SESSION_DIR": str(tmp_path),
-        }
-        result = _run_command(command, env=env)
-        assert result.returncode == 0, f"Command failed: {result.stderr}"
-        data = json.loads(result.stdout)
-        assert data["success"] is True
 
     def test_organizer_add_reminder_workflow(self, tmp_path):
         """Simulate the organizer add-reminder building block via executor."""
