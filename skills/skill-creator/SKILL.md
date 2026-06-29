@@ -414,13 +414,13 @@ Phase 1, what you changed in Phase 2, what still fails. Do not keep looping
 | `test` | creator.py | Run the skill's harness with real credentials/env |
 | `compile` | creator.py | LLM-compile SKILL.md → workflow.yaml |
 | `package` | creator.py | Create `.skill` zip |
-| `implement` | creator.py | Generate scripts via coding backend (aider/opencode/llm) |
-| `fix` | creator.py | Debug and fix a broken script via coding backend |
+| `implement` | creator.py | Generate scripts via the in-process coding LLM |
+| `fix` | creator.py | Debug and fix a broken script via the in-process coding LLM |
 | `set` / `list` / `delete` / `check` | credentials.py | Manage credentials |
 
 ---
 
-## Implement (coding backend)
+## Implement (in-process coding LLM)
 
 Use when a skill has been scaffolded (`init`) and the SKILL.md describes what
 the scripts should do, but the actual code still needs to be written — or when
@@ -430,47 +430,17 @@ existing scripts need a substantial rewrite.
 python <scripts_dir>/creator.py implement --name "<name>" --task "<what to implement>"
 ```
 
-If `--task` is omitted, the backend implements all scripts described in SKILL.md.
+If `--task` is omitted, the LLM implements all scripts described in SKILL.md.
 
-The command auto-detects the best available coding backend:
-
-| Backend | How | When |
-|---------|-----|------|
-| **aider** | `aider --message ... --yes` CLI | `aider` in PATH |
-| **opencode** | `opencode run ...` CLI (daemon preferred, see below) | `opencode` in PATH |
-| **llm** | Direct LLM call via config `agents.coder` | Always available (fallback) |
-
-Override per-skill via `skill-config.skill-creator.coding_backend` in config.yaml,
-or globally via `coding.backend`.
+Coding runs in-process through the `coder` agent from `agents.coder` in
+`config.yaml` (falls back to `agents.default` and then to the first
+defined model). Set `agents.coder: <model-key>` to choose the model.
 
 After `implement`, run `validate` and `compile` separately.
 
-### Opencode daemon (preferred)
+## Fix (in-process coding LLM)
 
-When the opencode backend is selected and `coding.opencode_daemon.enabled` is
-true (the default), the first call spawns a long-lived `opencode serve`
-process (one per skill directory) and reuses a single opencode session per
-user across calls. This means:
-
-- A follow-up question ("schick mal den diff", "und was ist mit X?")
-  continues the same conversation — the model has the previous turns
-  in its context window.
-- The 5–10 s cost of starting `opencode serve` is paid only once per
-  skill per process, not per `implement` / `fix` call.
-
-The session id is included in `creator.py`'s JSON output as
-`session_id`; the SkillRunner's direct-passthrough stashes it on the
-context so a follow-up delegation to the same skill reuses it.
-
-Disable the daemon by setting `coding.opencode_daemon.enabled: false` in
-`config.yaml` (or `OPENCODE_SERVER_URL` to point at an externally
-managed server). When the daemon is disabled or fails to start, the
-backend transparently falls back to the one-shot `opencode run`
-subprocess so the skill always has *some* working path.
-
-## Fix (coding backend)
-
-Use when a skill's script fails with a specific error. The backend receives the
+Use when a skill's script fails with a specific error. The LLM receives the
 failing command, error output, and the full skill context, then edits the script
 in-place.
 

@@ -35,10 +35,14 @@ The workspace (`session/<user>/workspace/`) is a native Obsidian vault.
 
 New workspace features should stay compatible with plain Obsidian — no proprietary formats.
 
-### Coding backend: opencode first, aider on demand
-`opencode-ai` is baked into the VoIP image. `aider-chat` is intentionally excluded from
-the image (aiohttp conflict + Python 3.14 wheel issues) and installed at runtime via
-`config.py coding --backend aider` when needed. Keep it this way until the conflict resolves.
+### Coding: single in-process backend
+Coding for the skill-creator runs in-process via the `coder` agent
+(`agents.coder`, falls back to the first defined model). There is no CLI
+backend, no long-lived daemon, and no auto-detection — the previous
+`opencode` / `aider` subprocesses and the opencode daemon were removed
+because they ran against their own opaque model configuration and never
+used PawLia's configured `coder` model, so the configured chain was a
+lie. Choose the coding model by setting `agents.coder` in `config.yaml`.
 
 ### Skills over core changes
 New functionality belongs in a skill (`skills/user/` or bundled skills), not in core

@@ -341,23 +341,15 @@ skill-install:
   allow_remote: false      # allow skill installation via Matrix/Telegram file upload
   allow_workspace: true    # load skills from session/<user>/workspace/skills/ (default: true)
 
-# Coding backend the skill-creator uses to write/fix skill scripts.
-#   opencode → `opencode run` CLI (preferred: full agentic loop, own turn budget)
-#   aider    → `aider` CLI
-#   llm      → single in-process LLM call (always available)
-#   auto     → detect in order: opencode → aider → llm (default)
-# opencode/aider are bundled in the prod image; the config skill can also set
-# this and install a missing CLI at runtime: `config.py coding --backend opencode`.
-# Each CLI uses its own model and authentication — PawLia does not pass
-# `--model` or forward provider API keys. Configure opencode via
-# `opencode auth login` / project `opencode.json`; aider has its own model
-# setting.
-# coding:
-#   backend: auto
-# Per-skill override (wins over coding.backend):
-#   skill-config:
-#     skill-creator:
-#       coding_backend: opencode
+# Coding for the skill-creator runs in-process via the `coder` agent
+# (`agents.coder`, falls back to `agents.default` and then to the first
+# defined model). Set `agents.coder` to a key in `models:` to choose the
+# model. There is no CLI backend to install or switch.
+#
+#   agents:
+#     coder: smart   # point at any model key defined below
+#
+# Inspect the resolved configuration with `config.py coding`.
 
 skill-config:
   # searxng:

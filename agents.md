@@ -208,18 +208,15 @@ The ChatAgent sees skills as OpenAI function specs (name + description + query p
 
 SKILL.md supports variable substitution: `<user_id>`, `<session_dir>`, `<scripts_dir>`.
 
-**Coding backend** (`pawlia/coding.py`): `skill-creator`'s `implement`/`fix`
-delegate script writing/debugging to a coding backend selected by `coding.backend`
-(`opencode` | `aider` | `llm` | `auto`) or the per-skill override
-`skill-config.skill-creator.coding_backend`. `auto` detects in order
-**opencode → aider → llm**. opencode and aider run as subprocesses (own agentic
-loop / turn budget); `llm` is a single in-process call via the `coder` model.
-Each CLI uses its own model and authentication — PawLia does not pass
-`--model` or forward provider API keys, so there is no `coder`-chain coupling
-to manage. Users configure opencode via `opencode auth login` / project
-`opencode.json`; aider has its own model setting. Both CLIs are bundled in
-the images; the config skill switches the backend and installs a missing CLI
-at runtime via `config.py coding --backend <name>`.
+**Coding backend** (`pawlia/coding/coding.py`): `skill-creator`'s `implement`/`fix`
+delegate script writing and debugging to the in-process LLM path. The
+`coder` agent type is resolved via `LLMFactory` (configured under
+`agents.coder`; falls back to the first defined model when unset). The
+SkillRunner's direct-passthrough shells out to `creator.py implement|fix`
+(CLI), so the same in-process path is used whether the request comes
+from the chat or from a sub-agent. There is no CLI fallback, no
+long-lived daemon, and no auto-detection — every coding call goes
+through the configured model.
 
 ## Tools (`pawlia/tools/`)
 

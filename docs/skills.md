@@ -181,19 +181,16 @@ coding tools. This is useful when a skill has been scaffolded (`init`) but the
 actual scripts still need to be written, or when a script fails and needs
 fixing.
 
-### Backends
+### Backend
 
-| Backend | How | Requirements |
-|---------|-----|-------------|
-| **opencode** | Runs `opencode run` in the skill directory | `opencode` CLI in PATH; model configured via opencode's own config (`opencode auth login`, `~/.config/opencode`, project `opencode.json`) |
-| **aider** | Runs `aider --message ... --yes` in the skill directory | `aider` CLI in PATH, configured LLM |
-| **llm** | Direct LLM call via the `coder` model from config | Always available (fallback) |
+Coding runs **in-process** via the `coder` agent from `agents.coder` in
+`config.yaml` (falls back to `agents.default` and then to the first
+defined model). Set `agents.coder` to a key in `models:` to choose the
+model. The SkillRunner's direct-passthrough shells out to
+`creator.py implement|fix` (CLI), so the same in-process path is used
+whether the request comes from the chat or from a sub-agent.
 
-Auto-detection order: opencode > aider > llm. opencode is preferred because it
-runs a full agentic coding loop with its own turn management. Override globally
-or per-skill. opencode and aider are bundled in the production image; the
-config skill can also install a missing CLI at runtime
-(`config.py coding --backend opencode`).
+Inspect the resolved configuration with `config.py coding` (config skill).
 
 ### Commands
 
@@ -213,23 +210,5 @@ python <scripts_dir>/creator.py fix --name "my-skill" --error "SyntaxError..." -
 
 ```yaml
 agents:
-  coder: coder              # model for the LLM fallback
-
-coding:
-  backend: auto             # auto | opencode | aider | llm
-
-# Per-skill override:
-skill-config:
-  skill-creator:
-    coding_backend: opencode
+  coder: smart   # model key from `models:` used to write/fix skill scripts
 ```
-
-When `backend: auto` (default), PawLia picks the first available backend from
-the detection order. Set explicitly to skip detection. The easiest way to
-switch is `config.py coding --backend <name>` (config skill), which writes this
-setting and installs the CLI if it is missing.
-
-The `coder` model drives only the `llm` fallback backend. opencode and aider
-each use their own model configuration (opencode: `opencode auth login` /
-project config; aider: its own model setting) — PawLia does not pass `--model`
-or forward API keys to either CLI, so there is no model coupling to manage.

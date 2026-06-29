@@ -89,7 +89,7 @@ def test_verb_inside_long_sentence():
 
 
 @pytest.mark.parametrize("q", [
-    "change the coding backend to aider",       # config blocker
+    "change the LLM fallback for coding",      # config blocker
     "validate the skill-thunderstorm-alert",   # verb missing
     "was ist X?",                              # question, no verb
     "show current configuration",              # blocker phrase

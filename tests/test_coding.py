@@ -1,52 +1,15 @@
+import json
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
-from pawlia.coding import _build_task_prompt, detect_backend
-
-
-# ── detect_backend ──────────────────────────────────────────────────────
-
-def test_detect_backend_explicit_aider():
-    cfg = {"coding": {"backend": "aider"}}
-    assert detect_backend(cfg) == "aider"
-
-
-def test_detect_backend_explicit_opencode():
-    cfg = {"coding": {"backend": "opencode"}}
-    assert detect_backend(cfg) == "opencode"
-
-
-def test_detect_backend_explicit_llm():
-    cfg = {"coding": {"backend": "llm"}}
-    assert detect_backend(cfg) == "llm"
-
-
-def test_detect_backend_skill_config_overrides_global():
-    cfg = {
-        "coding": {"backend": "llm"},
-        "skill-config": {"skill-creator": {"coding_backend": "aider"}},
-    }
-    assert detect_backend(cfg) == "aider"
-
-
-def test_detect_backend_auto_falls_back_to_llm(monkeypatch):
-    import shutil
-    monkeypatch.setattr(shutil, "which", lambda _: None)
-    assert detect_backend({}) == "llm"
-
-
-def test_detect_backend_auto_picks_aider_when_available(monkeypatch):
-    import shutil
-    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/aider" if cmd == "aider" else None)
-    assert detect_backend({}) == "aider"
-
-
-def test_detect_backend_auto_picks_opencode_when_aider_missing(monkeypatch):
-    import shutil
-    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/opencode" if cmd == "opencode" else None)
-    assert detect_backend({}) == "opencode"
+from pawlia.coding import _build_task_prompt, run_fix, run_implement
+from pawlia.coding.coding import _extract_and_write_files
 
 
 # ── _build_task_prompt ──────────────────────────────────────────────────
+
 
 def test_build_task_prompt_implement_contains_task():
     prompt = _build_task_prompt(
@@ -120,3 +83,161 @@ def test_build_task_prompt_fix_has_rules():
         mode="fix",
     )
     assert "root cause" in prompt
+
+
+# ── _extract_and_write_files ───────────────────────────────────────────
+
+
+def _skill(tmp_path: Path) -> Path:
+    """Create a minimal skill directory with scripts/."""
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "scripts").mkdir()
+    return skill
+
+
+def test_extract_writes_named_file_into_scripts(tmp_path):
+    skill = _skill(tmp_path)
+    content = "```scripts/main.py\nprint('hi')\n```"
+
+    written = _extract_and_write_files(content, skill)
+
+    assert written == ["scripts/main.py"]
+    assert (skill / "scripts" / "main.py").read_text().strip() == "print('hi')"
+
+
+def test_extract_writes_subpath_file(tmp_path):
+    skill = _skill(tmp_path)
+    content = "```scripts/lib/util.py\nx = 1\n```"
+
+    written = _extract_and_write_files(content, skill)
+
+    assert written == ["scripts/lib/util.py"]
+    assert (skill / "scripts" / "lib" / "util.py").read_text().strip() == "x = 1"
+
+
+def test_extract_ignores_bare_language_tags(tmp_path):
+    skill = _skill(tmp_path)
+    content = "```python\nprint('not a filename')\n```"
+
+    written = _extract_and_write_files(content, skill)
+
+    assert written == []
+    assert list((skill / "scripts").iterdir()) == []
+
+
+def test_extract_writes_multiple_files_in_order(tmp_path):
+    skill = _skill(tmp_path)
+    content = (
+        "```scripts/a.py\na\n```\n"
+        "```scripts/b.py\nb\n```\n"
+        "```python\nignored\n```\n"
+        "```scripts/c.py\nc\n```\n"
+    )
+
+    written = _extract_and_write_files(content, skill)
+
+    assert written == ["scripts/a.py", "scripts/b.py", "scripts/c.py"]
+
+
+def test_extract_returns_empty_when_no_fences(tmp_path):
+    skill = _skill(tmp_path)
+    # Real-world failure mode: model returns a full replacement script
+    # without per-file fencing. Must be reported as zero files written
+    # so the caller can surface a meaningful error.
+    content = "Here is the fixed script:\n\nimport os\nprint(os.getcwd())\n"
+
+    written = _extract_and_write_files(content, skill)
+
+    assert written == []
+
+
+# ── run_implement / run_fix → _run_llm (sole path) ─────────────────────
+
+
+class _StubResponse:
+    def __init__(self, content: str):
+        self.content = content
+
+
+class _StubLLM:
+    def __init__(self, content: str):
+        self._content = content
+        self.calls = 0
+
+    def invoke(self, messages):
+        self.calls += 1
+        return _StubResponse(self._content)
+
+
+def test_run_implement_writes_files_via_llm(tmp_path):
+    skill = _skill(tmp_path)
+    (skill / "SKILL.md").write_text("---\nname: test\n---\n# Test\n")
+    config = {"models": {"coder": {"model": "stub", "provider": "stub"}}}
+    stub = _StubLLM(
+        "```scripts/main.py\nprint('generated')\n```"
+    )
+
+    with patch("pawlia.llm.LLMFactory") as factory:
+        factory.return_value.get.return_value = stub
+        result = run_implement(skill, "Write main.py", config)
+
+    assert result["ok"] is True
+    assert result["backend"] == "llm"
+    assert result["files_written"] == ["scripts/main.py"]
+    assert (skill / "scripts" / "main.py").read_text().strip() == "print('generated')"
+    assert stub.calls == 1
+
+
+def test_run_fix_writes_files_via_llm(tmp_path):
+    skill = _skill(tmp_path)
+    (skill / "SKILL.md").write_text("---\nname: test\n---\n# Test\n")
+    config = {"models": {"coder": {"model": "stub", "provider": "stub"}}}
+    stub = _StubLLM(
+        "```scripts/main.py\nprint('fixed')\n```"
+    )
+
+    with patch("pawlia.llm.LLMFactory") as factory:
+        factory.return_value.get.return_value = stub
+        result = run_fix(
+            skill, error="NameError: x", command="python scripts/main.py", config=config
+        )
+
+    assert result["ok"] is True
+    assert result["backend"] == "llm"
+    assert result["files_written"] == ["scripts/main.py"]
+    assert (skill / "scripts" / "main.py").read_text().strip() == "print('fixed')"
+
+
+def test_run_implement_reports_failure_when_no_files_written(tmp_path):
+    skill = _skill(tmp_path)
+    (skill / "SKILL.md").write_text("---\nname: test\n---\n# Test\n")
+    config = {"models": {"coder": {"model": "stub", "provider": "stub"}}}
+    stub = _StubLLM("Here you go, just put this at the top: import os\n")
+
+    with patch("pawlia.llm.LLMFactory") as factory:
+        factory.return_value.get.return_value = stub
+        result = run_implement(skill, "Add imports", config)
+
+    assert result["ok"] is False
+    assert result["backend"] == "llm"
+    assert result["files_written"] == []
+    assert "import os" in result["output"]
+
+
+def test_run_implement_catches_llm_exception(tmp_path):
+    skill = _skill(tmp_path)
+    (skill / "SKILL.md").write_text("---\nname: test\n---\n# Test\n")
+    config = {"models": {"coder": {"model": "stub", "provider": "stub"}}}
+
+    class _Boom:
+        def invoke(self, messages):
+            raise RuntimeError("provider timeout")
+
+    with patch("pawlia.llm.LLMFactory") as factory:
+        factory.return_value.get.return_value = _Boom()
+        result = run_implement(skill, "task", config)
+
+    assert result["ok"] is False
+    assert result["backend"] == "llm"
+    assert "provider timeout" in result["error"]

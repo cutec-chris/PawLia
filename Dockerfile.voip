@@ -61,16 +61,6 @@ WORKDIR /app
 COPY constraints.txt constraints.txt
 ENV PIP_CONSTRAINT=/app/constraints.txt
 
-# opencode — the skill-creator's preferred coding backend (full agentic
-# loop, own turn budget). Baked in so prod always has it; the config skill
-# can also install at runtime when missing.
-# Aider is intentionally NOT bundled: aider-chat 0.14.x pins aiohttp==3.8.4
-# which conflicts with our constraints (aiohttp==3.13.3, needed by the rest
-# of pawlia), and any pin that resolved both broke the build under
-# Python 3.14. Install aider at runtime with
-# `config.py coding --backend aider` if a skill needs the fallback.
-RUN npm install -g opencode-ai@1.17.11
-
 # Python-Packages aus Builder kopieren
 COPY --from=builder /usr/local/lib/python3.14/site-packages /usr/local/lib/python3.14/site-packages
 # piper-Console-Script liegt in /usr/local/bin, nicht in site-packages

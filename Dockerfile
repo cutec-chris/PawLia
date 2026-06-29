@@ -48,12 +48,6 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-# Optional coding backend for the skill-creator (config: coding.backend).
-# opencode is npm-based (no native build) so it installs cleanly on musl.
-# aider is left to the Debian image (Dockerfile.voip) — its deps are painful
-# to build on musl; the config skill can still attempt a runtime install.
-RUN npm install -g opencode-ai
-
 # Copy the venv from the builder
 COPY --from=builder /venv /venv
 ENV PATH="/venv/bin:$PATH"

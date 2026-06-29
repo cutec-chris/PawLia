@@ -1,38 +1,25 @@
-"""Coding backends for skill script generation and debugging.
+"""Coding backend for skill script generation and debugging.
 
-Supports three backends, selected via config or auto-detected:
-  - aider:    `aider --message ... --yes` (CLI, stable API)
-  - opencode: `opencode run --dir ... --format json` (CLI)
-  - llm:      direct LLM call via LLMFactory (always available)
+Single in-process path: a direct LLM call through ``LLMFactory`` resolves
+the agent type ``coder`` and writes the model's fenced file blocks to
+disk. Success is measured by files actually written (``ok = len(files_written) > 0``).
 
-Config (config.yaml):
-  coding:
-    backend: auto          # auto | aider | opencode | llm
+The skill-creator and the SkillRunner direct-passthrough use the public
+``run_implement`` / ``run_fix`` entry points. Both go through
+``_run_llm``; there is no CLI fallback, no long-lived daemon, and no
+auto-detection to misfire on a stale binary in the image.
 
-  Per-skill override via skill-config:
-    skill-config:
-      skill-creator:
-        coding_backend: aider    # overrides global setting
+The ``coder`` agent type is configured under ``agents.coder`` in
+``config.yaml``; it falls back to the first defined model if unset.
 """
 
-import json
 import logging
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# When this file lives at ``pawlia/coding/coding.py`` the project root is
-# parents[2] (= the thalia checkout). The legacy flat module at
-# ``pawlia/coding.py`` had parents[1]; we support both layouts so the
-# daemon package can be dropped in without breaking older checkouts.
-_FILE = Path(__file__).resolve()
-_PROJECT_ROOT = (
-    _FILE.parents[2] if _FILE.parents[1].name == "coding" else _FILE.parents[1]
-)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _references_dir() -> Path:
@@ -48,7 +35,7 @@ def _build_task_prompt(
     error_output: str = "",
     failing_command: str = "",
 ) -> str:
-    """Build the task prompt for any backend."""
+    """Build the task prompt for the LLM."""
     parts = [f"# Task\n{task}\n"]
 
     if mode == "fix":
@@ -150,291 +137,20 @@ def _parse_skill_md(skill_path: Path) -> Optional[str]:
     return parts[2].strip() if len(parts) >= 3 else content.strip()
 
 
-# ── Backend detection ──────────────────────────────────────────────────
-
-def detect_backend(config: Dict[str, Any]) -> str:
-    """Detect coding backend: 'aider' | 'opencode' | 'llm'.
-
-    Priority: skill-config override > global config > auto-detect.
-    """
-    skill_config = (config.get("skill-config") or {}).get("skill-creator", {})
-    configured = (
-        skill_config.get("coding_backend")
-        or (config.get("coding") or {}).get("backend")
-        or "auto"
-    )
-
-    if configured != "auto":
-        return configured
-
-    # opencode first: it runs a full agentic coding loop with its own turn
-    # management, which is the point of delegating to it instead of the
-    # single-shot llm backend. aider is the secondary CLI fallback.
-    if shutil.which("opencode"):
-        return "opencode"
-    if shutil.which("aider"):
-        return "aider"
-    return "llm"
-
-
-# Install commands for the optional CLI coding backends. opencode ships as an
-# npm package; aider installs into the active Python environment. Both run
-# without root when the npm prefix / venv is user-writable (the prod image
-# bakes them in at build time, so this is mainly a dev/runtime convenience).
-_BACKEND_INSTALL = {
-    "opencode": ["npm", "install", "-g", "opencode-ai"],
-    "aider": [sys.executable, "-m", "pip", "install", "--quiet", "aider-chat"],
-}
-
-
-def backend_available(backend: str) -> bool:
-    """True if the CLI for *backend* is on PATH (llm needs no binary)."""
-    if backend in ("llm", "auto"):
-        return True
-    return shutil.which(backend) is not None
-
-
-def install_backend(backend: str) -> Dict[str, Any]:
-    """Install the CLI for *backend* (opencode|aider). Best-effort.
-
-    Returns ``{"ok": bool, "backend", "already"|"output"|"error"}``. Idempotent:
-    a backend already on PATH returns ``ok=True, already=True`` without running.
-    """
-    if backend not in _BACKEND_INSTALL:
-        return {"ok": False, "backend": backend,
-                "error": f"No installer for backend '{backend}' (opencode|aider only)."}
-    if backend_available(backend):
-        return {"ok": True, "backend": backend, "already": True}
-
-    cmd = _BACKEND_INSTALL[backend]
-    if backend == "opencode" and not shutil.which("npm"):
-        return {"ok": False, "backend": backend,
-                "error": "npm not found — cannot install opencode. Install Node.js/npm first."}
-    logger.info("Installing coding backend %s: %s", backend, " ".join(cmd))
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "backend": backend, "error": "install timed out after 600s"}
-    except Exception as exc:
-        return {"ok": False, "backend": backend, "error": str(exc)}
-    ok = proc.returncode == 0 and backend_available(backend)
-    return {
-        "ok": ok,
-        "backend": backend,
-        "output": (proc.stdout or "")[-1500:],
-        "error": "" if ok else (proc.stderr or proc.stdout or "")[-1500:],
-    }
-
-
-# ── Aider backend ─────────────────────────────────────────────────────
-
-def _run_backend(
-    backend: str,
-    cmd: list[str],
-    cwd: str | None = None,
-    files_modified: list[str] | None = None,
-    env: Optional[Dict[str, str]] = None,
-) -> Dict[str, Any]:
-    """Run a coding backend subprocess and return a standardised result dict."""
-    logger.info("Running %s: %s", backend, " ".join(cmd[:6]) + "...")
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=cwd,
-            env=env,
-        )
-        return {
-            "ok": proc.returncode == 0,
-            "backend": backend,
-            "output": (proc.stdout or "")[-3000:],
-            "error": (proc.stderr or "")[-1500:] if proc.returncode != 0 else "",
-            "files_modified": files_modified or [],
-        }
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "backend": backend, "error": f"{backend} timed out after 300s"}
-    except Exception as e:
-        return {"ok": False, "backend": backend, "error": str(e)}
-
-
-def _run_aider(
-    skill_path: Path,
-    task_prompt: str,
-    existing_files: Dict[str, str],
-) -> Dict[str, Any]:
-    """Run aider in non-interactive --yes mode."""
-    cmd = [
-        "aider",
-        "--message", task_prompt,
-        "--yes",
-        "--no-auto-commits",
-        "--no-dirty-commits",
-        "--no-gitignore",
-    ]
-
-    conventions = _references_dir() / "patterns.md"
-    if conventions.is_file():
-        cmd.extend(["--read", str(conventions)])
-
-    for fname in existing_files:
-        fpath = skill_path / fname
-        if fpath.is_file():
-            cmd.append(str(fpath))
-
-    return _run_backend("aider", cmd, cwd=str(skill_path), files_modified=list(existing_files.keys()))
-
-
-def _build_opencode_prompt(skill_path: Path, task_prompt: str) -> str:
-    """Inline SKILL.md + the patterns reference into the task prompt.
-
-    In opencode-1.x, ``--file`` together with a positional ``message`` makes
-    the CLI treat the message as a file path (``File not found: <msg>``).
-    We avoid that by inlining context into the message itself. Used by both
-    the daemon (sent as the message body) and the legacy subprocess backend.
-    """
-    context_blocks: list[str] = []
-    skill_md = skill_path / "SKILL.md"
-    if skill_md.is_file():
-        try:
-            context_blocks.append(
-                f"=== {skill_md.name} ===\n{skill_md.read_text(encoding='utf-8', errors='replace')}"
-            )
-        except OSError:
-            pass
-
-    conventions = _references_dir() / "patterns.md"
-    if conventions.is_file():
-        try:
-            context_blocks.append(
-                f"=== {conventions.name} ===\n{conventions.read_text(encoding='utf-8', errors='replace')}"
-            )
-        except OSError:
-            pass
-
-    if not context_blocks:
-        return task_prompt
-    return (
-        "The following context files describe the conventions and the skill "
-        "you are working on. Treat them as authoritative.\n\n"
-        + "\n\n".join(context_blocks)
-        + "\n\n--- task ---\n"
-        + task_prompt
-    )
-
-
-def _opencode_daemon_enabled(config: Dict[str, Any]) -> bool:
-    """True iff the operator asked for the persistent daemon backend.
-
-    Honours ``coding.opencode_daemon.enabled`` (default True) and the legacy
-    ``coding.opencode_daemon_url`` shortcut. Setting either to false forces
-    the per-task subprocess fallback — useful in tests and for ops who run
-    opencode behind a wrapper that does not tolerate long-lived children.
-    """
-    daemon_cfg = (config.get("coding") or {}).get("opencode_daemon") or {}
-    if "enabled" in daemon_cfg:
-        return bool(daemon_cfg["enabled"])
-    return True
-
-
-def _run_opencode(
-    skill_path: Path,
-    task_prompt: str,
-    config: Dict[str, Any],
-    user_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Run opencode against this skill.
-
-    Two backends, picked at call time:
-
-    1. **Daemon** (preferred) — long-lived ``opencode serve`` process kept
-       alive in this PawLia instance. The same session is reused across
-       calls so follow-up questions keep the model's context. This is
-       ``backend = "opencode-daemon"`` in the result.
-
-    2. **One-shot subprocess** — ``opencode run --format json`` per call
-       (legacy, kept as fallback when the daemon is disabled or fails to
-       start). ``backend = "opencode"``.
-
-    Both produce the same output shape: ``ok``, ``output`` (the model's
-    text reply, last 3 kB), ``files_modified`` (paths the agent edited
-    via tools), and ``session_id`` (daemon only) so callers can send
-    follow-ups to the same conversation.
-    """
-    prompt = _build_opencode_prompt(skill_path, task_prompt)
-
-    if _opencode_daemon_enabled(config):
-        try:
-            from pawlia.coding.opencode_daemon import run_task
-            result = run_task(
-                str(skill_path),
-                prompt,
-                user_id=user_id or "_anon",
-                config=config,
-                session_title=f"pawlia:{skill_path.name}",
-            )
-            return result
-        except Exception as exc:
-            # Daemon unavailable / refused to start — fall through to the
-            # one-shot subprocess so a broken daemon never breaks the skill.
-            logger.warning(
-                "opencode daemon failed (%s) — falling back to one-shot run",
-                exc,
-            )
-
-    cmd = [
-        "opencode", "run",
-        "--format", "json",
-        "--dir", str(skill_path),
-        prompt,
-    ]
-
-    result = _run_backend("opencode", cmd)
-
-    # Parse JSON event stream for any tools/files opencode actually edited,
-    # so callers can verify the skill files were touched.
-    edited: list[str] = []
-    text_parts: list[str] = []
-    for line in (result.get("output") or "").splitlines():
-        line = line.strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            evt = json.loads(line)
-        except ValueError:
-            continue
-        evt_type = evt.get("type")
-        part = evt.get("part") or {}
-        if evt_type == "text":
-            t = part.get("text")
-            if isinstance(t, str) and t.strip():
-                text_parts.append(t)
-        elif evt_type == "tool_use":
-            inp = part.get("input") or {}
-            for key in ("filePath", "path", "filepath", "file_path"):
-                val = inp.get(key)
-                if isinstance(val, str) and val:
-                    edited.append(val)
-                    break
-    if edited:
-        result["files_modified"] = sorted(set(edited))
-    if text_parts:
-        # Concatenate assistant text replies so callers see the model's answer.
-        result["output"] = "\n".join(text_parts)[-3000:]
-    if "backend" not in result:
-        result["backend"] = "opencode"
-    return result
-
-
-# ── LLM backend (fallback) ───────────────────────────────────────────
+# ── LLM backend (single in-process path) ────────────────────────────────
 
 def _run_llm(
     skill_path: Path,
     task_prompt: str,
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Direct LLM call for code generation."""
+    """Direct LLM call for code generation.
+
+    Resolves the ``coder`` agent via :class:`LLMFactory` and writes the
+    model's fenced file blocks to ``skill_path``. ``ok`` is derived from
+    the number of files actually written, so a model that only produces
+    text without a parseable fence block is reported as a failure.
+    """
     from pawlia.llm import LLMFactory
 
     factory = LLMFactory(config)
@@ -472,7 +188,16 @@ def _run_llm(
 
 
 def _extract_and_write_files(content: str, skill_path: Path) -> List[str]:
-    """Extract ```filename blocks from LLM output and write them."""
+    """Extract ````<filename>` blocks from LLM output and write them.
+
+    The regex matches the language tag of any fenced code block; we treat
+    it as the filename unless it is a bare language identifier (``python``,
+    ``bash``, …) with no path separator. Filenames without a ``/`` land in
+    ``scripts/`` so a ``fix`` reply that just dumps a single ``.py`` block
+    still ends up where the harness expects it. Paths starting with
+    ``scripts/`` get their parent directories created on demand; paths
+    elsewhere only write if the parent directory already exists.
+    """
     import re
 
     written = []
@@ -487,17 +212,19 @@ def _extract_and_write_files(content: str, skill_path: Path) -> List[str]:
 
         if "/" in filename:
             target = skill_path / filename
+            if not target.parent.is_dir() and not filename.startswith("scripts/"):
+                # Refuse to silently create arbitrary parent dirs.
+                continue
         else:
             target = skill_path / "scripts" / filename
 
-        if target.parent.is_dir() or target.parent.name == "scripts":
+        try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                target.write_text(file_content, encoding="utf-8")
-                written.append(str(target.relative_to(skill_path)))
-                logger.info("Wrote %s", target)
-            except OSError as e:
-                logger.warning("Failed to write %s: %s", target, e)
+            target.write_text(file_content, encoding="utf-8")
+            written.append(str(target.relative_to(skill_path)))
+            logger.info("Wrote %s", target)
+        except OSError as e:
+            logger.warning("Failed to write %s: %s", target, e)
 
     return written
 
@@ -510,12 +237,11 @@ def run_implement(
     config: Dict[str, Any],
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Implement scripts for a skill using the configured coding backend.
+    """Implement scripts for a skill via the configured LLM.
 
-    ``user_id`` pins the opencode session to a specific user, so multiple
-    users / threads sharing the same PawLia process each get their own
-    coding conversation. ``None`` collapses to a single shared session
-    (only safe when the process is single-tenant).
+    ``user_id`` is accepted for backward compatibility (the previous
+    daemon-based backend used it to pin a session per user) and is
+    ignored by the in-process path.
     """
     skill_md_body = _parse_skill_md(skill_path)
     existing_files = _collect_skill_files(skill_path)
@@ -529,15 +255,8 @@ def run_implement(
         mode="implement",
     )
 
-    backend = detect_backend(config)
-    logger.info("Implementing via %s backend: %s", backend, task[:100])
-
-    if backend == "aider":
-        return _run_aider(skill_path, task_prompt, existing_files)
-    elif backend == "opencode":
-        return _run_opencode(skill_path, task_prompt, config, user_id=user_id)
-    else:
-        return _run_llm(skill_path, task_prompt, config)
+    logger.info("Implementing via llm backend: %s", task[:100])
+    return _run_llm(skill_path, task_prompt, config)
 
 
 def run_fix(
@@ -547,10 +266,10 @@ def run_fix(
     config: Dict[str, Any],
     user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Fix a broken skill using the configured coding backend.
+    """Fix a broken skill via the configured LLM.
 
-    ``user_id`` is forwarded to the opencode daemon so the fix session
-    is owned by the right user (or shared when ``None``).
+    ``user_id`` is accepted for backward compatibility and ignored by the
+    in-process path.
     """
     skill_md_body = _parse_skill_md(skill_path)
     existing_files = _collect_skill_files(skill_path)
@@ -572,12 +291,5 @@ def run_fix(
         failing_command=command,
     )
 
-    backend = detect_backend(config)
-    logger.info("Fixing via %s backend: %s", backend, error[:100])
-
-    if backend == "aider":
-        return _run_aider(skill_path, task_prompt, existing_files)
-    elif backend == "opencode":
-        return _run_opencode(skill_path, task_prompt, config, user_id=user_id)
-    else:
-        return _run_llm(skill_path, task_prompt, config)
+    logger.info("Fixing via llm backend: %s", error[:100])
+    return _run_llm(skill_path, task_prompt, config)

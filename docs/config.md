@@ -176,7 +176,7 @@ agents:
   skill_runner: fast    # default for all skill sub-agents
   vision: vision        # used when the user sends an image
   compiler: compiler    # model for compiling SKILL.md → workflow.yaml
-  coder: smart          # coding backend model (llm fallback only)
+  coder: smart          # model for skill-creator implement/fix (in-process)
   skills:               # per-skill overrides
     searxng: groq-fast,fast
     browser: smart,fast
@@ -192,7 +192,7 @@ If an agent value contains a comma-separated list, models are tried in order whe
 | `skill_runner` | `agents.skill_runner` → `agents.chat` → `agents.default` |
 | `vision` | `agents.vision` → `agents.chat` → `agents.default` |
 | `compiler` | `agents.compiler` → `agents.skill_runner` → `agents.chat` → `agents.default` |
-| `coder` | `agents.coder` → `agents.default` |
+| `coder` | `agents.coder` → first defined model |
 | `skill.<name>` | `agents.skills.<name>` → `agents.skill_runner` → `agents.chat` → `agents.default` |
 
 LLMs with identical configuration are reused across agent types — no redundant connections.
@@ -556,41 +556,18 @@ Manual commands via the memory skill:
 
 ## Coding Backend
 
-Controls the coding backend used by `skill-creator implement` and `skill-creator fix` for automated script generation and debugging.
+Coding for `skill-creator implement` and `skill-creator fix` runs **in-process**
+via the `coder` agent. Set `agents.coder` to a key in `models:` to choose the
+model:
 
 ```yaml
-coding:
-  backend: auto             # auto | opencode | aider | llm
+agents:
+  coder: smart   # model key from `models:` used to write/fix skill scripts
 ```
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `backend` | `auto` | `auto` picks the first available (opencode > aider > llm), or set explicitly |
-
-Per-skill override:
-
-```yaml
-skill-config:
-  skill-creator:
-    coding_backend: opencode   # force opencode for all skill-creator operations
-```
-
-The easiest way to switch is the config skill, which also installs the CLI if
-it is missing:
-
-```
-config.py coding --backend opencode               # global
-config.py coding --backend aider --scope skill-creator
-config.py coding                                   # show current + availability
-```
-
-The `agents.coder` model is used by the LLM fallback backend only. opencode
-and aider each use their own model configuration (opencode: `opencode auth
-login` / project config; aider: its own model setting) — PawLia does not
-pass `--model` or forward any provider API key to either CLI, so each backend
-authenticates against the providers it has been configured for. opencode and
-aider are bundled in the production image. See
-[skills.md](skills.md#coding-backend) for details.
+There is no CLI backend to install or switch. Inspect the resolved
+configuration with `config.py coding` (config skill). See
+[skills.md](skills.md#backend) for details.
 
 ## Skill Installation
 

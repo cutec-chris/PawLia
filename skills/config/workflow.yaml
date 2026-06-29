@@ -166,15 +166,7 @@ workflows:
       exit_code: 0
   - id: coding_show
     command: python {scripts_dir}/config.py coding
-    description: Zeigt das aktuelle Coding‑Backend (skill-creator) und ob opencode/aider
-      installiert sind
-    status_desc: Zeige Coding‑Backend
-    verify:
-      exit_code: 0
-  - id: coding_set
-    command: python {scripts_dir}/config.py coding --backend {backend}
-    description: Setzt das Coding‑Backend (opencode|aider|llm|auto) und installiert
-      die CLI, falls sie fehlt
-    status_desc: Setze Coding‑Backend auf {backend}
+    description: Zeigt die aktuelle Coding‑Konfiguration (in‑process über agents.coder)
+    status_desc: Zeige Coding‑Konfiguration
     verify:
       exit_code: 0

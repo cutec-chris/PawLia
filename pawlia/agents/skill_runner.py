@@ -197,12 +197,11 @@ class SkillRunnerAgent(BaseAgent):
 
         # Fast path: if this is the skill-creator and the query looks like a
         # "implement/fix <skill>" instruction, hand it straight to
-        # ``creator.py implement|fix`` (which runs the configured coding
-        # backend, e.g. opencode) instead of letting the sub-agent LLM
-        # iterate manually for 10+ tool calls. Returns ``None`` for anything
-        # the pattern does not confidently match (config queries, sync ops,
-        # credential management, "validate"/"list" requests, …) so the
-        # normal LLM loop handles those.
+        # ``creator.py implement|fix`` (which runs the in-process LLM coding
+        # path) instead of letting the sub-agent LLM iterate manually for
+        # 10+ tool calls. Returns ``None`` for anything the pattern does not
+        # confidently match (config queries, sync ops, credential management,
+        # "validate"/"list" requests, …) so the normal LLM loop handles those.
         direct = await self._try_direct_coding_backend(query)
         if direct is not None:
             return direct
@@ -389,8 +388,8 @@ class SkillRunnerAgent(BaseAgent):
             return None
 
         # Build the creator.py invocation. ``--task``/`--error`` get the
-        # full sentence so the coding backend (opencode/aider/llm) sees
-        # the same context the sub-agent would have assembled manually.
+        # full sentence so the in-process LLM coding path sees the same
+        # context the sub-agent would have assembled manually.
         cmd = [
             sys.executable, creator_py, mode, "--name", name,
         ]
@@ -411,9 +410,9 @@ class SkillRunnerAgent(BaseAgent):
             except Exception as exc:
                 self.logger.debug("on_step scheduling failed: %s", exc)
 
-        # creator.py + opencode typically take 30–120s. Run in a worker
-        # thread so the asyncio event loop stays responsive (Matrix
-        # messages, heartbeats, other user requests).
+        # creator.py + the in-process LLM call typically take 5–60s. Run
+        # in a worker thread so the asyncio event loop stays responsive
+        # (Matrix messages, heartbeats, other user requests).
         try:
             proc = await asyncio.to_thread(
                 subprocess.run,
@@ -475,8 +474,9 @@ class SkillRunnerAgent(BaseAgent):
             )
             return None
 
+        backend_label = "LLM" if backend == "llm" else f"**{backend}**-Backend"
         summary_lines = [
-            f"Skill **{name}** aktualisiert via **{backend}**-Backend.",
+            f"Skill **{name}** aktualisiert via {backend_label}.",
         ]
         if all_files:
             listing = ", ".join(f"`{f}`" for f in all_files[:10])

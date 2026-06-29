@@ -903,10 +903,10 @@ def cmd_compile(args):
     }, ensure_ascii=False))
 
 
-# ── Implement / Fix (coding backends) ──────────────────────────────────
+# ── Implement / Fix (in-process coding LLM) ────────────────────────────
 
 def _load_root_config() -> dict:
-    """Load the root config.yaml for coding backend selection."""
+    """Load the root config.yaml so ``pawlia.coding`` can resolve the coder agent."""
     config_path = os.environ.get("PAWLIA_CONFIG_PATH")
     candidates = [Path(config_path)] if config_path else []
     candidates.extend([PROJECT_ROOT / "config.yaml", PROJECT_ROOT / "config.yml"])
@@ -922,7 +922,7 @@ def _load_root_config() -> dict:
 
 
 def _output_coding_result(name: str, result: dict):
-    """Print JSON result for coding backends and exit on failure."""
+    """Print JSON result for the in-process coding LLM and exit on failure."""
     print(json.dumps({
         "success": result.get("ok", False),
         "name": name,
@@ -949,7 +949,7 @@ def _find_and_load_skill(name: str) -> Path:
 
 
 def cmd_implement(args):
-    """Implement skill scripts using a coding backend (aider/opencode/llm)."""
+    """Implement skill scripts using the in-process coding LLM."""
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
     from pawlia.coding import run_implement
@@ -963,7 +963,7 @@ def cmd_implement(args):
 
 
 def cmd_fix(args):
-    """Fix a broken skill script using a coding backend."""
+    """Fix a broken skill script using the in-process coding LLM."""
     if str(PROJECT_ROOT) not in sys.path:
         sys.path.insert(0, str(PROJECT_ROOT))
     from pawlia.coding import run_fix
@@ -1020,12 +1020,12 @@ def main():
     p_test.add_argument("--timeout", type=int, default=60, help="Harness timeout in seconds (default: 60)")
 
     # implement
-    p_impl = sub.add_parser("implement", help="Implement skill scripts via coding backend (aider/opencode/llm)")
+    p_impl = sub.add_parser("implement", help="Implement skill scripts via the in-process coding LLM")
     p_impl.add_argument("--name", required=True, help="Skill name")
     p_impl.add_argument("--task", help="Task description (default: implement all scripts)")
 
     # fix
-    p_fix = sub.add_parser("fix", help="Fix a broken skill script via coding backend")
+    p_fix = sub.add_parser("fix", help="Fix a broken skill script via the in-process coding LLM")
     p_fix.add_argument("--name", required=True, help="Skill name")
     p_fix.add_argument("--error", help="Error output from the failing command")
     p_fix.add_argument("--failed-cmd", help="The command that failed")

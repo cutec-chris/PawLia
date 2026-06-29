@@ -18,14 +18,20 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   for repair. `skill-creator` itself is exempt (no self-repair loop). Detection
   reads the tool *result text*, since the bash tool reports `ok=True` even on a
   non-zero exit.
-- Coding-backend selection for the skill-creator is now first-class. The new
-  `config.py coding` command (config skill) sets `coding.backend`
-  (`opencode`/`aider`/`llm`/`auto`) — globally or scoped to the skill-creator
-  via `--scope skill-creator` — and **auto-installs the chosen CLI if missing**
-  (`opencode` via npm, `aider` via pip). `config.py coding` without `--backend`
-  shows the current backend and CLI availability.
-- Both coding CLIs are bundled in the images — `opencode` in the Alpine image,
-  `opencode` + `aider` in the Debian VoIP image (the production build).
+
+### Removed
+- The `opencode` and `aider` coding backends and the long-lived opencode
+  daemon are gone. Coding for the skill-creator now runs in-process via the
+  `coder` agent from `agents.coder` (falls back to the first defined
+  model). `pawlia/coding/opencode_daemon.py`, the shadow `pawlia/coding.py`,
+  the `npm install -g opencode-ai` build steps in both Dockerfiles, the
+  `config.py coding --backend` / `--scope` / `--no-install` flags, and
+  the `coding:` / `skill-config.skill-creator.coding_backend` config keys
+  are all removed. `config.py coding` is kept as an info-only command
+  that reports the resolved `coder` agent and model. Set
+  `agents.coder: <model-key>` in `config.yaml` to choose the model.
+  Previously shipped entry under `[Unreleased] › Added` (opencode/aider
+  bundling) is reverted by this entry.
 
 ### Changed
 - **Workspace git support removed entirely.** The auto-commit + daily/weekly
