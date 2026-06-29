@@ -37,19 +37,32 @@ NotifyFn = Callable[[str, str], Coroutine[Any, Any, None]]
 # is nothing worth a notification (e.g. a thunderstorm monitor on a calm day).
 SILENT_SENTINEL = "PAWLIA_SILENT"
 
+# Markers that mean "say nothing this run". The canonical one is PAWLIA_SILENT
+# (documented in the automation skill for scripts), but LLM instruction jobs
+# naturally emit a bare "SILENT" instead. Accept both, case-insensitively, so a
+# monitor stays quiet regardless of which form actually reaches us — otherwise
+# the literal token gets posted every run (the recurring "SILENT alert" bug seen
+# on the Gewitter and Bahn monitors).
+_SILENT_MARKERS = frozenset({SILENT_SENTINEL, "SILENT"})
+
+
+def _is_silent_sentinel(output: "str | None") -> bool:
+    """True when *output* is nothing but a bare silent marker."""
+    return bool(output) and output.strip().upper() in _SILENT_MARKERS
+
 
 def _strip_sentinel(output: str) -> str:
     """Return the output with the silent sentinel removed.
 
-    Empty result means "say nothing". A bare sentinel (optionally surrounded by
-    whitespace) collapses to empty so the job stays silent.
+    Empty result means "say nothing". A bare marker (PAWLIA_SILENT or SILENT,
+    optionally surrounded by whitespace, any case) collapses to empty so the job
+    stays silent. A marker mixed with other text is left untouched.
     """
     if output is None:
         return ""
-    stripped = output.strip()
-    if stripped == SILENT_SENTINEL:
+    if _is_silent_sentinel(output):
         return ""
-    return stripped
+    return output.strip()
 
 
 def _success_notification(notify: "bool | str", output: str) -> Optional[str]:
@@ -63,6 +76,12 @@ def _success_notification(notify: "bool | str", output: str) -> Optional[str]:
       - ``"output_only"``→ send only when there is real output (silent on empty)
       - ``"error"`` / ``False`` → nothing on success
     """
+    if _is_silent_sentinel(output):
+        # An explicit "stay silent" wins over the job's notify policy: a monitor
+        # that reports "nothing to report" must never ping, even under
+        # notify=True (the default for LLM instruction jobs).
+        return None
+
     body = _strip_sentinel(output)
 
     if notify is True:

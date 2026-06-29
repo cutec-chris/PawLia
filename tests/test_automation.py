@@ -281,8 +281,11 @@ def test_create_job_ids_are_unique():
     ("   \n ", ""),
     (SILENT_SENTINEL, ""),
     (f"  {SILENT_SENTINEL}  ", ""),
+    ("SILENT", ""),            # bare word an LLM job emits
+    ("  silent\n", ""),        # case-insensitive + whitespace
     ("Gewitter um 16:00", "Gewitter um 16:00"),
     (f"{SILENT_SENTINEL} aber doch was", f"{SILENT_SENTINEL} aber doch was"),  # only a *bare* marker silences
+    ("SILENT, aber doch was", "SILENT, aber doch was"),  # not a bare marker
 ])
 def test_strip_sentinel(raw, expected):
     assert _strip_sentinel(raw) == expected
@@ -291,8 +294,11 @@ def test_strip_sentinel(raw, expected):
 @pytest.mark.parametrize("notify,output,expected", [
     (True, "", "erledigt"),            # always deliver; empty becomes erledigt
     (True, "hi", "hi"),
+    (True, "SILENT", None),            # explicit silence wins over notify=True (LLM job)
+    (True, SILENT_SENTINEL, None),     # ... same for the canonical marker
     ("output_only", "", None),         # silent on empty — the monitor case
     ("output_only", SILENT_SENTINEL, None),
+    ("output_only", "SILENT", None),   # bare LLM marker also silences
     ("output_only", "Warnung", "Warnung"),
     ("error", "hi", None),             # nothing on success
     (False, "hi", None),
