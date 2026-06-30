@@ -17,8 +17,11 @@ Run tests via the venv (never bare `pytest` or system Python):
 
 ## Most Important Rules
 
-- **Never write to a git remote from within the assistant.** The workspace-git feature was
-  removed after a security incident — see `vision.md` for context. Do not re-introduce it.
+- **Never push to a git remote on your own initiative.** Push only when the user
+  explicitly instructs it in the current turn. The `github` and `codeberg` remotes
+  are off-limits — they are updated exclusively via `scripts/release_public.sh` after
+  a squash-merge to `main`. The `origin` remote (local ssh) may be pushed to on
+  explicit user instruction.
 - **Skills over core changes.** New capabilities belong in `skills/`, not in the scheduler
   or agent core, unless they are cross-cutting (security, correctness).
 - **Obsidian-compatible workspace.** Workspace files must stay readable by plain Obsidian.
