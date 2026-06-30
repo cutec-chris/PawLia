@@ -32,7 +32,7 @@ if git merge-base --is-ancestor "$SRC_BRANCH" main; then
 fi
 
 git merge --squash "$SRC_BRANCH"
-git commit -m "$MSG"
+git commit --allow-empty -m "$MSG"
 
 echo "Squashed $SRC_BRANCH -> main as single commit:"
 git log -1 --oneline
