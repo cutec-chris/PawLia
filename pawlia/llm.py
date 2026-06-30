@@ -1356,7 +1356,7 @@ class LLMFactory:
                 client_kwargs={"timeout": timeout},
             )
             if keep_alive is not None:
-                kwargs["keep_alive"] = keep_alive
+                kwargs["keep_alive"] = str(keep_alive)
             if num_ctx is not None:
                 kwargs["num_ctx"] = num_ctx
             llm = ChatOllama(**kwargs)
@@ -1476,6 +1476,13 @@ class LLMFactory:
         if name and name in self.providers:
             return self.providers[name]
         if self.providers:
+            available = ", ".join(sorted(self.providers))
+            logger.warning(
+                "Model references unknown provider '%s' (known: %s); "
+                "falling back to '%s'. Define it under providers: in config.yaml "
+                "to silence this warning.",
+                name, available, next(iter(self.providers)),
+            )
             return next(iter(self.providers.values()))
         return {"apiBase": "http://localhost:11434/v1", "apiKey": "none"}
 

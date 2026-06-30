@@ -765,3 +765,119 @@ def test_probe_disabled_falls_back_to_heuristic(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr("pawlia.llm.probe_context_window", fail)
     factory = LLMFactory(config)
     assert factory.context_size_for_model("mystery") == 8192
+
+
+# ---- _get_provider: unknown provider name --------------------------------
+
+def test_get_provider_warns_on_unknown_name(caplog):
+    """An unknown provider name must log a warning and fall back to the first
+    provider. The old behaviour was completely silent, which is what let the
+    deepseek4flash/opencodezen bug hide for so long."""
+    import logging
+    config = _base_config()
+    config["providers"]["second"] = {
+        "backend": "pawlia",
+        "apiBase": "http://second.test/v1",
+        "apiKey": "y",
+    }
+
+    factory = LLMFactory(config)
+    with caplog.at_level(logging.WARNING, logger="pawlia.llm"):
+        provider = factory._get_provider("does_not_exist")
+
+    assert provider["apiBase"] == "http://example.test/v1"
+    assert any(
+        "does_not_exist" in rec.message and "falling back" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_get_provider_known_name_no_warning(caplog):
+    """Sanity: a known provider name must not log the fallback warning."""
+    import logging
+    factory = LLMFactory(_base_config())
+    with caplog.at_level(logging.WARNING, logger="pawlia.llm"):
+        provider = factory._get_provider("test")
+
+    assert provider["apiBase"] == "http://example.test/v1"
+    assert not any("falling back" in rec.message for rec in caplog.records)
+
+
+# ---- _build: keep_alive is always a string for ChatOllama -----------------
+
+def test_build_coerces_keep_alive_to_string(monkeypatch):
+    """Ollama's native /api/chat (and Pydantic-based emulations) require
+    keep_alive as a string. PyYAML parses `keepAlive: 1800` as int, and
+    `str(1800)` → "1800" is the canonical wire form — verify _build does
+    the coercion so the value never lands as int/float in the body."""
+    captured: Dict[str, Any] = {}
+
+    class _StubOllama:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("pawlia.llm.ChatOllama", _StubOllama)
+
+    config = {
+        "context-probe": {"enabled": False},
+        "providers": {
+            "ollama": {
+                "backend": "pawlia",
+                "apiBase": "http://localhost:11434/v1",
+                "apiKey": "ollama",
+                "keepAlive": 1800,
+            }
+        },
+        "models": {
+            "stub": {
+                "model": "stub-model",
+                "provider": "ollama",
+                "temperature": 0.3,
+            }
+        },
+        "agents": {"default": "stub"},
+    }
+
+    factory = LLMFactory(config)
+    factory._build(config["models"]["stub"])
+
+    ka = captured.get("keep_alive")
+    assert isinstance(ka, str), f"keep_alive must be str, got {type(ka).__name__}: {ka!r}"
+    assert ka == "1800"
+
+
+def test_build_passes_through_string_keep_alive(monkeypatch):
+    """A string keep_alive (e.g. "30m", "-1") must survive the coercion
+    intact — only its type is normalised, not its value."""
+    captured: Dict[str, Any] = {}
+
+    class _StubOllama:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("pawlia.llm.ChatOllama", _StubOllama)
+
+    config = {
+        "context-probe": {"enabled": False},
+        "providers": {
+            "ollama": {
+                "backend": "pawlia",
+                "apiBase": "http://localhost:11434/v1",
+                "apiKey": "ollama",
+                "keepAlive": "-1",
+            }
+        },
+        "models": {
+            "stub": {
+                "model": "stub-model",
+                "provider": "ollama",
+                "temperature": 0.3,
+            }
+        },
+        "agents": {"default": "stub"},
+    }
+
+    factory = LLMFactory(config)
+    factory._build(config["models"]["stub"])
+
+    assert captured["keep_alive"] == "-1"
