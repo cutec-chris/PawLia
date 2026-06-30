@@ -8,7 +8,7 @@ Process: add changes under **[Unreleased]** as you go; on a `release/*` branch,
 rename it to the new version with a date and bump `pawlia.__version__`.
 See `agents.md` › "Versioning & Releases (git-flow)".
 
-## [Unreleased]
+## [0.1.1] - 2026-06-30
 ### Added
 - Skill runner detects a skill whose **own script keeps crashing** with the same
   traceback (same file:line:exception, even across varied surrounding commands)
@@ -196,6 +196,18 @@ See `agents.md` › "Versioning & Releases (git-flow)".
 - Model blacklist is reason-aware — a model that fails for one capability
   (e.g. vision) is no longer blocked for unrelated uses.
 - Context-size heuristic knows the glm model family (128K).
+- LLMFactory: `keep_alive` is now coerced to `str` before being passed to
+  `ChatOllama`. Ollama's native `/api/chat` (api.Duration.UnmarshalJSON in
+  ollama/ollama) accepts both int and string, but Pydantic-typed emulations
+  (e.g. the FastAPI ollama-bridge used in some deployments) reject int with
+  HTTP 422. The canonical wire form is a duration string, so the coercion
+  happens client-side and is transparent to the wire protocol.
+- LLMFactory: when a model references a provider that is not defined under
+  `providers:` in `config.yaml`, `_get_provider` now logs a warning naming
+  the unknown provider and the available ones, instead of silently
+  falling back to the first provider. The silent fallback was masking
+  typos like `provider: opencodezen` (when only `opencodego` is defined) for
+  months.
 
 ## [0.1.0] - 2026-06-04
 ### Added
@@ -213,5 +225,5 @@ See `agents.md` › "Versioning & Releases (git-flow)".
   via the provider-appropriate hint, fixing array-collapse on strict
   OpenAI-compatible providers.
 
-[Unreleased]: about:blank
+[0.1.1]: about:blank
 [0.1.0]: about:blank
