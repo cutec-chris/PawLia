@@ -21,12 +21,6 @@ It runs at home, handles sensitive data, and must be trustworthy above all else.
 
 ## Design Decisions (with rationale)
 
-### No in-app workspace git sync
-The workspace-git feature was removed after an incident where a hallucinated remote URL
-caused a user's vault to be force-pushed to a public GitHub repo. Out-of-band sync
-(syncthing) is the prescribed alternative — PawLia never touches git in the workspace.
-**Do not re-introduce any feature that writes to a git remote from within the assistant.**
-
 ### Obsidian vault as canonical workspace format
 The workspace (`session/<user>/workspace/`) is a native Obsidian vault.
 - Events: Full Calendar frontmatter
@@ -34,15 +28,6 @@ The workspace (`session/<user>/workspace/`) is a native Obsidian vault.
 - Dream Wiki: interlinked topic pages
 
 New workspace features should stay compatible with plain Obsidian — no proprietary formats.
-
-### Coding: single in-process backend
-Coding for the skill-creator runs in-process via the `coder` agent
-(`agents.coder`, falls back to the first defined model). There is no CLI
-backend, no long-lived daemon, and no auto-detection — the previous
-`opencode` / `aider` subprocesses and the opencode daemon were removed
-because they ran against their own opaque model configuration and never
-used PawLia's configured `coder` model, so the configured chain was a
-lie. Choose the coding model by setting `agents.coder` in `config.yaml`.
 
 ### Skills over core changes
 New functionality belongs in a skill (`skills/user/` or bundled skills), not in core
